@@ -7,12 +7,9 @@ on:
       - '.github/workflows/build.yml'
       - 'requirements.txt'
       - 'build.py'
-      - 'build_nuitka.py'
-      - 'bilibili_gui.py'
+      - 'main.py'
       - 'overwatch_drops_miner/**'
-      - '!overwatch_drops_miner/cli.py'
       - 'img/app.ico'
-      - 'img/app.icns'
   workflow_dispatch:
     inputs:
       release:
@@ -69,7 +66,7 @@ jobs:
           echo "is_prerelease=$is_prerelease" >> "$GITHUB_OUTPUT"
 
   build-windows:
-    name: Windows GUI (Nuitka)
+    name: Windows GUI (PyInstaller onefile)
     needs: prepare
     runs-on: windows-latest
     steps:
@@ -87,88 +84,42 @@ jobs:
           "@ | Set-Content -Path "overwatch_drops_miner/_version.py" -Encoding UTF8
 
       - uses: actions/setup-python@v5
-        id: setup-python
         with:
           python-version: '3.12'
           cache: 'pip'
 
-      - name: Cache Nuitka and compiler output
+      - name: Cache PyInstaller
         uses: actions/cache@v4
         with:
           path: |
-            ~\AppData\Local\Nuitka
-            ~\AppData\Local\ccache
-            dist-nuitka\*.build
-          key: ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-nuitka-gui-${{ needs.prepare.outputs.version }}-${{ hashFiles('requirements.txt', 'build_nuitka.py', 'bilibili_gui.py', 'overwatch_drops_miner/**/*.py') }}
+            ~\AppData\Local\pyinstaller
+          key: ${{ runner.os }}-pyinstaller-${{ hashFiles('requirements.txt', 'build.py') }}
           restore-keys: |
-            ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-nuitka-gui-
-            ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-nuitka-
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --disable-pip-version-check -r requirements.txt
-          python -m pip install --disable-pip-version-check nuitka ordered-set zstandard
-
-      - name: Build with Nuitka
-        run: python build_nuitka.py --target gui
-
-      - name: Package ZIP
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path "dist-nuitka/Bilibili Drops Miner" -DestinationPath "dist/bilibili-drops-miner-win-${{ needs.prepare.outputs.version }}.zip" -CompressionLevel Fastest -Force
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: bilibili-drops-miner-win
-          path: dist/bilibili-drops-miner-win-*.zip
-          retention-days: 30
-
-  build-macos:
-    name: macOS GUI (PyInstaller)
-    needs: prepare
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Generate version file
-        shell: bash
-        run: |
-          cat > overwatch_drops_miner/_version.py <<EOF
-          APP_VERSION = "${{ needs.prepare.outputs.version }}"
-          UPDATE_CHANNEL = "${{ needs.prepare.outputs.update_channel }}"
-          REPOSITORY_URL = "https://github.com/mi0e/OverwatchDropsMiner"
-          LATEST_RELEASE_API = "https://api.github.com/repos/mi0e/OverwatchDropsMiner/releases/latest"
-          RELEASES_URL = "https://github.com/mi0e/OverwatchDropsMiner/releases/latest"
-          EOF
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: 'pip'
+            ${{ runner.os }}-pyinstaller-
 
       - name: Install dependencies
         run: |
           python -m pip install --disable-pip-version-check -r requirements.txt
           python -m pip install --disable-pip-version-check pyinstaller
 
-      - name: Build app bundle with PyInstaller
-        run: python build.py --target gui
+      - name: Build with PyInstaller
+        run: python build.py
 
-      - name: Package ZIP (ditto preserves bundle symlinks)
-        run: ditto -c -k --keepParent "dist/Bilibili Drops Miner.app" "dist/bilibili-drops-miner-mac-${{ needs.prepare.outputs.version }}.zip"
+      - name: Package ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/OverwatchDropsMiner.exe" -DestinationPath "dist/OverwatchDropsMiner-win-${{ needs.prepare.outputs.version }}.zip" -CompressionLevel Fastest -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bilibili-drops-miner-mac
-          path: dist/bilibili-drops-miner-mac-*.zip
+          name: OverwatchDropsMiner-win
+          path: dist/OverwatchDropsMiner-win-*.zip
           retention-days: 30
 
   release:
     name: Publish release
-    needs: [prepare, build-windows, build-macos]
+    needs: [prepare, build-windows]
     if: github.event_name == 'workflow_dispatch' && (github.event.inputs.release == 'stable' || github.event.inputs.release == 'preview')
     runs-on: ubuntu-latest
     permissions:
@@ -176,7 +127,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: bilibili-drops-miner-*
+          pattern: OverwatchDropsMiner-win
           path: dist/
           merge-multiple: true
 
