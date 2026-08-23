@@ -202,9 +202,28 @@ def build_stylesheet(t: ThemeTokens) -> str:
         }}
         QSpinBox:focus {{ border-color: {t.accent}; }}
         QSpinBox::up-button, QSpinBox::down-button {{
-            background: {t.neutral}; border: 0; border-radius: 3px; width: 18px;
+            background: {t.hover}; border: 1px solid {t.neutral_border_hover};
+            border-radius: 3px; width: 18px; margin: 2px;
         }}
-        QSpinBox::up-button:hover, QSpinBox::down-button:hover {{ background: {t.neutral_hover}; }}
+        QSpinBox::up-button {{ subcontrol-origin: border; subcontrol-position: top right; }}
+        QSpinBox::down-button {{ subcontrol-origin: border; subcontrol-position: bottom right; }}
+        QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+            background: {t.neutral_border_hover};
+        }}
+        QSpinBox::up-arrow {{
+            width: 0; height: 0; border-left: 4px solid transparent;
+            border-right: 4px solid transparent; border-bottom: 5px solid {t.text_dim};
+        }}
+        QSpinBox::up-arrow:hover {{
+            border-bottom: 5px solid {t.text};
+        }}
+        QSpinBox::down-arrow {{
+            width: 0; height: 0; border-left: 4px solid transparent;
+            border-right: 4px solid transparent; border-top: 5px solid {t.text_dim};
+        }}
+        QSpinBox::down-arrow:hover {{
+            border-top: 5px solid {t.text};
+        }}
 
         QPlainTextEdit {{
             background: {t.input_bg}; color: {t.text};

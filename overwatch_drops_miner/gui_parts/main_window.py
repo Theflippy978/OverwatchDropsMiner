@@ -235,8 +235,6 @@ class MinerGUI(QMainWindow):
         panel.add_via_browser.connect(self.auto_fetch_cookie)
         panel.remove_requested.connect(self.remove_account)
         panel.rename_requested.connect(self.rename_account)
-        panel.start_requested.connect(self.start_account)
-        panel.stop_requested.connect(self.stop_account)
 
     # ---------- theme ----------
 
@@ -524,7 +522,7 @@ class MinerGUI(QMainWindow):
         if self._current_account_id == account_id:
             self._current_account_id = None
             self.task_text.setPlainText("未选择账号")
-            self.watch_info_label.setText("本次有效观看: -- | 掉宝进度: -- | 预计剩余: --")
+            self.watch_info_label.setText("状态: 待机 | 本次有效观看: -- | 预计剩余: --")
             self.task_progress_bar.setValue(0)
         self._refresh_account_list()
         self._refresh_log_text()
@@ -613,7 +611,7 @@ class MinerGUI(QMainWindow):
 
         account_id = self._current_account_id
         if account_id is None:
-            self.watch_info_label.setText("本次有效观看: -- | 掉宝进度: -- | 预计剩余: --")
+            self.watch_info_label.setText("状态: 待机 | 本次有效观看: -- | 预计剩余: --")
             self.task_progress_bar.setValue(0)
             return
         tracker = self.miner_manager.tracker(account_id)

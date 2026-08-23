@@ -24,30 +24,21 @@ def format_watch_estimate(
     limit_value: int | float,
     running: bool,
 ) -> str:
-    """本地有效观看时长 + 掉宝进度 + 预计剩余时间的粗略估算行。"""
+    """本地有效观看时长 + 预计剩余时间的粗略估算行（掉宝进度由进度条展示）。"""
     elapsed_text = format_seconds_zh(elapsed_seconds)
-    if float(limit_value) > 0:
-        percent = max(
-            0, min(100, int(float(cur_value) / float(limit_value) * 100))
-        )
-        if percent >= 100:
-            return (
-                f"本次有效观看: {elapsed_text} | 掉宝进度: 100% | 预计剩余: 已达标"
-            )
+    state = "挂宝中" if running else "已暂停"
+    if float(limit_value) > 0 and float(cur_value) < float(limit_value):
         remaining = estimate_remaining_seconds(
             elapsed_seconds, cur_value, limit_value
         )
-        if remaining is None:
-            remaining_text = "--"
-        else:
-            remaining_text = format_seconds_zh(remaining)
-        state = "挂宝中" if running else "已暂停"
+        remaining_text = "--" if remaining is None else format_seconds_zh(remaining)
         return (
             f"状态: {state} | 本次有效观看: {elapsed_text} | "
-            f"掉宝进度: {percent}% | 预计剩余: {remaining_text}"
+            f"预计剩余: {remaining_text}"
         )
-    state = "挂宝中" if running else "已暂停"
-    return f"状态: {state} | 本次有效观看: {elapsed_text} | 掉宝进度: -- | 预计剩余: --"
+    if float(limit_value) > 0:
+        return f"状态: {state} | 本次有效观看: {elapsed_text} | 预计剩余: 已达标"
+    return f"状态: {state} | 本次有效观看: {elapsed_text} | 预计剩余: --"
 
 
 def format_live_watch_time_progress(

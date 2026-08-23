@@ -223,7 +223,7 @@ def build_main_window_layout(
     task_header.addWidget(make_button("手动刷新", "neutral", callbacks.refresh_tasks))
     task_layout.addLayout(task_header)
 
-    watch_info_label = QLabel("本次有效观看: -- | 掉宝进度: -- | 预计剩余: --")
+    watch_info_label = QLabel("状态: 待机 | 本次有效观看: -- | 预计剩余: --")
     watch_info_label.setObjectName("dimLabel")
     watch_info_label.setTextFormat(Qt.PlainText)
     task_layout.addWidget(watch_info_label)

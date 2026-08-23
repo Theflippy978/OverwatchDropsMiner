@@ -35,8 +35,6 @@ class AccountPanel(QFrame):
     add_via_browser = Signal()
     remove_requested = Signal(str)
     rename_requested = Signal(str)
-    start_requested = Signal(str)
-    stop_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -64,21 +62,13 @@ class AccountPanel(QFrame):
         self.add_button = make_button("添加账号", "primary", self._show_add_menu)
         layout.addWidget(self.add_button)
 
-        action_row1 = QHBoxLayout()
-        action_row1.setSpacing(6)
-        self.start_button = make_button("启动", "success", self._emit_start)
-        self.stop_button = make_button("停止", "danger", self._emit_stop)
-        action_row1.addWidget(self.start_button, 1)
-        action_row1.addWidget(self.stop_button, 1)
-        layout.addLayout(action_row1)
-
-        action_row2 = QHBoxLayout()
-        action_row2.setSpacing(6)
+        action_row = QHBoxLayout()
+        action_row.setSpacing(6)
         self.rename_button = make_button("备注", "neutral", self._emit_rename)
         self.remove_button = make_button("删除", "danger-outline", self._emit_remove)
-        action_row2.addWidget(self.rename_button, 1)
-        action_row2.addWidget(self.remove_button, 1)
-        layout.addLayout(action_row2)
+        action_row.addWidget(self.rename_button, 1)
+        action_row.addWidget(self.remove_button, 1)
+        layout.addLayout(action_row)
 
         self._add_menu = QMenu(self)
         self._add_menu.addAction("扫码登录", self.add_via_qr.emit)
@@ -86,7 +76,6 @@ class AccountPanel(QFrame):
         self._add_menu.addAction("浏览器自动捕获", self.add_via_browser.emit)
 
         self._account_ids: list[str] = []
-        self._running_ids: set[str] = set()
 
     # ---------- public API ----------
 
@@ -95,11 +84,8 @@ class AccountPanel(QFrame):
         self.list_widget.blockSignals(True)
         self.list_widget.clear()
         self._account_ids = []
-        self._running_ids.clear()
         for item in items:
             self._account_ids.append(item.account_id)
-            if item.running:
-                self._running_ids.add(item.account_id)
             widget_item = QListWidgetItem(item.remark or f"账号 {item.account_id[:8]}")
             widget_item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
             if item.running:
@@ -116,7 +102,7 @@ class AccountPanel(QFrame):
         elif items:
             self.list_widget.setCurrentRow(0)
         else:
-            self._update_action_buttons(None, False)
+            self._update_action_buttons(None)
 
     def select_account(self, account_id: str) -> None:
         row = self._account_ids.index(account_id) if account_id in self._account_ids else -1
@@ -138,13 +124,10 @@ class AccountPanel(QFrame):
         if row < 0:
             return
         if running:
-            self._running_ids.add(account_id)
             self.list_widget.item(row).setForeground(QColor("#22c55e"))
             self.list_widget.item(row).setToolTip("运行中")
         else:
-            self._running_ids.discard(account_id)
             self.list_widget.item(row).setToolTip("未运行")
-        self._update_action_buttons(account_id, running)
 
     # ---------- internals ----------
 
@@ -154,20 +137,8 @@ class AccountPanel(QFrame):
     def _on_current_changed(self, current: QListWidgetItem, _previous) -> None:
         account_id = self.current_account_id()
         if account_id:
-            self._update_action_buttons(
-                account_id, account_id in self._running_ids
-            )
+            self._update_action_buttons(account_id)
             self.account_selected.emit(account_id)
-
-    def _emit_start(self) -> None:
-        account_id = self.current_account_id()
-        if account_id:
-            self.start_requested.emit(account_id)
-
-    def _emit_stop(self) -> None:
-        account_id = self.current_account_id()
-        if account_id:
-            self.stop_requested.emit(account_id)
 
     def _emit_rename(self) -> None:
         account_id = self.current_account_id()
@@ -179,9 +150,7 @@ class AccountPanel(QFrame):
         if account_id:
             self.remove_requested.emit(account_id)
 
-    def _update_action_buttons(self, account_id: str | None, running: bool) -> None:
+    def _update_action_buttons(self, account_id: str | None) -> None:
         has_account = account_id is not None
-        self.start_button.setEnabled(has_account and not running)
-        self.stop_button.setEnabled(has_account and running)
         self.rename_button.setEnabled(has_account)
         self.remove_button.setEnabled(has_account)
