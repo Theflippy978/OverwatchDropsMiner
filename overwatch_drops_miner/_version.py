@@ -1,0 +1,5 @@
+APP_VERSION = "0.0.0+dev"
+UPDATE_CHANNEL = "dev"
+REPOSITORY_URL = "https://github.com/mi0e/OverwatchDropsMiner"
+LATEST_RELEASE_API = "https://api.github.com/repos/mi0e/OverwatchDropsMiner/releases/latest"
+RELEASES_URL = "https://github.com/mi0e/OverwatchDropsMiner/releases/latest"

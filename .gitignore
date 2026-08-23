@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+build/
+dist/
+dist-nuitka/
+dist-nuitka-apprise/
+nuitka-crash-report.xml
+*.spec
+.venv/
+.claude/
+*.har
+*.exe
+config.json
+AGENTS.md
+.DS_Store

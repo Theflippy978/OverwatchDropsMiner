@@ -1,0 +1,203 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/build.yml'
+      - 'requirements.txt'
+      - 'build.py'
+      - 'build_nuitka.py'
+      - 'bilibili_gui.py'
+      - 'overwatch_drops_miner/**'
+      - '!overwatch_drops_miner/cli.py'
+      - 'img/app.ico'
+      - 'img/app.icns'
+  workflow_dispatch:
+    inputs:
+      release:
+        description: '发布类型 (none=仅构建 / preview=预览版 pre-release / stable=正式版)'
+        required: true
+        type: choice
+        default: 'none'
+        options:
+          - none
+          - preview
+          - stable
+      tag:
+        description: '正式版版本号 (如 v1.0.0)，仅 stable 需要'
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    name: Prepare version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      update_channel: ${{ steps.version.outputs.update_channel }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+    steps:
+      - name: Determine build version
+        id: version
+        shell: bash
+        run: |
+          release_type="${{ github.event.inputs.release }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "$release_type" = "stable" ]; then
+            if [ -n "${{ github.event.inputs.tag }}" ]; then
+              version="${{ github.event.inputs.tag }}"
+            else
+              version="v$(date +%Y%m%d.%H%M%S)"
+            fi
+            update_channel="release"
+            is_prerelease="false"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "$release_type" = "preview" ]; then
+            version="v${GITHUB_SHA::7}"
+            update_channel="dev"
+            is_prerelease="true"
+          else
+            version="dev-${GITHUB_SHA::7}"
+            update_channel="dev"
+            is_prerelease="false"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "update_channel=$update_channel" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=$is_prerelease" >> "$GITHUB_OUTPUT"
+
+  build-windows:
+    name: Windows GUI (Nuitka)
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate version file
+        shell: pwsh
+        run: |
+          @"
+          APP_VERSION = "${{ needs.prepare.outputs.version }}"
+          UPDATE_CHANNEL = "${{ needs.prepare.outputs.update_channel }}"
+          REPOSITORY_URL = "https://github.com/mi0e/OverwatchDropsMiner"
+          LATEST_RELEASE_API = "https://api.github.com/repos/mi0e/OverwatchDropsMiner/releases/latest"
+          RELEASES_URL = "https://github.com/mi0e/OverwatchDropsMiner/releases/latest"
+          "@ | Set-Content -Path "overwatch_drops_miner/_version.py" -Encoding UTF8
+
+      - uses: actions/setup-python@v5
+        id: setup-python
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Cache Nuitka and compiler output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\Nuitka
+            ~\AppData\Local\ccache
+            dist-nuitka\*.build
+          key: ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-nuitka-gui-${{ needs.prepare.outputs.version }}-${{ hashFiles('requirements.txt', 'build_nuitka.py', 'bilibili_gui.py', 'overwatch_drops_miner/**/*.py') }}
+          restore-keys: |
+            ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-nuitka-gui-
+            ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-nuitka-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m pip install --disable-pip-version-check nuitka ordered-set zstandard
+
+      - name: Build with Nuitka
+        run: python build_nuitka.py --target gui
+
+      - name: Package ZIP
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path "dist-nuitka/Bilibili Drops Miner" -DestinationPath "dist/bilibili-drops-miner-win-${{ needs.prepare.outputs.version }}.zip" -CompressionLevel Fastest -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bilibili-drops-miner-win
+          path: dist/bilibili-drops-miner-win-*.zip
+          retention-days: 30
+
+  build-macos:
+    name: macOS GUI (PyInstaller)
+    needs: prepare
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate version file
+        shell: bash
+        run: |
+          cat > overwatch_drops_miner/_version.py <<EOF
+          APP_VERSION = "${{ needs.prepare.outputs.version }}"
+          UPDATE_CHANNEL = "${{ needs.prepare.outputs.update_channel }}"
+          REPOSITORY_URL = "https://github.com/mi0e/OverwatchDropsMiner"
+          LATEST_RELEASE_API = "https://api.github.com/repos/mi0e/OverwatchDropsMiner/releases/latest"
+          RELEASES_URL = "https://github.com/mi0e/OverwatchDropsMiner/releases/latest"
+          EOF
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m pip install --disable-pip-version-check pyinstaller
+
+      - name: Build app bundle with PyInstaller
+        run: python build.py --target gui
+
+      - name: Package ZIP (ditto preserves bundle symlinks)
+        run: ditto -c -k --keepParent "dist/Bilibili Drops Miner.app" "dist/bilibili-drops-miner-mac-${{ needs.prepare.outputs.version }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bilibili-drops-miner-mac
+          path: dist/bilibili-drops-miner-mac-*.zip
+          retention-days: 30
+
+  release:
+    name: Publish release
+    needs: [prepare, build-windows, build-macos]
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.release == 'stable' || github.event.inputs.release == 'preview')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bilibili-drops-miner-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Check existing release
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ needs.prepare.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release ${{ needs.prepare.outputs.version }} already exists, skipping."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create Release
+        if: steps.existing.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.version }}
+          name: ${{ needs.prepare.outputs.version }}
+          generate_release_notes: true
+          prerelease: ${{ needs.prepare.outputs.is_prerelease }}
+          files: dist/*.zip

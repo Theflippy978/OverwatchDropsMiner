@@ -1,0 +1,4 @@
+httpx
+qrcode>=7.4,<9
+PySide6
+selenium
