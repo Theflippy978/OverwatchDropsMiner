@@ -13,8 +13,8 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QIcon
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QFileDialog,
-    QInputDialog,
     QMainWindow,
     QMessageBox,
 )
@@ -40,6 +40,7 @@ from overwatch_drops_miner.gui_parts.main_layout import (
 )
 from overwatch_drops_miner.gui_parts.qr_login_dialog import QrLoginDialog
 from overwatch_drops_miner.gui_parts.task_controller import TaskController
+from overwatch_drops_miner.gui_parts.text_input_dialog import TextInputDialog
 from overwatch_drops_miner.gui_parts.theme import ThemeManager
 from overwatch_drops_miner.gui_parts.update_checker import (
     check_latest_release,
@@ -473,13 +474,15 @@ class MinerGUI(QMainWindow):
         dialog.start_session()
 
     def add_account_via_clipboard(self) -> None:
-        cookie, ok = QInputDialog.getMultiLineText(
+        dialog = TextInputDialog(
             self,
             "手动添加账号",
-            "粘贴 Cookie（SESSDATA=xxx; bili_jct=xxx; DedeUserID=xxx）:",
+            "粘贴 Cookie（SESSDATA=xxx; bili_jct=xxx; DedeUserID=xxx）：",
+            multiline=True,
+            placeholder="SESSDATA=xxx; bili_jct=xxx; DedeUserID=xxx",
         )
-        if ok and cookie.strip():
-            self._add_account_with_cookie(cookie)
+        if dialog.exec() == QDialog.Accepted and dialog.text().strip():
+            self._add_account_with_cookie(dialog.text())
 
     def auto_fetch_cookie(self) -> None:
         self.browser_actions.auto_fetch_cookie()
@@ -488,13 +491,16 @@ class MinerGUI(QMainWindow):
         account = self.account_store.get(account_id)
         if account is None:
             return
-        remark, ok = QInputDialog.getText(
-            self, "账号备注", "备注名:", text=account.remark
+        dialog = TextInputDialog(
+            self,
+            "账号备注",
+            "备注名：",
+            initial_text=account.remark,
+            placeholder="输入便于识别的备注名",
         )
-        if not ok:
-            return
-        self.account_store.update(account_id, remark=remark)
-        self._refresh_account_list()
+        if dialog.exec() == QDialog.Accepted:
+            self.account_store.update(account_id, remark=dialog.text())
+            self._refresh_account_list()
 
     def remove_account(self, account_id: str) -> None:
         account = self.account_store.get(account_id)

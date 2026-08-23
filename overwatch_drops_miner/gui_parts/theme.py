@@ -241,6 +241,18 @@ def build_stylesheet(t: ThemeTokens) -> str:
             border-radius: 4px;
         }}
 
+        QProgressBar#taskProgress {{
+            background: {t.input_bg}; border: 1px solid {t.border};
+            border-radius: 8px; min-height: 20px; max-height: 20px;
+            color: {t.text}; font-weight: 600; text-align: center;
+            padding: 0 10px;
+        }}
+        QProgressBar#taskProgress::chunk {{
+            background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                                        stop:0 {t.accent}, stop:1 {t.purple});
+            border-radius: 7px;
+        }}
+
         QPushButton[accent="primary"] {{ background: {t.accent}; color: #ffffff; {button_common} }}
         QPushButton[accent="primary"]:hover {{ background: {t.accent_hover}; }}
         QPushButton[accent="primary"]:pressed {{ background: {t.accent_pressed}; }}

@@ -95,7 +95,7 @@ def build_main_window_layout(
     running_count_label.setTextFormat(Qt.PlainText)
     header.addWidget(running_count_label)
     header.addStretch(1)
-    theme_button = make_button("切换主题", "neutral", callbacks.toggle_theme)
+    theme_button = make_button("切换主题", "purple", callbacks.toggle_theme)
     header.addWidget(theme_button)
     root_layout.addLayout(header)
 
@@ -134,7 +134,7 @@ def build_main_window_layout(
             task_ids_edit,
             (
                 ("自动获取模式1", "primary", callbacks.auto_fetch_task_ids_mode1),
-                ("自动获取模式2", "purple", callbacks.auto_fetch_task_ids_mode2),
+                ("自动获取模式2", "primary", callbacks.auto_fetch_task_ids_mode2),
             ),
         )
     )
@@ -229,9 +229,9 @@ def build_main_window_layout(
     task_layout.addWidget(watch_info_label)
 
     task_progress_bar = QProgressBar()
+    task_progress_bar.setObjectName("taskProgress")
     task_progress_bar.setTextVisible(True)
-    task_progress_bar.setFormat("%p%")
-    task_progress_bar.setMinimumHeight(14)
+    task_progress_bar.setFormat("掉宝进度 %p%")
     task_progress_bar.setRange(0, 100)
     task_progress_bar.setValue(0)
     task_layout.addWidget(task_progress_bar)
