@@ -10,8 +10,10 @@ from overwatch_drops_miner.gui_parts.worker_controller import WorkerController
 
 
 class FakeMiner:
-    def __init__(self, config: object) -> None:
+    def __init__(self, config: object, **kwargs) -> None:
         self.config = config
+        self.account_id = kwargs.get("account_id", "")
+        self.watch_tracker = kwargs.get("watch_tracker")
         self.started = threading.Event()
         self.release = threading.Event()
         self.stop_calls: list[bool] = []
@@ -38,8 +40,8 @@ class WorkerControllerTest(unittest.TestCase):
         controller = WorkerController(auto_force_stop_after_seconds=0.01)
         miners: list[FakeMiner] = []
 
-        def create_miner(config: object) -> FakeMiner:
-            miner = FakeMiner(config)
+        def create_miner(config: object, **kwargs: object) -> FakeMiner:
+            miner = FakeMiner(config, **kwargs)
             miners.append(miner)
             return miner
 

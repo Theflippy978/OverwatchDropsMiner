@@ -61,6 +61,7 @@ class TaskController:
         complete_task_refresh: Callable[[str, bool], None],
         post_ui_task: Callable[..., None],
         get_auto_claim_enabled: Callable[[], bool] | None = None,
+        on_progress_values: Callable[[float, float], None] | None = None,
     ) -> None:
         self._get_cookie = get_cookie
         self._get_room_ids = get_room_ids
@@ -71,6 +72,7 @@ class TaskController:
         self._complete_task_refresh = complete_task_refresh
         self._post_ui_task = post_ui_task
         self._get_auto_claim_enabled = get_auto_claim_enabled or (lambda: False)
+        self._on_progress_values = on_progress_values
         self._task_refresh_lock = threading.Lock()
         self._task_refresh_inflight = False
         self._task_refresh_queued = False
@@ -244,6 +246,18 @@ class TaskController:
 
                 progresses = asyncio.run(_query())
                 result_text = format_task_progress(progresses)
+                if self._on_progress_values is not None and progresses:
+                    try:
+                        best = max(
+                            progresses, key=lambda t: float(getattr(t, "limit_value", 0))
+                        )
+                        self._post_ui_task(
+                            self._on_progress_values,
+                            float(getattr(best, "cur_value", 0)),
+                            float(getattr(best, "limit_value", 0)),
+                        )
+                    except (TypeError, ValueError):
+                        pass
                 completed_ids, claimed_ids, incomplete_ids = (
                     classify_auto_claim_task_ids(progresses)
                 )

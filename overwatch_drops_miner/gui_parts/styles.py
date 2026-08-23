@@ -1,47 +1,33 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 
-BUTTON_STYLES: dict[str, str] = {
-    "green": (
-        "QPushButton{background:#22c55e;color:#ffffff;border:0;border-radius:6px;"
-        "padding:8px 18px;min-height:20px;font-weight:600;}"
-        "QPushButton:hover{background:#16a34a;}"
-        "QPushButton:pressed{background:#15803d;}"
-    ),
-    "red": (
-        "QPushButton{background:#ef4444;color:#ffffff;border:0;border-radius:6px;"
-        "padding:8px 18px;min-height:20px;font-weight:600;}"
-        "QPushButton:hover{background:#dc2626;}"
-        "QPushButton:pressed{background:#b91c1c;}"
-    ),
-    "blue": (
-        "QPushButton{background:#4f8cff;color:#ffffff;border:0;border-radius:6px;"
-        "padding:8px 18px;min-height:20px;font-weight:600;}"
-        "QPushButton:hover{background:#3b73e6;}"
-        "QPushButton:pressed{background:#2e5fc4;}"
-    ),
-    "purple": (
-        "QPushButton{background:#a78bfa;color:#ffffff;border:0;border-radius:6px;"
-        "padding:8px 18px;min-height:20px;font-weight:600;}"
-        "QPushButton:hover{background:#8b6ff0;}"
-        "QPushButton:pressed{background:#7057d6;}"
-    ),
-    "gray": (
-        "QPushButton{background:#3a3f4b;color:#e6e7eb;border:0;border-radius:6px;"
-        "padding:8px 18px;min-height:20px;font-weight:600;}"
-        "QPushButton:hover{background:#454b58;}"
-        "QPushButton:pressed{background:#2f343e;}"
-    ),
-    "": (
-        "QPushButton{background:#2f343e;color:#e6e7eb;border:1px solid #3a3f4b;"
-        "border-radius:6px;padding:8px 18px;min-height:20px;font-weight:500;}"
-        "QPushButton:hover{background:#363b47;border-color:#4a5060;}"
-        "QPushButton:pressed{background:#272b34;}"
-    ),
-}
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QPushButton, QSizePolicy
 
 
-CARD_STYLE = (
-    "QFrame#card{background:#242832;border:1px solid #2f3440;border-radius:10px;}"
-)
+# 语义色标（与 theme.py 中 QSS 的 QPushButton[accent=...] 选择器对应）：
+# 同一功能在全应用使用同一颜色。
+#   primary  - 扫码登录 / 自动获取 / 领取奖励 / 添加账号
+#   success  - 启动
+#   danger   - 停止 / 删除账号
+#   purple   - 浏览器自动捕获类操作
+#   neutral  - 次要操作（加载/保存配置、手动刷新、切换主题）
+#   ghost    - 折叠/展开等轻量操作
 
+
+def make_button(
+    text: str,
+    accent: str,
+    slot: Callable[..., None],
+    *,
+    tooltip: str = "",
+) -> QPushButton:
+    button = QPushButton(text)
+    button.setProperty("accent", accent or "neutral")
+    button.setCursor(Qt.PointingHandCursor)
+    button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+    if tooltip:
+        button.setToolTip(tooltip)
+    button.clicked.connect(slot)
+    return button

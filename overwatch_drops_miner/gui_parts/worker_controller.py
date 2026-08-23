@@ -7,6 +7,7 @@ from typing import Literal
 
 from overwatch_drops_miner.config import MinerConfig
 from overwatch_drops_miner.miner import BilibiliWatchTimeMiner
+from overwatch_drops_miner.watch_time_tracker import WatchTimeTracker
 
 StopRequestResult = Literal[
     "not_running",
@@ -36,7 +37,14 @@ class WorkerController:
     def has_thread(self) -> bool:
         return self.worker_thread is not None
 
-    def start(self, config: MinerConfig, *, logger: logging.Logger) -> bool:
+    def start(
+        self,
+        config: MinerConfig,
+        *,
+        logger: logging.Logger,
+        account_id: str = "",
+        watch_tracker: WatchTimeTracker | None = None,
+    ) -> bool:
         # A completed worker remains owned until the GUI poll finalizes it.
         # Do not replace its miner reference in that small window.
         if self.has_thread:
@@ -45,7 +53,9 @@ class WorkerController:
         self.stop_signal_set = False
         self._reset_stop_state()
 
-        self.miner = BilibiliWatchTimeMiner(config)
+        self.miner = BilibiliWatchTimeMiner(
+            config, watch_tracker=watch_tracker, account_id=account_id
+        )
 
         def runner() -> None:
             try:

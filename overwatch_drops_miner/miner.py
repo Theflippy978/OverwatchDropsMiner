@@ -6,6 +6,10 @@ import threading
 import time
 from dataclasses import dataclass
 
+from overwatch_drops_miner.account_log_context import (
+    clear_current_account,
+    set_current_account,
+)
 from overwatch_drops_miner.client import BilibiliClient
 from overwatch_drops_miner.config import MinerConfig
 from overwatch_drops_miner.notifier import MultiPlatformNotifier
@@ -27,9 +31,11 @@ class BilibiliWatchTimeMiner:
         self,
         config: MinerConfig,
         watch_tracker: WatchTimeTracker | None = None,
+        account_id: str = "",
     ) -> None:
         self.config = config
         self.watch_tracker = watch_tracker
+        self._account_id = account_id
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
         self._uid: int | None = None
@@ -137,11 +143,14 @@ class BilibiliWatchTimeMiner:
                 )
 
     def _thread_entry(self, plan: SessionPlan, thread_index: int) -> None:
+        set_current_account(self._account_id)
         try:
             asyncio.run(self._thread_loop(plan, thread_index))
         except Exception as exc:
             LOGGER.exception("直播间连接异常退出: %s", exc)
             self._stop_event.set()
+        finally:
+            clear_current_account()
 
     def run(self) -> None:
         self._stop_event.clear()

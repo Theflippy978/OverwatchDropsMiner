@@ -4,6 +4,7 @@ import re
 import unicodedata
 
 from overwatch_drops_miner.client import LiveWatchTime
+from overwatch_drops_miner.watch_time_tracker import estimate_remaining_seconds
 
 
 def format_seconds_zh(total_seconds: int | float) -> str:
@@ -15,6 +16,38 @@ def format_seconds_zh(total_seconds: int | float) -> str:
     if minutes > 0:
         return f"{minutes}分{seconds:02d}秒"
     return f"{seconds}秒"
+
+
+def format_watch_estimate(
+    elapsed_seconds: float,
+    cur_value: int | float,
+    limit_value: int | float,
+    running: bool,
+) -> str:
+    """本地有效观看时长 + 掉宝进度 + 预计剩余时间的粗略估算行。"""
+    elapsed_text = format_seconds_zh(elapsed_seconds)
+    if float(limit_value) > 0:
+        percent = max(
+            0, min(100, int(float(cur_value) / float(limit_value) * 100))
+        )
+        if percent >= 100:
+            return (
+                f"本次有效观看: {elapsed_text} | 掉宝进度: 100% | 预计剩余: 已达标"
+            )
+        remaining = estimate_remaining_seconds(
+            elapsed_seconds, cur_value, limit_value
+        )
+        if remaining is None:
+            remaining_text = "--"
+        else:
+            remaining_text = format_seconds_zh(remaining)
+        state = "挂宝中" if running else "已暂停"
+        return (
+            f"状态: {state} | 本次有效观看: {elapsed_text} | "
+            f"掉宝进度: {percent}% | 预计剩余: {remaining_text}"
+        )
+    state = "挂宝中" if running else "已暂停"
+    return f"状态: {state} | 本次有效观看: {elapsed_text} | 掉宝进度: -- | 预计剩余: --"
 
 
 def format_live_watch_time_progress(

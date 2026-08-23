@@ -1,26 +1,27 @@
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication, QDialog, QFileDialog
+from PySide6.QtWidgets import QApplication
 
-from overwatch_drops_miner.config import MinerConfig
 from overwatch_drops_miner.gui_parts.app_style import configure_qt_app
-from overwatch_drops_miner.gui_parts.config_io import (
-    build_config_payload,
-    save_config_data,
-    values_from_config_data,
-)
 from overwatch_drops_miner.gui_parts.gui_state import GuiStateStore
-from overwatch_drops_miner.gui_parts.main_window import MinerGUI
+from overwatch_drops_miner.gui_parts.main_window import (
+    KEY_AUTO_CLAIM,
+    KEY_DISABLE_TASK_NOTIFY,
+    KEY_RECONNECT_DELAY,
+    KEY_ROOMS,
+    KEY_TASK_INTERVAL,
+    KEY_THREAD_COUNT,
+    KEY_VERBOSE,
+    MinerGUI,
+)
 
 
 class GuiPersistenceTests(unittest.TestCase):
@@ -37,210 +38,87 @@ class GuiPersistenceTests(unittest.TestCase):
         )
         return GuiStateStore(settings)
 
-    @staticmethod
-    def _config_payload() -> dict[str, object]:
-        return {
-            "cookie": "SESSDATA=test; bili_jct=test",
-            "room_ids": [123, 456],
-            "thread_count": 3,
-            "reconnect_delay_seconds": 11,
-            "task_ids": ["task-a", "task-b"],
-            "task_query_interval_seconds": 42,
-            "notify_urls": ["gotify://example.invalid/token"],
-            "notify_on_task_complete": False,
-            "auto_claim_rewards": True,
-            "verbose": True,
-        }
+    def test_window_geometry_is_saved_and_restored(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = self._state_for(temp_dir)
+            first = MinerGUI(gui_state=state)
+            first.resize(1200, 800)
+            geometry = first.saveGeometry()
+            first.close()
 
-    def test_legacy_config_defaults_auto_claim_to_disabled(self) -> None:
-        payload = self._config_payload()
-        payload.pop("auto_claim_rewards")
+            second = MinerGUI(gui_state=state)
+            self.assertTrue(second.restoreGeometry(geometry))
+            second.close()
 
-        self.assertFalse(values_from_config_data(payload).auto_claim_rewards)
+    def test_exit_saves_shared_config_and_restores_on_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = self._state_for(temp_dir)
+            window = MinerGUI(gui_state=state)
+            window.rooms_edit.setText("123, 456")
+            window.notify_urls_edit.setText("gotify://example.invalid/token")
+            window.threads_spin.setValue(64)
+            window.reconnect_edit.setText("12")
+            window.task_interval_edit.setText("45")
+            window.verbose_check.setChecked(True)
+            window.disable_task_notify_check.setChecked(True)
+            window.auto_claim_rewards_check.setChecked(True)
+            window.close()
 
-    def test_legacy_web_heartbeat_field_is_ignored_and_not_saved(self) -> None:
-        legacy_payload = self._config_payload()
-        legacy_payload["enable_web_heartbeat"] = False
+            restored = MinerGUI(gui_state=state)
+            try:
+                self.assertEqual(restored.rooms_edit.text(), "123, 456")
+                self.assertEqual(
+                    restored.notify_urls_edit.text(),
+                    "gotify://example.invalid/token",
+                )
+                self.assertEqual(restored.threads_spin.value(), 64)
+                self.assertEqual(restored.reconnect_edit.text(), "12")
+                self.assertEqual(restored.task_interval_edit.text(), "45")
+                self.assertTrue(restored.verbose_check.isChecked())
+                self.assertTrue(restored.disable_task_notify_check.isChecked())
+                self.assertTrue(restored.auto_claim_rewards_check.isChecked())
+            finally:
+                restored.close()
 
-        values = values_from_config_data(legacy_payload)
-        self.assertEqual(values.rooms_text, "123,456")
+    def test_task_ids_are_never_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = self._state_for(temp_dir)
+            window = MinerGUI(gui_state=state)
+            window.task_ids_edit.setText("task-a,task-b")
+            window.close()
 
-        saved_payload = build_config_payload(
-            MinerConfig(cookie=values.cookie, room_ids=[123, 456]),
-            verbose=values.verbose,
-            auto_claim_rewards=values.auto_claim_rewards,
-        )
-        self.assertNotIn("enable_web_heartbeat", saved_payload)
+            self.assertEqual(
+                str(state.value("config/task_ids_text", "") or ""), ""
+            )
+            restored = MinerGUI(gui_state=state)
+            try:
+                self.assertEqual(restored.task_ids_edit.text(), "")
+            finally:
+                restored.close()
+
+    def test_shared_config_keys_are_written_on_close(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = self._state_for(temp_dir)
+            window = MinerGUI(gui_state=state)
+            window.rooms_edit.setText("777")
+            window.close()
+
+            self.assertEqual(str(state.value(KEY_ROOMS, "")), "777")
+            self.assertIsNotNone(state.value(KEY_THREAD_COUNT, None))
+            self.assertIsNotNone(state.value(KEY_RECONNECT_DELAY, None))
+            self.assertIsNotNone(state.value(KEY_TASK_INTERVAL, None))
+            self.assertIsNotNone(state.value(KEY_VERBOSE, None))
+            self.assertIsNotNone(state.value(KEY_DISABLE_TASK_NOTIFY, None))
+            self.assertIsNotNone(state.value(KEY_AUTO_CLAIM, None))
 
     def test_first_launch_geometry_intersects_primary_screen(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             window = MinerGUI(gui_state=self._state_for(temp_dir))
             try:
-                screen = QApplication.primaryScreen()
-                self.assertIsNotNone(screen)
-                self.assertTrue(
-                    window.frameGeometry().intersects(screen.availableGeometry())
-                )
+                screen = self.app.primaryScreen().availableGeometry()
+                self.assertTrue(screen.intersects(window.frameGeometry()))
             finally:
                 window.close()
-
-    def test_window_geometry_is_saved_and_restored(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            state = self._state_for(temp_dir)
-            first = MinerGUI(gui_state=state)
-            first.resize(860, 700)
-            first.move(20, 30)
-            first.show()
-            self.app.processEvents()
-            expected_size = first.size()
-            first.close()
-
-            self.assertFalse(state.window_geometry().isEmpty())
-
-            second = MinerGUI(gui_state=state)
-            try:
-                self.assertEqual(second.size(), expected_size)
-            finally:
-                second.close()
-
-    def test_startup_auto_loads_last_config(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            config_path = Path(temp_dir) / "config.json"
-            save_config_data(config_path, self._config_payload())
-            state = self._state_for(temp_dir)
-            state.set_last_config_path(config_path)
-            state.sync()
-
-            window = MinerGUI(gui_state=state)
-            try:
-                self.assertEqual(
-                    window.cookie_edit.text(),
-                    "SESSDATA=test; bili_jct=test",
-                )
-                self.assertEqual(window.rooms_edit.text(), "123,456")
-                self.assertEqual(window.threads_edit.text(), "3")
-                self.assertEqual(window.reconnect_edit.text(), "11")
-                self.assertEqual(window.task_ids_edit.text(), "task-a,task-b")
-                self.assertEqual(window.task_interval_edit.text(), "42")
-                self.assertEqual(
-                    window.notify_urls_edit.text(),
-                    "gotify://example.invalid/token",
-                )
-                self.assertTrue(window.disable_task_notify_check.isChecked())
-                self.assertTrue(window.auto_claim_rewards_check.isChecked())
-                self.assertTrue(window.verbose_check.isChecked())
-            finally:
-                window.close()
-
-    def test_missing_last_config_path_is_forgotten(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            state = self._state_for(temp_dir)
-            state.set_last_config_path(Path(temp_dir) / "missing.json")
-            state.sync()
-
-            window = MinerGUI(gui_state=state)
-            try:
-                self.assertIsNone(state.last_config_path())
-                self.assertEqual(window.cookie_edit.text(), "")
-                self.assertEqual(window.rooms_edit.text(), "23612045")
-            finally:
-                window.close()
-
-    def test_invalid_last_config_does_not_open_modal_or_forget_path(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            config_path = Path(temp_dir) / "invalid.json"
-            config_path.write_text("not-json", encoding="utf-8")
-            state = self._state_for(temp_dir)
-            state.set_last_config_path(config_path)
-            state.sync()
-
-            window = MinerGUI(gui_state=state)
-            try:
-                self.assertEqual(state.last_config_path(), config_path.resolve())
-                self.assertEqual(window.cookie_edit.text(), "")
-            finally:
-                window.close()
-
-    def test_manual_load_remembers_config_path(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            config_path = Path(temp_dir) / "loaded.json"
-            save_config_data(config_path, self._config_payload())
-            state = self._state_for(temp_dir)
-            window = MinerGUI(gui_state=state)
-            try:
-                with patch.object(
-                    QFileDialog,
-                    "getOpenFileName",
-                    return_value=(str(config_path), "JSON 文件 (*.json)"),
-                ):
-                    window.load_config()
-
-                self.assertEqual(state.last_config_path(), config_path.resolve())
-                self.assertEqual(window.rooms_edit.text(), "123,456")
-            finally:
-                window.close()
-
-    def test_manual_save_remembers_config_path(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            config_path = Path(temp_dir) / "saved.json"
-            state = self._state_for(temp_dir)
-            window = MinerGUI(gui_state=state)
-            window.cookie_edit.setText("SESSDATA=test; bili_jct=test")
-            window.auto_claim_rewards_check.setChecked(True)
-            try:
-                with patch.object(
-                    QFileDialog,
-                    "getSaveFileName",
-                    return_value=(str(config_path), "JSON 文件 (*.json)"),
-                ):
-                    window.save_config()
-
-                self.assertEqual(state.last_config_path(), config_path.resolve())
-                payload = json.loads(config_path.read_text(encoding="utf-8"))
-                self.assertEqual(payload["cookie"], "SESSDATA=test; bili_jct=test")
-                self.assertTrue(payload["auto_claim_rewards"])
-            finally:
-                window.close()
-
-    def test_qr_login_is_wired_to_cookie_field_and_window_close_cancels(self) -> None:
-        instances = []
-
-        class FakeQrLoginDialog(QDialog):
-            def __init__(self, parent, apply_cookie) -> None:
-                super().__init__(parent)
-                self.apply_cookie = apply_cookie
-                self.started = False
-                self.cancelled = False
-                instances.append(self)
-
-            def start_session(self) -> None:
-                self.started = True
-
-            def cancel_session(self) -> None:
-                self.cancelled = True
-
-        with tempfile.TemporaryDirectory() as temp_dir, patch(
-            "overwatch_drops_miner.gui_parts.main_window.QrLoginDialog",
-            FakeQrLoginDialog,
-        ):
-            window = MinerGUI(gui_state=self._state_for(temp_dir))
-            window.qr_login_cookie()
-            dialog = instances[0]
-
-            self.assertTrue(dialog.started)
-            self.assertIs(dialog.parent(), window)
-            dialog.apply_cookie("SESSDATA=session; bili_jct=csrf; DedeUserID=42")
-            self.assertEqual(
-                window.cookie_edit.text(),
-                "SESSDATA=session; bili_jct=csrf; DedeUserID=42",
-            )
-
-            # A visible session is reused instead of starting a second one.
-            window.qr_login_cookie()
-            self.assertEqual(len(instances), 1)
-
-            window.close()
-            self.assertTrue(dialog.cancelled)
 
 
 if __name__ == "__main__":

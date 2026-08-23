@@ -23,7 +23,6 @@ from overwatch_drops_miner.client_parts.qr_login import (
     QrLoginError,
     QrLoginStatus,
 )
-from overwatch_drops_miner.gui_parts.styles import BUTTON_STYLES
 
 
 POLL_INTERVAL_SECONDS = 2.0
@@ -102,11 +101,13 @@ class QrLoginDialog(QDialog):
         self.status_label.setWordWrap(True)
 
         self.retry_button = QPushButton("重新生成")
-        self.retry_button.setStyleSheet(BUTTON_STYLES["blue"])
+        self.retry_button.setProperty("accent", "primary")
+        self.retry_button.setCursor(Qt.PointingHandCursor)
         self.retry_button.setEnabled(False)
         self.retry_button.clicked.connect(self.start_session)
         self.cancel_button = QPushButton("取消")
-        self.cancel_button.setStyleSheet(BUTTON_STYLES[""])
+        self.cancel_button.setProperty("accent", "neutral")
+        self.cancel_button.setCursor(Qt.PointingHandCursor)
         self.cancel_button.clicked.connect(self.reject)
 
         buttons = QHBoxLayout()

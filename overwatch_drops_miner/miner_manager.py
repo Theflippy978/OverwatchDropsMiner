@@ -73,7 +73,12 @@ class AccountMinerManager:
         config.cookie = cookie
         session.tracker.reset()
         started = session.controller.start(
-            config, logger=logging.getLogger(f"overwatch_miner.account.{account.id[:8]}")
+            config,
+            logger=logging.getLogger(
+                f"overwatch_miner.account.{account.id[:8]}"
+            ),
+            account_id=account.id,
+            watch_tracker=session.tracker,
         )
         if started:
             log.info(
@@ -109,6 +114,16 @@ class AccountMinerManager:
                 session.tracker.pause()
             self._notify(account_id, False)
         return result
+
+    def running_miners(self) -> list:
+        from overwatch_drops_miner.miner import BilibiliWatchTimeMiner
+
+        with self._lock:
+            miners: list[BilibiliWatchTimeMiner] = []
+            for session in self._sessions.values():
+                if session.controller.is_running and session.controller.miner:
+                    miners.append(session.controller.miner)
+            return miners
 
     def stop_all(self, *, force: bool = False) -> None:
         with self._lock:

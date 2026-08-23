@@ -51,3 +51,9 @@ class GuiStateStore:
 
     def sync(self) -> None:
         self._settings.sync()
+
+    def value(self, key: str, default):
+        return self._settings.value(key, default)
+
+    def setValue(self, key: str, value) -> None:
+        self._settings.setValue(key, value)
