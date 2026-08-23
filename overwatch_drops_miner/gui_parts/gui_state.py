@@ -4,6 +4,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QSettings
 
+from overwatch_drops_miner.paths import create_qsettings
+
 
 SETTINGS_ORGANIZATION = "OverwatchDropsMiner"
 SETTINGS_APPLICATION = "OverwatchDropsMiner"
@@ -19,7 +21,7 @@ class GuiStateStore:
         self._settings = (
             settings
             if settings is not None
-            else QSettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION)
+            else create_qsettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION)
         )
 
     def window_geometry(self) -> QByteArray:

@@ -12,6 +12,7 @@ from overwatch_drops_miner.client import (
 )
 from overwatch_drops_miner.config import MinerConfig
 from overwatch_drops_miner.notifier import MultiPlatformNotifier
+from overwatch_drops_miner.watch_time_tracker import WatchTimeTracker
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ class X25KnWorker:
         session_id: str = "",
         primary_session: bool = True,
         stop_event: asyncio.Event | None = None,
+        watch_tracker: WatchTimeTracker | None = None,
     ) -> None:
         self.client = client
         self.notifier = notifier
@@ -36,6 +38,7 @@ class X25KnWorker:
         self.session_id = session_id
         self.primary_session = primary_session
         self._stop_event = stop_event or asyncio.Event()
+        self.watch_tracker = watch_tracker
 
     @property
     def _ctx(self) -> str:
@@ -59,6 +62,8 @@ class X25KnWorker:
 
     async def stop(self) -> None:
         self._stop_event.set()
+        if self.watch_tracker is not None:
+            self.watch_tracker.pause()
 
     async def run_forever(self) -> None:
         while not self._stop_event.is_set():
@@ -121,6 +126,8 @@ class X25KnWorker:
                     await self.client.room_entry_action(self.room_id)
                     session = await self.client.live_trace_enter(self.room_id)
                     wait_seconds = max(5, int(session.heartbeat_interval))
+                    if self.watch_tracker is not None:
+                        self.watch_tracker.resume()
                     self._log_info(
                         "直播间 %s 观看时长上报已启动",
                         self.room_id,
@@ -140,6 +147,8 @@ class X25KnWorker:
                 raise
             except Exception as exc:
                 detail = str(exc).strip() or repr(exc)
+                if self.watch_tracker is not None:
+                    self.watch_tracker.pause()
                 self._log_warning(
                     "直播间 %s 观看时长上报失败[%s]: %s",
                     self.room_id,

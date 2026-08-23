@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from overwatch_drops_miner.client import BilibiliClient
 from overwatch_drops_miner.config import MinerConfig
 from overwatch_drops_miner.notifier import MultiPlatformNotifier
+from overwatch_drops_miner.watch_time_tracker import WatchTimeTracker
 from overwatch_drops_miner.x25kn_worker import X25KnWorker
 
 LOGGER = logging.getLogger(__name__)
@@ -22,8 +23,13 @@ class SessionPlan:
 
 
 class BilibiliWatchTimeMiner:
-    def __init__(self, config: MinerConfig) -> None:
+    def __init__(
+        self,
+        config: MinerConfig,
+        watch_tracker: WatchTimeTracker | None = None,
+    ) -> None:
         self.config = config
+        self.watch_tracker = watch_tracker
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
         self._uid: int | None = None
@@ -89,6 +95,7 @@ class BilibiliWatchTimeMiner:
                 room_id=plan.room_id,
                 session_id=f"s{plan.session_no}",
                 primary_session=plan.session_no == 1,
+                watch_tracker=self.watch_tracker if plan.session_no == 1 else None,
             )
             task = asyncio.create_task(
                 worker.run_forever(),
