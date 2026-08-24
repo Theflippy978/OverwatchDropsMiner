@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -294,9 +295,20 @@ def build_main_window_layout(
     content_scroll.setWidgetResizable(True)
     content_scroll.setFrameShape(QFrame.NoFrame)
     content_scroll.setWidget(scroll_content)
-    # 滚动容器的最小尺寸 = 收起状态下内容的真实最小需求，
-    # 该约束经布局向上传导为窗口最小尺寸，使滚动条在收起时不可能出现。
-    content_scroll.setMinimumSize(scroll_content.minimumSizeHint())
+    # 滚动容器的最小宽度 = 内容最小宽度 + 一条垂直滚动条的宽度：
+    # 展开日志出现垂直滚动条时正好占用预留宽度，viewport 宽度不变，
+    # 内容布局不被挤压，水平方向永远不会需要滚动。
+    # 收起时滚动条不出现，多出的预留宽度由弹性控件（输入框等）吸收。
+    scrollbar_extent = content_scroll.style().pixelMetric(
+        QStyle.PM_ScrollBarExtent, None, content_scroll
+    )
+    content_min_hint = scroll_content.minimumSizeHint()
+    content_scroll.setMinimumSize(
+        content_min_hint.width() + scrollbar_extent,
+        content_min_hint.height(),
+    )
+    # 双保险：内容宽度已由最小尺寸保证，禁用水平滚动条杜绝左右翻页。
+    content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
     body.addWidget(content_scroll, 1)
 

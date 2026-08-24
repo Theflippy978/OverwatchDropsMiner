@@ -6,7 +6,13 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QMainWindow, QPushButton, QSpinBox
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QPushButton,
+    QSpinBox,
+    QStyle,
+)
 
 from overwatch_drops_miner.gui_parts.main_layout import (
     MAX_THREAD_COUNT,
@@ -62,6 +68,44 @@ class MainLayoutTest(unittest.TestCase):
             self.assertEqual(widgets.task_progress_bar.maximum(), 100)
             self.assertEqual(widgets.theme_button.text(), "切换主题")
             self.assertIsNotNone(widgets.account_panel)
+        finally:
+            window.deleteLater()
+
+    def test_scroll_area_reserves_vertical_scrollbar_width(self) -> None:
+        """最小宽度须预留垂直滚动条宽度且禁用水平滚动条。
+
+        展开日志出现垂直滚动条时占用预留宽度，viewport 宽度不变、
+        内容不被挤压，因此水平方向永远不需要滚动（杜绝左右翻页）。
+        """
+        window = QMainWindow()
+        callbacks = MainWindowCallbacks(
+            start=_noop,
+            stop=_noop,
+            load_config=_noop,
+            save_config=_noop,
+            clear_logs=_noop,
+            claim_rewards=_noop,
+            refresh_tasks=_noop,
+            toggle_log=_noop,
+            auto_fetch_room_id=_noop,
+            auto_fetch_task_ids_mode1=_noop,
+            auto_fetch_task_ids_mode2=_noop,
+            toggle_theme=_noop,
+        )
+        widgets = build_main_window_layout(window, callbacks)
+        try:
+            content_min = widgets.scroll_content.minimumSizeHint()
+            scrollbar_extent = widgets.content_scroll.style().pixelMetric(
+                QStyle.PM_ScrollBarExtent, None, widgets.content_scroll
+            )
+            self.assertEqual(
+                widgets.content_scroll.minimumWidth(),
+                content_min.width() + scrollbar_extent,
+            )
+            self.assertEqual(
+                widgets.content_scroll.horizontalScrollBarPolicy(),
+                Qt.ScrollBarAlwaysOff,
+            )
         finally:
             window.deleteLater()
 
