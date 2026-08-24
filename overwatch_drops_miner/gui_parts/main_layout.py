@@ -16,12 +16,12 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSizePolicy,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from overwatch_drops_miner.gui_parts.account_panel import AccountPanel
+from overwatch_drops_miner.gui_parts.plus_minus_spinbox import PlusMinusSpinBox
 from overwatch_drops_miner.gui_parts.styles import make_button
 
 MAX_THREAD_COUNT = 128
@@ -52,7 +52,7 @@ class MainWindowWidgets:
     rooms_edit: QLineEdit
     task_ids_edit: QLineEdit
     notify_urls_edit: QLineEdit
-    threads_spin: QSpinBox
+    threads_spin: PlusMinusSpinBox
     reconnect_edit: QLineEdit
     task_interval_edit: QLineEdit
     verbose_check: QCheckBox
@@ -140,7 +140,7 @@ def build_main_window_layout(
     )
     config_layout.addLayout(_build_labeled_row("通知 URL", notify_urls_edit))
 
-    threads_spin = QSpinBox()
+    threads_spin = PlusMinusSpinBox()
     threads_spin.setRange(1, MAX_THREAD_COUNT)
     threads_spin.setValue(1)
     threads_spin.setToolTip(THREADS_TOOLTIP)
@@ -265,7 +265,7 @@ def build_main_window_layout(
     log_toggle_btn.setCursor(Qt.PointingHandCursor)
     log_toggle_btn.setProperty("accent", "ghost")
     log_toggle_btn.clicked.connect(callbacks.toggle_log)
-    log_layout.addWidget(log_toggle_btn)
+    log_layout.addWidget(log_toggle_btn, 0, Qt.AlignLeft)
 
     log_text = QPlainTextEdit()
     log_text.setReadOnly(True)

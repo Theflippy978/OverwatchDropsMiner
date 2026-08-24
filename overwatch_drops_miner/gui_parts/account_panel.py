@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QFrame,
@@ -132,7 +132,10 @@ class AccountPanel(QFrame):
     # ---------- internals ----------
 
     def _show_add_menu(self) -> None:
-        self._add_menu.exec(self.add_button.mapToGlobal(self.add_button.rect().bottomLeft()))
+        # 弹出到按钮正上方，避免被窗口底部截断。
+        top_left = self.add_button.mapToGlobal(self.add_button.rect().topLeft())
+        menu_height = self._add_menu.sizeHint().height()
+        self._add_menu.exec(top_left - QPoint(0, menu_height + 4))
 
     def _on_current_changed(self, current: QListWidgetItem, _previous) -> None:
         account_id = self.current_account_id()

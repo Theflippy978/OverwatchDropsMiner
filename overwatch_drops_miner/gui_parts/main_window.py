@@ -119,7 +119,7 @@ class MinerGUI(QMainWindow):
         super().__init__()
         self._gui_state = gui_state if gui_state is not None else GuiStateStore()
         self.theme_manager = theme_manager
-        self.setWindowTitle(f"守望先锋直播掉宝助手 {APP_VERSION}")
+        self.setWindowTitle("守望先锋直播掉宝助手")
         self.setWindowIcon(_app_icon())
         self.resize(1240, 780)
         self.setMinimumSize(1160, 680)
@@ -226,6 +226,7 @@ class MinerGUI(QMainWindow):
         self.auto_claim_rewards_check = widgets.auto_claim_rewards_check
         self.account_status_label = widgets.account_status_label
         self._log_expanded = False
+        self._height_before_log: int | None = None
 
     def _connect_account_panel(self) -> None:
         panel = self.account_panel
@@ -633,8 +634,12 @@ class MinerGUI(QMainWindow):
         if self._log_expanded:
             self.log_text.setVisible(False)
             self._log_toggle_btn.setText("▶ 运行日志")
-            self.resize(self.width(), self._size_collapsed[1])
+            # 恢复到展开前记录的实际高度（兼容用户手动调整过的窗口大小）。
+            restore_height = self._height_before_log or self._size_collapsed[1]
+            self.resize(self.width(), restore_height)
+            self._height_before_log = None
         else:
+            self._height_before_log = self.height()
             self.log_text.setVisible(True)
             self._log_toggle_btn.setText("▼ 运行日志")
             self.resize(self.width(), self._size_expanded[1])

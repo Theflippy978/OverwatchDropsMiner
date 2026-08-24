@@ -210,20 +210,8 @@ def build_stylesheet(t: ThemeTokens) -> str:
         QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
             background: {t.neutral_border_hover};
         }}
-        QSpinBox::up-arrow {{
-            width: 0; height: 0; border-left: 4px solid transparent;
-            border-right: 4px solid transparent; border-bottom: 5px solid {t.text_dim};
-        }}
-        QSpinBox::up-arrow:hover {{
-            border-bottom: 5px solid {t.text};
-        }}
-        QSpinBox::down-arrow {{
-            width: 0; height: 0; border-left: 4px solid transparent;
-            border-right: 4px solid transparent; border-top: 5px solid {t.text_dim};
-        }}
-        QSpinBox::down-arrow:hover {{
-            border-top: 5px solid {t.text};
-        }}
+        QSpinBox::up-arrow {{ width: 0; height: 0; }}
+        QSpinBox::down-arrow {{ width: 0; height: 0; }}
 
         QPlainTextEdit {{
             background: {t.input_bg}; color: {t.text};
@@ -371,4 +359,8 @@ class ThemeManager(QObject):
         self.set_theme(LIGHT if self._theme == DARK else DARK)
 
     def _apply(self) -> None:
-        self._app.setStyleSheet(build_stylesheet(TOKENS[self._theme]))
+        tokens = TOKENS[self._theme]
+        self._app.setStyleSheet(build_stylesheet(tokens))
+        # PlusMinusSpinBox 从应用属性读取符号颜色，保证双主题下清晰可见。
+        self._app.setProperty("ow_spin_symbol_color", tokens.text_dim)
+        self._app.setProperty("ow_spin_symbol_hover_color", tokens.text)
