@@ -6,6 +6,10 @@ import logging
 import threading
 from collections.abc import Callable
 
+from overwatch_drops_miner.account_log_context import (
+    clear_current_account,
+    set_current_account,
+)
 from overwatch_drops_miner.client import BilibiliClient, LiveWatchTime
 from overwatch_drops_miner.gui_parts.task_presenter import (
     format_live_watch_time_progress,
@@ -62,6 +66,7 @@ class TaskController:
         post_ui_task: Callable[..., None],
         get_auto_claim_enabled: Callable[[], bool] | None = None,
         on_progress_values: Callable[[float, float], None] | None = None,
+        account_id: str | None = None,
     ) -> None:
         self._get_cookie = get_cookie
         self._get_room_ids = get_room_ids
@@ -73,6 +78,9 @@ class TaskController:
         self._post_ui_task = post_ui_task
         self._get_auto_claim_enabled = get_auto_claim_enabled or (lambda: False)
         self._on_progress_values = on_progress_values
+        # 所属账号 ID：后台线程执行期间绑定日志上下文，使 httpx 等警告
+        # 落到对应账号的日志栏而非系统栏。
+        self._account_id = account_id
         self._task_refresh_lock = threading.Lock()
         self._task_refresh_inflight = False
         self._task_refresh_queued = False
@@ -86,6 +94,22 @@ class TaskController:
         self._watch_time_generation = 0
         self._watch_time_baselines: dict[int, int] = {}
         self._watch_time_ruids: dict[int, int] = {}
+
+    def _spawn_background_thread(self, name: str, body: Callable[[], None]) -> None:
+        """以后台线程执行 body，并在执行期间绑定账号日志上下文。
+
+        线程入口设置 current_account，finally 中清除，保证 httpx 等
+        第三方库的警告日志落到对应账号栏且不污染其他线程。
+        """
+
+        def _run() -> None:
+            set_current_account(self._account_id)
+            try:
+                body()
+            finally:
+                clear_current_account()
+
+        threading.Thread(target=_run, daemon=True, name=name).start()
 
     @staticmethod
     def _build_auto_claim_context(
@@ -202,11 +226,7 @@ class TaskController:
                 if should_update and result_text:
                     self._post_ui_task(self._set_live_watch_time_text, result_text)
 
-        threading.Thread(
-            target=_do,
-            daemon=True,
-            name="gui-live-watch-time-refresh",
-        ).start()
+        self._spawn_background_thread("gui-live-watch-time-refresh", _do)
 
     def refresh(self, *, manual: bool = True) -> None:
         cookie = self._get_cookie().strip()
@@ -296,7 +316,7 @@ class TaskController:
                         expected_context=auto_claim_context,
                     )
 
-        threading.Thread(target=_do, daemon=True, name="gui-task-refresh").start()
+        self._spawn_background_thread("gui-task-refresh", _do)
 
     def claim_rewards(
         self,
@@ -383,4 +403,4 @@ class TaskController:
                     logging.getLogger(__name__).info("领取奖励结果:\n%s", result_text)
                 self._post_ui_task(self._set_task_progress_text, result_text)
 
-        threading.Thread(target=_do, daemon=True, name="gui-reward-claim").start()
+        self._spawn_background_thread("gui-reward-claim", _do)

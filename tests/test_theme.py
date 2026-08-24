@@ -7,7 +7,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtWidgets import QApplication
 
 from overwatch_drops_miner.gui_parts.app_style import configure_qt_app
@@ -71,6 +71,51 @@ class ThemeTest(unittest.TestCase):
 
     def test_detect_system_theme_returns_valid_theme(self) -> None:
         self.assertIn(detect_system_theme(), TOKENS)
+
+    def test_check_system_theme_changed_applies_switch_and_persists(self) -> None:
+        # 模拟注册表读取序列：构造时 dark -> 检查无变化 -> 检查切到 light。
+        readings = iter([DARK, DARK, LIGHT])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = self._state_for(temp_dir)
+            manager = ThemeManager(
+                self.app,
+                state,
+                system_theme_reader=lambda: next(readings),
+            )
+            self.assertEqual(manager.theme, DARK)
+
+            # 系统主题未变化：返回 False 且不切换。
+            self.assertFalse(manager.check_system_theme_changed())
+            self.assertEqual(manager.theme, DARK)
+
+            # 系统切到浅色：返回 True，自动应用并写入 QSettings。
+            self.assertTrue(manager.check_system_theme_changed())
+            self.assertEqual(manager.theme, LIGHT)
+            state.sync()
+
+            reloaded = ThemeManager(
+                self.app,
+                self._state_for(temp_dir),
+                system_theme_reader=lambda: LIGHT,
+            )
+            self.assertEqual(reloaded.theme, LIGHT)
+
+    def test_start_system_theme_polling_starts_and_reuses_timer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ThemeManager(
+                self.app,
+                self._state_for(temp_dir),
+                system_theme_reader=lambda: DARK,
+            )
+            timer = manager.start_system_theme_polling(interval_ms=5000)
+            try:
+                self.assertIsInstance(timer, QTimer)
+                self.assertTrue(timer.isActive())
+                self.assertEqual(timer.interval(), 5000)
+                # 重复开启应复用同一轮询计时器，避免叠加多个定时器。
+                self.assertIs(manager.start_system_theme_polling(), timer)
+            finally:
+                timer.stop()
 
 
 if __name__ == "__main__":

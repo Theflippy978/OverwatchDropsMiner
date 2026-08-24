@@ -37,6 +37,7 @@ from overwatch_drops_miner.gui_parts.gui_state import GuiStateStore
 from overwatch_drops_miner.gui_parts.log_handler import QueueLogHandler
 from overwatch_drops_miner.gui_parts.main_layout import (
     MainWindowCallbacks,
+    apply_start_stop_button_state,
     build_main_window_layout,
 )
 from overwatch_drops_miner.gui_parts.qr_login_dialog import QrLoginDialog
@@ -228,8 +229,13 @@ class MinerGUI(QMainWindow):
         self.claim_rewards_btn = widgets.claim_rewards_btn
         self.auto_claim_rewards_check = widgets.auto_claim_rewards_check
         self.account_status_label = widgets.account_status_label
+        # 保留启停按钮引用，供账号选中/运行状态变化时联动禁用状态机。
+        self.start_btn = widgets.start_btn
+        self.stop_btn = widgets.stop_btn
         self._log_expanded = False
         self._height_before_log: int | None = None
+        # 初始未选中账号：启停按钮均禁用。
+        self._update_start_stop_buttons()
 
     def _connect_account_panel(self) -> None:
         panel = self.account_panel
@@ -401,6 +407,8 @@ class MinerGUI(QMainWindow):
         self._refresh_task_text()
         self._refresh_log_text()
         self._update_watch_estimate()
+        # 账号选中变化：联动启停按钮可用性。
+        self._update_start_stop_buttons()
         account = self.account_store.get(account_id)
         if account is not None:
             running = self.miner_manager.is_running(account_id)
@@ -530,9 +538,23 @@ class MinerGUI(QMainWindow):
             self.task_progress_bar.setValue(0)
         self._refresh_account_list()
         self._refresh_log_text()
+        # 删除后若列表为空则不会触发选中信号，这里显式刷新一次按钮状态。
+        self._update_start_stop_buttons()
         LOGGER.info("账号 [%s] 已删除", account.remark or account.id[:8])
 
     # ---------- start / stop ----------
+
+    def _update_start_stop_buttons(self) -> None:
+        """联动启停按钮可用性：未选账号全禁用；选中账号按运行态互斥。"""
+        account_id = self.account_panel.current_account_id()
+        apply_start_stop_button_state(
+            self.start_btn,
+            self.stop_btn,
+            has_selection=account_id is not None,
+            running=(
+                account_id is not None and self.miner_manager.is_running(account_id)
+            ),
+        )
 
     def start_account(self, account_id: str) -> None:
         account = self.account_store.get(account_id)
@@ -601,6 +623,8 @@ class MinerGUI(QMainWindow):
             return
         self.account_panel.set_running(account_id, running)
         self._update_running_count()
+        # 账号运行状态变化：联动启停按钮可用性。
+        self._update_start_stop_buttons()
         if self._current_account_id == account_id:
             self._on_account_selected(account_id)
         if not running and self.miner_manager.running_count() == 0:
@@ -694,9 +718,12 @@ class MinerGUI(QMainWindow):
         )
         lines = list(self._system_logs) + list(account_lines)
         scroll_bar = self.log_text.verticalScrollBar()
-        scroll_value = scroll_bar.value()
+        # 刷新前判断滚动条是否停在底部（留 30px 容差）：在底部则刷新后
+        # 跟随最新日志，否则保持当前位置，避免上翻查看历史时被拉回底部。
+        was_at_bottom = scroll_bar.value() >= scroll_bar.maximum() - 30
         self.log_text.setPlainText("\n".join(lines))
-        scroll_bar.setValue(min(scroll_value, scroll_bar.maximum()))
+        if was_at_bottom:
+            scroll_bar.setValue(scroll_bar.maximum())
 
     # ---------- task progress ----------
 
@@ -745,6 +772,7 @@ class MinerGUI(QMainWindow):
                 if aid in self._task_controllers
                 else None
             ),
+            account_id=account_id,
         )
         self._task_controllers[account_id] = controller
         return controller
@@ -1036,6 +1064,8 @@ def run_gui() -> int:
         pass
     gui_state = GuiStateStore()
     theme_manager = ThemeManager(app, gui_state)
+    # 开启系统深浅色跟随：每 5 秒轮询注册表，运行中切换 Windows 深浅色时自动换肤。
+    theme_manager.start_system_theme_polling()
     window = MinerGUI(gui_state=gui_state, theme_manager=theme_manager)
     window.show()
     return app.exec()

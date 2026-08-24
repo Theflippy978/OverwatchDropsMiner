@@ -323,6 +323,22 @@ def build_main_window_layout(
     )
 
 
+def apply_start_stop_button_state(
+    start_btn: QPushButton,
+    stop_btn: QPushButton,
+    *,
+    has_selection: bool,
+    running: bool,
+) -> None:
+    """按账号选中与运行状态联动启停按钮：互斥启用，未选账号则全部禁用。"""
+    if not has_selection:
+        start_btn.setEnabled(False)
+        stop_btn.setEnabled(False)
+        return
+    start_btn.setEnabled(not running)
+    stop_btn.setEnabled(running)
+
+
 def _make_card() -> QFrame:
     card = QFrame()
     card.setObjectName("card")

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import winreg
+from collections.abc import Callable
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication
 
 from overwatch_drops_miner.gui_parts.gui_state import GuiStateStore
@@ -10,6 +11,9 @@ from overwatch_drops_miner.gui_parts.gui_state import GuiStateStore
 THEME_KEY = "ui/theme"
 DARK = "dark"
 LIGHT = "light"
+
+# 系统深浅色轮询间隔：轻量读注册表，5 秒足够灵敏且几乎无开销。
+SYSTEM_THEME_POLL_INTERVAL_MS = 5000
 
 _SYSTEM_LIGHT_THEME_REG_PATH = (
     r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
@@ -324,15 +328,27 @@ class ThemeManager(QObject):
 
     theme_changed = Signal(str)
 
-    def __init__(self, app: QApplication, gui_state: GuiStateStore) -> None:
+    def __init__(
+        self,
+        app: QApplication,
+        gui_state: GuiStateStore,
+        *,
+        system_theme_reader: Callable[[], str] | None = None,
+    ) -> None:
         super().__init__()
         self._app = app
         self._gui_state = gui_state
+        # 系统主题读取器可注入，便于单元测试模拟注册表深浅色变化。
+        self._system_theme_reader = system_theme_reader or detect_system_theme
+        detected = self._system_theme_reader()
         saved = str(gui_state.value(THEME_KEY, "") or "").strip()
         if saved in TOKENS:
             self._theme = saved
         else:
-            self._theme = detect_system_theme()
+            self._theme = detected
+        # 记录最近一次观测到的系统主题，供运行中轮询检测切换。
+        self._last_system_theme = detected
+        self._poll_timer: QTimer | None = None
         self._apply()
 
     @property
@@ -357,6 +373,35 @@ class ThemeManager(QObject):
 
     def toggle(self) -> None:
         self.set_theme(LIGHT if self._theme == DARK else DARK)
+
+    def check_system_theme_changed(self) -> bool:
+        """检查 Windows 系统深浅色是否切换。
+
+        与上次观测值比较：未变化返回 False；变化则自动应用对应主题
+        （set_theme 内部会写入 QSettings 的 ui/theme）并返回 True。
+        """
+        current = self._system_theme_reader()
+        if current == self._last_system_theme:
+            return False
+        self._last_system_theme = current
+        if current in TOKENS:
+            self.set_theme(current)
+        return True
+
+    def start_system_theme_polling(
+        self,
+        interval_ms: int = SYSTEM_THEME_POLL_INTERVAL_MS,
+        parent: QObject | None = None,
+    ) -> QTimer:
+        """开启系统主题轮询计时器（默认每 5 秒检查一次），重复调用复用。"""
+        if self._poll_timer is not None:
+            return self._poll_timer
+        timer = QTimer(parent if parent is not None else self)
+        timer.setInterval(interval_ms)
+        timer.timeout.connect(self.check_system_theme_changed)
+        timer.start()
+        self._poll_timer = timer
+        return timer
 
     def _apply(self) -> None:
         tokens = TOKENS[self._theme]

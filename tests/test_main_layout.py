@@ -6,12 +6,13 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QMainWindow, QSpinBox
+from PySide6.QtWidgets import QApplication, QMainWindow, QPushButton, QSpinBox
 
 from overwatch_drops_miner.gui_parts.main_layout import (
     MAX_THREAD_COUNT,
     THREADS_TOOLTIP,
     MainWindowCallbacks,
+    apply_start_stop_button_state,
     build_main_window_layout,
 )
 
@@ -111,6 +112,62 @@ class MainLayoutTest(unittest.TestCase):
             widgets.start_btn.click()
             widgets.stop_btn.click()
             self.assertEqual(calls, ["start", "stop"])
+        finally:
+            window.deleteLater()
+
+    def test_widgets_expose_distinct_start_stop_buttons(self) -> None:
+        window = QMainWindow()
+        callbacks = MainWindowCallbacks(
+            start=_noop,
+            stop=_noop,
+            load_config=_noop,
+            save_config=_noop,
+            clear_logs=_noop,
+            claim_rewards=_noop,
+            refresh_tasks=_noop,
+            toggle_log=_noop,
+            auto_fetch_room_id=_noop,
+            auto_fetch_task_ids_mode1=_noop,
+            auto_fetch_task_ids_mode2=_noop,
+            toggle_theme=_noop,
+        )
+        widgets = build_main_window_layout(window, callbacks)
+        try:
+            # 启停按钮引用必须暴露且为两个不同实例，供主窗口状态机联动。
+            self.assertIsNot(widgets.start_btn, widgets.stop_btn)
+            self.assertEqual(widgets.start_btn.text(), "启动")
+            self.assertEqual(widgets.stop_btn.text(), "停止")
+        finally:
+            window.deleteLater()
+
+    def test_apply_start_stop_button_state_matrix(self) -> None:
+        window = QMainWindow()
+        try:
+            start_btn = QPushButton(window)
+            stop_btn = QPushButton(window)
+            # (有选中账号, 运行中) -> (启动可用, 停止可用)
+            cases: list[tuple[bool, bool, bool, bool]] = [
+                (False, False, False, False),  # 未选账号：全禁用
+                (True, False, True, False),  # 选中未运行：启动可用
+                (True, True, False, True),  # 选中运行中：仅停止可用
+            ]
+            for has_selection, running, start_enabled, stop_enabled in cases:
+                apply_start_stop_button_state(
+                    start_btn,
+                    stop_btn,
+                    has_selection=has_selection,
+                    running=running,
+                )
+                self.assertEqual(
+                    start_btn.isEnabled(),
+                    start_enabled,
+                    f"has_selection={has_selection}, running={running}",
+                )
+                self.assertEqual(
+                    stop_btn.isEnabled(),
+                    stop_enabled,
+                    f"has_selection={has_selection}, running={running}",
+                )
         finally:
             window.deleteLater()
 

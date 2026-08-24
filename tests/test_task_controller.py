@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from overwatch_drops_miner.account_log_context import get_current_account
 from overwatch_drops_miner.client_parts.models import (
     MissionRewardClaimResult,
     TaskCheckpointProgress,
@@ -26,7 +28,7 @@ class _Recorder:
         self.completions: list[tuple[str, bool]] = []
         self.auto_claim_enabled = False
 
-    def build_controller(self) -> TaskController:
+    def build_controller(self, *, account_id: str | None = None) -> TaskController:
         return TaskController(
             get_cookie=lambda: self.cookie,
             get_room_ids=lambda: list(self.room_ids),
@@ -37,6 +39,7 @@ class _Recorder:
             complete_task_refresh=self._complete_task_refresh,
             post_ui_task=self._post_ui_task,
             get_auto_claim_enabled=lambda: self.auto_claim_enabled,
+            account_id=account_id,
         )
 
     def _complete_task_refresh(self, result_text: str, rerun: bool) -> None:
@@ -316,6 +319,156 @@ class TaskControllerTest(unittest.TestCase):
         self.assertEqual(claimed, {"claimed"})
         self.assertEqual(incomplete, {"pending"})
         self.assertIn("✔ 已领取", format_task_progress(progresses))
+
+
+class _RefreshContextProbeClient(_FakeClient):
+    """记录线程执行期间账号日志上下文的假客户端（任务刷新路径）。"""
+
+    observed_accounts: list[str | None] = []
+
+    async def get_task_progress(self, task_ids: list[str]) -> list[TaskProgress]:
+        _RefreshContextProbeClient.observed_accounts.append(get_current_account())
+        return []
+
+
+class _ClaimContextProbeClient(_CompletedFakeClient):
+    """记录线程执行期间账号日志上下文的假客户端（领奖路径）。"""
+
+    observed_accounts: list[str | None] = []
+
+    async def receive_all_mission_rewards(
+        self,
+        task_ids: list[str],
+    ) -> list[MissionRewardClaimResult]:
+        _ClaimContextProbeClient.observed_accounts.append(get_current_account())
+        return [
+            MissionRewardClaimResult(
+                task_id="task-a",
+                task_name="任务",
+                reward_name="奖励",
+                status=6,
+                message="领取成功",
+                success=True,
+                skipped=False,
+                code=0,
+            )
+        ]
+
+
+class _WatchTimeContextProbeClient(_FakeClient):
+    """记录线程执行期间账号日志上下文的假客户端（观看时长刷新路径）。"""
+
+    observed_accounts: list[str | None] = []
+
+    async def get_live_watch_time(self, room_id: int, ruid=None):
+        _WatchTimeContextProbeClient.observed_accounts.append(get_current_account())
+        return SimpleNamespace(
+            room_id=room_id,
+            ruid=ruid if ruid is not None else 10086,
+            watch_time=120,
+        )
+
+
+class TaskControllerLogContextTest(unittest.TestCase):
+    """后台线程必须绑定账号日志上下文，退出时清理且不污染调用线程。"""
+
+    def setUp(self) -> None:
+        _FakeThread.instances.clear()
+        _RefreshContextProbeClient.observed_accounts.clear()
+        _ClaimContextProbeClient.observed_accounts.clear()
+        _WatchTimeContextProbeClient.observed_accounts.clear()
+
+    def _run_thread_body(self) -> None:
+        # _FakeThread.start 不真正开线程，手动执行 target 模拟工作线程。
+        _FakeThread.instances[0].target()
+
+    def test_refresh_binds_and_clears_account_context(self) -> None:
+        recorder = _Recorder()
+        controller = recorder.build_controller(account_id="acct-refresh")
+
+        with (
+            patch(
+                "overwatch_drops_miner.gui_parts.task_controller.threading.Thread",
+                _FakeThread,
+            ),
+            patch(
+                "overwatch_drops_miner.gui_parts.task_controller.BilibiliClient",
+                _RefreshContextProbeClient,
+            ),
+        ):
+            controller.refresh(manual=False)
+            # 调用方线程上下文不应被提前污染。
+            self.assertIsNone(get_current_account())
+
+            self._run_thread_body()
+
+        self.assertEqual(_RefreshContextProbeClient.observed_accounts, ["acct-refresh"])
+        # finally 清理生效：线程结束后上下文被清除。
+        self.assertIsNone(get_current_account())
+
+    def test_refresh_without_account_id_sets_none_context(self) -> None:
+        recorder = _Recorder()
+        controller = recorder.build_controller(account_id=None)
+
+        with (
+            patch(
+                "overwatch_drops_miner.gui_parts.task_controller.threading.Thread",
+                _FakeThread,
+            ),
+            patch(
+                "overwatch_drops_miner.gui_parts.task_controller.BilibiliClient",
+                _RefreshContextProbeClient,
+            ),
+        ):
+            controller.refresh(manual=False)
+            self._run_thread_body()
+
+        self.assertEqual(_RefreshContextProbeClient.observed_accounts, [None])
+        self.assertIsNone(get_current_account())
+
+    def test_claim_rewards_binds_and_clears_account_context(self) -> None:
+        recorder = _Recorder()
+        controller = recorder.build_controller(account_id="acct-claim")
+
+        with (
+            patch(
+                "overwatch_drops_miner.gui_parts.task_controller.threading.Thread",
+                _FakeThread,
+            ),
+            patch(
+                "overwatch_drops_miner.gui_parts.task_controller.BilibiliClient",
+                _ClaimContextProbeClient,
+            ),
+        ):
+            controller.claim_rewards()
+            self.assertIsNone(get_current_account())
+
+            self._run_thread_body()
+
+        self.assertEqual(_ClaimContextProbeClient.observed_accounts, ["acct-claim"])
+        self.assertIsNone(get_current_account())
+
+    def test_refresh_live_watch_time_binds_and_clears_account_context(self) -> None:
+        recorder = _Recorder()
+        controller = recorder.build_controller(account_id="acct-watch")
+
+        with (
+            patch(
+                "overwatch_drops_miner.gui_parts.task_controller.threading.Thread",
+                _FakeThread,
+            ),
+            patch(
+                "overwatch_drops_miner.gui_parts.task_controller.BilibiliClient",
+                _WatchTimeContextProbeClient,
+            ),
+        ):
+            controller.refresh_live_watch_time()
+            self.assertIsNone(get_current_account())
+
+            self._run_thread_body()
+
+        self.assertEqual(_WatchTimeContextProbeClient.observed_accounts, ["acct-watch"])
+        self.assertIsNone(get_current_account())
 
 
 if __name__ == "__main__":
