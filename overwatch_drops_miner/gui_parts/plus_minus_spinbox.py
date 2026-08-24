@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QRect, Qt
+from PySide6.QtCore import QLineF, QPointF, QRect, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
@@ -13,6 +13,42 @@ SYMBOL_COLOR_PROPERTY = "ow_spin_symbol_color"
 DEFAULT_SYMBOL_COLOR = "#94a3b8"
 HOVER_SYMBOL_COLOR_PROPERTY = "ow_spin_symbol_hover_color"
 DEFAULT_HOVER_COLOR = "#f8fafc"
+
+# 加减号四臂长度（逻辑像素），横竖对称。
+SYMBOL_ARM = 4.0
+
+
+def _symbol_center(rect: QRect) -> QPointF:
+    """按钮矩形覆盖面积的精确几何中心（浮点，单位：逻辑像素）。
+
+    QRect.center() 返回整数坐标：当矩形宽或高为偶数时真实中心落在
+    半像素位置，整数截断会让结果偏向左上（例如 QRect(106, 2, 16, 12)
+    的真实中心是 (113.5, 7.5)，而 center() 返回 (113, 7)）。该半像素
+    偏差在高 DPI（125%~200% 缩放）下被放大为肉眼可见的错位。
+    像素 i 的覆盖面积为 [i-0.5, i+0.5]，故面积中心为
+    ((left+right)/2, (top+bottom)/2)。注意不可用 QRectF(rect).center()
+    代替：QRect→QRectF 转换会把右/下边界外扩 1，同样产生偏差。
+    """
+    return QPointF(
+        (rect.left() + rect.right()) / 2.0,
+        (rect.top() + rect.bottom()) / 2.0,
+    )
+
+
+def _minus_line(rect: QRect) -> QLineF:
+    """减号水平线段：关于按钮面积中心左右对称。"""
+    c = _symbol_center(rect)
+    arm = SYMBOL_ARM
+    return QLineF(c.x() - arm, c.y(), c.x() + arm, c.y())
+
+
+def _plus_lines(rect: QRect) -> tuple[QLineF, QLineF]:
+    """加号横竖两条线段：交点即按钮面积中心。"""
+    c = _symbol_center(rect)
+    arm = SYMBOL_ARM
+    horizontal = QLineF(c.x() - arm, c.y(), c.x() + arm, c.y())
+    vertical = QLineF(c.x(), c.y() - arm, c.x(), c.y() + arm)
+    return horizontal, vertical
 
 
 class PlusMinusSpinBox(QSpinBox):
@@ -45,7 +81,9 @@ class PlusMinusSpinBox(QSpinBox):
         mouse_over = bool(option.state & QStyle.State_MouseOver)
 
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, False)
+        # 抗锯齿 + 浮点线段坐标：符号围绕真实几何中心对称栅格化，
+        # 高 DPI 下不再因整数取整偏向左上（见 _symbol_center 注释）。
+        painter.setRenderHint(QPainter.Antialiasing, True)
 
         def symbol_pen(bright: bool) -> QPen:
             pen = QPen(QColor(hover_color if bright else color))
@@ -59,19 +97,7 @@ class PlusMinusSpinBox(QSpinBox):
             option.activeSubControls & QStyle.SC_SpinBoxDown
         )
         painter.setPen(symbol_pen(down_hover))
-        self._draw_minus(painter, down_rect)
+        painter.drawLine(_minus_line(down_rect))
         painter.setPen(symbol_pen(up_hover))
-        self._draw_plus(painter, up_rect)
-
-    def _draw_plus(self, painter: QPainter, rect: QRect) -> None:
-        cx = rect.center().x()
-        cy = rect.center().y()
-        arm = 4
-        painter.drawLine(cx - arm, cy, cx + arm, cy)
-        painter.drawLine(cx, cy - arm, cx, cy + arm)
-
-    def _draw_minus(self, painter: QPainter, rect: QRect) -> None:
-        cx = rect.center().x()
-        cy = rect.center().y()
-        arm = 4
-        painter.drawLine(cx - arm, cy, cx + arm, cy)
+        for line in _plus_lines(up_rect):
+            painter.drawLine(line)
