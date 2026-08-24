@@ -70,6 +70,8 @@ class MainWindowWidgets:
     account_status_label: QLabel
     start_btn: QPushButton
     stop_btn: QPushButton
+    content_scroll: QScrollArea
+    scroll_content: QWidget
 
 
 def build_main_window_layout(
@@ -283,14 +285,18 @@ def build_main_window_layout(
 
     content.addWidget(log_card)
 
-    # 内容区包进滚动容器：窗口高度不足以容纳全部内容（如展开日志后
-    # 超过屏幕可用高度）时，可向下滚动翻页查看，窗口本身始终不出屏。
+    # 内容区包进滚动容器：仅当日志展开等内容超过窗口高度时才出现滚动条。
+    # 收起日志状态下，窗口最小尺寸取自内容最小需求（见下方 setMinimumSize），
+    # 保证常规使用时滚动条不会出现。
     scroll_content = QWidget()
     scroll_content.setLayout(content)
     content_scroll = QScrollArea()
     content_scroll.setWidgetResizable(True)
     content_scroll.setFrameShape(QFrame.NoFrame)
     content_scroll.setWidget(scroll_content)
+    # 滚动容器的最小尺寸 = 收起状态下内容的真实最小需求，
+    # 该约束经布局向上传导为窗口最小尺寸，使滚动条在收起时不可能出现。
+    content_scroll.setMinimumSize(scroll_content.minimumSizeHint())
 
     body.addWidget(content_scroll, 1)
 
@@ -320,6 +326,8 @@ def build_main_window_layout(
         account_status_label=account_status_label,
         start_btn=start_btn,
         stop_btn=stop_btn,
+        content_scroll=content_scroll,
+        scroll_content=scroll_content,
     )
 
 

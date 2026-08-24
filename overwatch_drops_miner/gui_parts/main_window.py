@@ -5,7 +5,6 @@ import logging
 import queue
 import sys
 import threading
-import time
 import webbrowser
 from collections import deque
 from pathlib import Path
@@ -124,9 +123,6 @@ class MinerGUI(QMainWindow):
         self.setWindowTitle("守望先锋直播掉宝助手")
         self.setWindowIcon(_app_icon())
         self.resize(1240, 780)
-        self.setMinimumSize(1160, 680)
-        self._size_expanded = (1240, 940)
-        self._size_collapsed = (1240, 780)
 
         self.log_queue: "queue.Queue[tuple[str | None, str]]" = queue.Queue()
         self._ui_alive = True
@@ -144,12 +140,13 @@ class MinerGUI(QMainWindow):
         self._task_refresh_pending: set[str] = set()
         self._qr_login_dialog: QrLoginDialog | None = None
         self._adding_accounts = 0
-        # 渐进式关窗：等待后台线程退出的截止时刻（time.monotonic 秒）。
-        self._shutdown_deadline = 0.0
 
         self.ui_call.connect(self._on_ui_call, Qt.QueuedConnection)
 
         self._build_layout()
+        # 窗口最小尺寸 = 收起日志状态下内容的真实最小需求（含布局边距），
+        # 保证最小窗口时内容完整可见、滚动条不会出现。
+        self.setMinimumSize(self.minimumSizeHint())
         self._connect_account_panel()
         self.browser_actions = BrowserActions(
             parent=self,
@@ -233,7 +230,6 @@ class MinerGUI(QMainWindow):
         self.start_btn = widgets.start_btn
         self.stop_btn = widgets.stop_btn
         self._log_expanded = False
-        self._height_before_log: int | None = None
         # 初始未选中账号：启停按钮均禁用。
         self._update_start_stop_buttons()
 
@@ -682,28 +678,14 @@ class MinerGUI(QMainWindow):
 
     # ---------- log / layout toggle ----------
 
-    def _available_height(self) -> int:
-        screen = QApplication.primaryScreen()
-        if screen is None:
-            return self._size_expanded[1]
-        return screen.availableGeometry().height()
-
     def _toggle_log(self) -> None:
-        if self._log_expanded:
-            self.log_text.setVisible(False)
-            self._log_toggle_btn.setText("▶ 运行日志")
-            # 恢复到展开前记录的实际高度（兼容用户手动调整过的窗口大小），
-            # 且不超过屏幕可用高度。
-            restore_height = self._height_before_log or self._size_collapsed[1]
-            self.resize(self.width(), min(restore_height, self._available_height()))
-            self._height_before_log = None
-        else:
-            self._height_before_log = self.height()
-            self.log_text.setVisible(True)
-            self._log_toggle_btn.setText("▼ 运行日志")
-            expanded_height = min(self._size_expanded[1], self._available_height())
-            self.resize(self.width(), expanded_height)
+        # 仅切换日志区可见性，窗口尺寸完全不变；
+        # 展开后内容超高部分由滚动容器接管（滚动条仅在展开时出现）。
         self._log_expanded = not self._log_expanded
+        self.log_text.setVisible(self._log_expanded)
+        self._log_toggle_btn.setText(
+            "▼ 运行日志" if self._log_expanded else "▶ 运行日志"
+        )
 
     def clear_logs(self) -> None:
         account_id = self._current_account_id
@@ -941,6 +923,18 @@ class MinerGUI(QMainWindow):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        # 存在运行中/停止中的挂宝账号时阻止关闭，提示用户先手动停止；
+        # 全部停止后瞬间退出（后台线程均为 daemon，随进程立即结束）。
+        states = self.miner_manager.shutdown_states()
+        if any(state == "running" for state in states.values()):
+            QMessageBox.warning(
+                self,
+                "无法关闭",
+                "存在正在运行或正在停止的挂宝账号，\n"
+                "请等待其完全停止后再关闭窗口。",
+            )
+            event.ignore()
+            return
         try:
             self._save_session_state()
         except Exception:
@@ -952,36 +946,10 @@ class MinerGUI(QMainWindow):
             self._qr_login_dialog = None
         self._ui_alive = False
         try:
-            self.miner_manager.stop_all()
-        except Exception:
-            logging.getLogger(__name__).exception("关闭时停止挂宝失败")
-        try:
-            self.browser_actions.shutdown()
+            self.browser_actions.shutdown(timeout=0.5)
         except Exception:
             LOGGER.exception("关闭浏览器嗅探失败")
-        # 渐进式关窗：给后台线程最多 5 秒优雅退出，期间不阻塞 GUI 线程。
-        self._shutdown_deadline = time.monotonic() + 5.0
-        QTimer.singleShot(200, self._close_poll_step)
-        event.ignore()
-
-    def _close_poll_step(self) -> None:
-        """关窗轮询一步：所有账号线程均已回收或超时后才真正退出。"""
-        results = [
-            self.miner_manager.poll_shutdown(account_id, logger=LOGGER)
-            for account_id in self.miner_manager.shutdown_states()
-        ]
-        if all(r == "no_thread" for r in results) or (
-            time.monotonic() >= self._shutdown_deadline
-        ):
-            self._quit_app()
-            return
-        QTimer.singleShot(200, self._close_poll_step)
-
-    def _quit_app(self) -> None:
-        """最终退出：结束 Qt 事件循环。"""
-        app = QApplication.instance()
-        if app is not None:
-            app.quit()
+        event.accept()
 
     # ---------- config load/save ----------
 

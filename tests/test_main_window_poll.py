@@ -78,6 +78,8 @@ class MainWindowPollTests(unittest.TestCase):
             window._poll_shutdown_all()
             self.assertTrue(window._stop_poll_timer.isActive())
         finally:
+            # 关窗前清空账号状态，避免 closeEvent 因"运行中"弹阻止提示。
+            manager.shutdown_states.return_value = {}
             window.close()
 
     def test_start_account_failure_warns_after_cleanup(self) -> None:
@@ -150,32 +152,40 @@ class MainWindowPollTests(unittest.TestCase):
             window.close()
 
 
-    def test_close_flow_polls_until_no_thread(self) -> None:
-        """closeEvent 后渐进轮询，全部账号线程回收（no_thread）才调用退出。"""
+    def test_close_blocked_while_account_running(self) -> None:
+        """存在运行中挂宝账号时 closeEvent 被阻止并弹窗提示。"""
+        window = self._make_window()
+        manager = MagicMock()
+        manager.shutdown_states.return_value = {"a": "running"}
+        window.miner_manager = manager
+
+        # mock 必须覆盖整个生命周期：closeEvent 被阻止后窗口保持可见，
+        # finally 中的再次 close 会再次触发阻止弹窗。
+        with (
+            patch.object(QMessageBox, "warning") as warn_mock,
+            patch.object(MinerGUI, "_save_session_state", lambda self: None),
+        ):
+            window.close()
+            warn_mock.assert_called_once()
+            window.close()
+            # 两次 close 均被 closeEvent 阻止（弹窗各触发一次）。
+            self.assertEqual(warn_mock.call_count, 2)
+
+    def test_close_accepted_when_all_accounts_idle(self) -> None:
+        """全部账号停止后关闭窗口应立即接受，不做任何等待。"""
         window = self._make_window()
         try:
             manager = MagicMock()
             manager.shutdown_states.return_value = {"a": "idle"}
-            manager.poll_shutdown.side_effect = ["stopped", "no_thread"]
             window.miner_manager = manager
 
             with (
                 patch.object(window.browser_actions, "shutdown", return_value=True),
-                patch.object(MinerGUI, "_quit_app") as quit_mock,
+                patch.object(MinerGUI, "_save_session_state", lambda self: None),
             ):
-                # closeEvent 只触发渐进关窗，不立即退出。
                 window.close()
-                manager.stop_all.assert_called_once()
-                quit_mock.assert_not_called()
-
-                # 第一轮仍在线程收尾（stopped），不应退出。
-                window._close_poll_step()
-                quit_mock.assert_not_called()
-
-                # 第二轮确认全部回收，此时才允许最终退出。
-                window._close_poll_step()
-                quit_mock.assert_called_once()
-                self.assertEqual(manager.poll_shutdown.call_count, 2)
+            # 空闲状态下不应调用 stop_all（没有需要停止的账号）。
+            manager.stop_all.assert_not_called()
         finally:
             window.close()
 
