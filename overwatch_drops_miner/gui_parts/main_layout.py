@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -108,7 +109,6 @@ def build_main_window_layout(
 
     content = QVBoxLayout()
     content.setSpacing(10)
-    body.addLayout(content, 1)
 
     # ---- 共享配置卡 ----
     config_card = _make_card()
@@ -282,6 +282,17 @@ def build_main_window_layout(
     log_layout.addLayout(clear_row)
 
     content.addWidget(log_card)
+
+    # 内容区包进滚动容器：窗口高度不足以容纳全部内容（如展开日志后
+    # 超过屏幕可用高度）时，可向下滚动翻页查看，窗口本身始终不出屏。
+    scroll_content = QWidget()
+    scroll_content.setLayout(content)
+    content_scroll = QScrollArea()
+    content_scroll.setWidgetResizable(True)
+    content_scroll.setFrameShape(QFrame.NoFrame)
+    content_scroll.setWidget(scroll_content)
+
+    body.addWidget(content_scroll, 1)
 
     root_layout.addLayout(body, 1)
 

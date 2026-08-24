@@ -38,10 +38,10 @@ class PlusMinusSpinBox(QSpinBox):
         style = self.style()
         up_rect = style.subControlRect(
             QStyle.CC_SpinBox, option, QStyle.SC_SpinBoxUp, self
-        )
+        ).adjusted(2, 2, -2, -2)
         down_rect = style.subControlRect(
             QStyle.CC_SpinBox, option, QStyle.SC_SpinBoxDown, self
-        )
+        ).adjusted(2, 2, -2, -2)
         mouse_over = bool(option.state & QStyle.State_MouseOver)
 
         painter = QPainter(self)

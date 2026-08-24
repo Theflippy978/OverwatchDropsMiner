@@ -203,9 +203,9 @@ def build_stylesheet(t: ThemeTokens) -> str:
         QSpinBox:focus {{ border-color: {t.accent}; }}
         QSpinBox::up-button, QSpinBox::down-button {{
             background: {t.hover}; border: 1px solid {t.neutral_border_hover};
-            border-radius: 3px; width: 18px; margin: 2px;
+            border-radius: 3px; width: 18px;
         }}
-        QSpinBox::up-button {{ subcontrol-origin: border; subcontrol-position: top right; }}
+        QSpinBox::up-button {{ subcontrol-origin: border; subcontrol-position: top right; border-bottom: 0; border-bottom-right-radius: 0; border-bottom-left-radius: 0; }}
         QSpinBox::down-button {{ subcontrol-origin: border; subcontrol-position: bottom right; }}
         QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
             background: {t.neutral_border_hover};

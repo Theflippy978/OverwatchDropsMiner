@@ -630,19 +630,27 @@ class MinerGUI(QMainWindow):
 
     # ---------- log / layout toggle ----------
 
+    def _available_height(self) -> int:
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return self._size_expanded[1]
+        return screen.availableGeometry().height()
+
     def _toggle_log(self) -> None:
         if self._log_expanded:
             self.log_text.setVisible(False)
             self._log_toggle_btn.setText("▶ 运行日志")
-            # 恢复到展开前记录的实际高度（兼容用户手动调整过的窗口大小）。
+            # 恢复到展开前记录的实际高度（兼容用户手动调整过的窗口大小），
+            # 且不超过屏幕可用高度。
             restore_height = self._height_before_log or self._size_collapsed[1]
-            self.resize(self.width(), restore_height)
+            self.resize(self.width(), min(restore_height, self._available_height()))
             self._height_before_log = None
         else:
             self._height_before_log = self.height()
             self.log_text.setVisible(True)
             self._log_toggle_btn.setText("▼ 运行日志")
-            self.resize(self.width(), self._size_expanded[1])
+            expanded_height = min(self._size_expanded[1], self._available_height())
+            self.resize(self.width(), expanded_height)
         self._log_expanded = not self._log_expanded
 
     def clear_logs(self) -> None:
