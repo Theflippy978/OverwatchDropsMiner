@@ -40,6 +40,20 @@ class PathsTest(unittest.TestCase):
                 os.environ.pop(paths.CONFIG_DIR_ENV_VAR, None)
         self.assertFalse(paths.is_isolated())
 
+    def test_relative_config_dir_resolves_to_absolute(self) -> None:
+        # 回归：OW_CONFIG_DIR 为相对路径时应固化为绝对路径，
+        # 避免工作目录变化后配置读写位置漂移
+        original = os.environ.pop(paths.CONFIG_DIR_ENV_VAR, None)
+        try:
+            os.environ[paths.CONFIG_DIR_ENV_VAR] = "relative-config-dir"
+            config_dir = paths.get_config_dir()
+            self.assertTrue(config_dir.is_absolute())
+            self.assertEqual(config_dir.name, "relative-config-dir")
+        finally:
+            os.environ.pop(paths.CONFIG_DIR_ENV_VAR, None)
+            if original is not None:
+                os.environ[paths.CONFIG_DIR_ENV_VAR] = original
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -43,7 +43,8 @@ def should_check_update(app_version: str, update_channel: str) -> bool:
     if update_channel != "release":
         return False
     current_version = normalize_version(app_version)
-    return bool(current_version) and not current_version.startswith("dev")
+    # 用包含判断：形如 "0.0.0+dev" 的版本串 normalize 后不以 dev 开头，startswith 会失效
+    return bool(current_version) and "dev" not in current_version
 
 
 def parse_update_payload(
@@ -81,9 +82,8 @@ def check_latest_release(
             },
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            if response.status >= 400:
-                return None
-            payload = json.loads(response.read(65536).decode("utf-8", errors="replace"))
+            # urlopen 对 HTTP>=400 直接抛 HTTPError，此处只需全量读取响应体
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
         if not isinstance(payload, dict):
             return None
         return parse_update_payload(

@@ -17,6 +17,7 @@ from overwatch_drops_miner.client_parts.models import (
 )
 from overwatch_drops_miner.client_parts.rewards import (
     REWARD_CLAIM_INTERVAL_SECONDS,
+    parse_mission_reward_info,
 )
 from overwatch_drops_miner.client_parts.tasks import (
     parse_task_progress_payload,
@@ -110,6 +111,17 @@ class RewardTaskResolutionTest(unittest.TestCase):
             ),
             ["child-a", "child-b", "flat", "missing"],
         )
+
+
+class RewardInfoParsingTest(unittest.TestCase):
+    def test_missing_status_raises_value_error(self) -> None:
+        # status 缺失时不能默认为 0（会被误判为可领取），应抛出带上下文的 ValueError
+        payload = {
+            "code": 0,
+            "data": {"task_id": "t1", "reward_info": {}},
+        }
+        with self.assertRaisesRegex(ValueError, "status"):
+            parse_mission_reward_info(payload, normalized_id="t1")
 
 
 class _FakeClaimClient:

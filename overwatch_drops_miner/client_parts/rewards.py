@@ -28,10 +28,16 @@ def parse_mission_reward_info(
 
     data = payload.get("data") or {}
     reward_info = data.get("reward_info") or {}
+    if "status" not in data:
+        # status 缺失时不能默认按 0 处理：0 会被误判为“可领取”并触发无效领取，
+        # 这里直接抛错暴露异常的返回结构
+        raise ValueError(
+            f"领奖信息缺少 status 字段: task_id={normalized_id}, message={payload.get('message')}"
+        )
     return MissionRewardInfo(
         task_id=str(data.get("task_id") or normalized_id),
         task_name=str(data.get("task_name") or normalized_id),
-        status=int(data.get("status") or 0),
+        status=int(data["status"] or 0),
         message=str(data.get("message") or ""),
         act_id=str(data.get("act_id") or ""),
         act_name=str(data.get("act_name") or ""),

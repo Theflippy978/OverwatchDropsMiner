@@ -5,6 +5,7 @@ import contextlib
 import threading
 import time
 import unittest
+from unittest import mock
 
 from overwatch_drops_miner.client_parts.models import LiveTraceSession, TaskProgress
 from overwatch_drops_miner.config import MinerConfig
@@ -189,6 +190,75 @@ class X25KnWorkerTest(unittest.TestCase):
 
         self.assertGreaterEqual(client.query_calls, 2)
         self.assertEqual(len(notifier.calls), 1)
+
+
+    def test_reconnect_wait_respects_stop_event(self) -> None:
+        worker = X25KnWorker(
+            client=_TaskClient(),  # type: ignore[arg-type]
+            notifier=_RecordingNotifier(),  # type: ignore[arg-type]
+            config=MinerConfig(
+                cookie="cookie",
+                room_ids=[1],
+                reconnect_delay_seconds=30,
+            ),
+            uid=42,
+            room_id=1,
+        )
+
+        async def failing_run_once() -> None:
+            raise RuntimeError("boom")
+
+        async def stop_later() -> None:
+            await asyncio.sleep(0.05)
+            await worker.stop()
+
+        async def exercise() -> float:
+            started = time.monotonic()
+            with mock.patch.object(worker, "_run_once", failing_run_once):
+                await asyncio.wait_for(
+                    asyncio.gather(worker.run_forever(), stop_later()),
+                    timeout=2,
+                )
+            return time.monotonic() - started
+
+        elapsed = asyncio.run(exercise())
+        # 重连等待必须响应停止请求，不能睡满 30 秒的重连间隔
+        self.assertLess(elapsed, 5.0)
+
+    def test_run_once_collects_all_subtask_exceptions(self) -> None:
+        worker = X25KnWorker(
+            client=_TaskClient(),  # type: ignore[arg-type]
+            notifier=_RecordingNotifier(),  # type: ignore[arg-type]
+            config=MinerConfig(cookie="cookie", room_ids=[1]),
+            uid=42,
+            room_id=1,
+        )
+
+        async def heartbeat_boom() -> None:
+            raise RuntimeError("heartbeat-error")
+
+        async def monitor_boom() -> None:
+            raise RuntimeError("monitor-error")
+
+        async def exercise() -> tuple[str, list[str]]:
+            with (
+                mock.patch.object(worker, "_trace_heartbeat_loop", heartbeat_boom),
+                mock.patch.object(worker, "_task_monitor_loop", monitor_boom),
+                self.assertLogs(
+                    "overwatch_drops_miner.x25kn_worker", level="ERROR"
+                ) as logs,
+                self.assertRaises(RuntimeError) as ctx,
+            ):
+                await worker._run_once()
+            return str(ctx.exception), [r.getMessage() for r in logs.records]
+
+        first_error, logged = asyncio.run(exercise())
+        # raise 的具体是哪一个取决于 asyncio.wait 返回集合的迭代顺序，二者皆可
+        self.assertIn(first_error, {"heartbeat-error", "monitor-error"})
+        joined = "\n".join(logged)
+        # 两个子任务的异常都必须被记录，不允许静默丢弃第二个
+        self.assertIn("heartbeat-error", joined)
+        self.assertIn("monitor-error", joined)
 
 
 if __name__ == "__main__":

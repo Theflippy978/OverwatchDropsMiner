@@ -42,4 +42,7 @@ def create_qsettings(
         )
         settings.setFallbacksEnabled(False)
         return settings
-    return QSettings(organization, application)
+    settings = QSettings(organization, application)
+    # 注册表分支同样禁用 ini 文件回退，避免配置读写位置不确定
+    settings.setFallbacksEnabled(False)
+    return settings

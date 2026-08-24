@@ -38,17 +38,13 @@ class PrettyFormatter(logging.Formatter):
         self.use_color = use_color
 
     def format(self, record: logging.LogRecord) -> str:
-        original_levelname = record.levelname
-        label = LEVEL_LABEL.get(record.levelno, original_levelname[:5].upper())
+        label = LEVEL_LABEL.get(record.levelno, record.levelname[:5].upper())
         if self.use_color:
-            color = LEVEL_COLORS.get(record.levelno, "")
-            record.levelname = f"{color}{label}{RESET}"
-        else:
-            record.levelname = label
-        try:
-            return super().format(record)
-        finally:
-            record.levelname = original_levelname
+            label = f"{LEVEL_COLORS.get(record.levelno, '')}{label}{RESET}"
+        # 在副本上替换 levelname，避免多 handler 并发时篡改公共 record 造成串色竞态
+        replica = logging.makeLogRecord(record.__dict__.copy())
+        replica.levelname = label
+        return super().format(replica)
 
 
 def setup_logging(
@@ -58,15 +54,20 @@ def setup_logging(
     extra_handlers: list[logging.Handler] | None = None,
 ) -> None:
     just_fix_windows_console()
+    # StreamHandler 默认绑定 stderr，颜色判定应以实际输出流为准
     use_color = (
         not no_color
         and not bool(os.environ.get("NO_COLOR"))
-        and (getattr(sys.stdout, "isatty", lambda: False)() or getattr(sys.stderr, "isatty", lambda: False)())
+        and getattr(sys.stderr, "isatty", lambda: False)()
     )
 
     root_logger = logging.getLogger()
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
 
     root_logger.setLevel(logging.INFO)
     stream_handler = logging.StreamHandler()

@@ -7,6 +7,7 @@ from overwatch_drops_miner.utils import (
     extract_bili_live_task_groups,
     join_cookie,
     parse_cookie,
+    parse_room_ids,
     parse_url_list,
 )
 
@@ -118,6 +119,17 @@ class CookieParsingTests(unittest.TestCase):
         # 防御性：值中含分号/换行时应剔除，避免破坏 Cookie 头结构
         header = join_cookie({"a": "x;y", "b": "p\nq"})
         self.assertEqual(header, "a=xy; b=pq")
+
+
+class ParseRoomIdsTests(unittest.TestCase):
+    def test_superscript_digit_raises_custom_value_error(self) -> None:
+        # '²'.isdigit() 为 True 但 int() 会抛裸异常，
+        # 必须统一抛出项目自定义的“房间号格式错误”
+        with self.assertRaisesRegex(ValueError, "房间号格式错误"):
+            parse_room_ids("12²")
+
+    def test_normal_room_ids_parse(self) -> None:
+        self.assertEqual(parse_room_ids("1, 2\n3"), [1, 2, 3])
 
 
 class ParseUrlListTests(unittest.TestCase):

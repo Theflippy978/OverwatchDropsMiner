@@ -22,6 +22,7 @@ from overwatch_drops_miner.client_parts.cookies import (
 )
 from overwatch_drops_miner.client_parts.http import (
     is_rate_limited_payload,
+    parse_json_response,
     request_with_transient_retry,
     signed_get_json,
     signed_post_form_json,
@@ -100,6 +101,8 @@ class BilibiliClient:
         self.live_buvid = self._generate_live_buvid()
         self.live_uuid = str(uuid.uuid4())
         self._wbi_cache: tuple[str, str] | None = None
+        # WBI 缓存并发 miss 单飞锁：client 绑定单一事件循环，无跨循环问题
+        self._wbi_lock = asyncio.Lock()
 
         self._http = httpx.AsyncClient(
             timeout=20.0,
@@ -118,9 +121,14 @@ class BilibiliClient:
         await self._http.aclose()
 
     async def nav(self) -> dict[str, Any]:
-        response = await self._http.get("https://api.bilibili.com/x/web-interface/nav")
+        url = "https://api.bilibili.com/x/web-interface/nav"
+        response = await self._request_with_transient_retry(
+            lambda: self._http.get(url),
+            method="GET",
+            url=url,
+        )
         response.raise_for_status()
-        payload = response.json()
+        payload = parse_json_response(response, method="GET", url=url)
         validate_nav_payload(payload)
         return payload
 
@@ -131,10 +139,14 @@ class BilibiliClient:
     async def get_wbi_keys(self) -> tuple[str, str]:
         if self._wbi_cache is not None:
             return self._wbi_cache
-        payload = await self.nav()
-        img_key, sub_key = parse_wbi_keys_from_nav(payload)
-        self._wbi_cache = (img_key, sub_key)
-        return img_key, sub_key
+        # 双检锁单飞：并发 miss 时只发起一次 nav 请求，避免冗余请求互相覆盖缓存
+        async with self._wbi_lock:
+            if self._wbi_cache is not None:
+                return self._wbi_cache
+            payload = await self.nav()
+            img_key, sub_key = parse_wbi_keys_from_nav(payload)
+            self._wbi_cache = (img_key, sub_key)
+            return img_key, sub_key
 
     @classmethod
     def _get_mixin_key(cls, img_key: str, sub_key: str) -> str:

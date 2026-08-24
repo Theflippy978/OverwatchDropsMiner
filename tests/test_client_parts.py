@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import unittest
+import unittest.mock
 import urllib.parse
 
 import httpx
 
+from overwatch_drops_miner.client_parts import core as core_module
 from overwatch_drops_miner.client_parts.constants import WBI_MIXIN_KEY_ENC_TAB
 from overwatch_drops_miner.client_parts.cookies import (
     DEFAULT_USER_AGENT,
@@ -258,6 +261,107 @@ class ClientPartsTest(unittest.TestCase):
                 cookie_header=cookie_header,
             )["Referer"].endswith("task_id=task%20id")
         )
+
+
+class BilibiliClientNavTest(unittest.TestCase):
+    def _make_client(self) -> core_module.BilibiliClient:
+        return core_module.BilibiliClient("SESSDATA=x; bili_jct=csrf")
+
+    def test_nav_retries_transient_connect_error(self) -> None:
+        client = self._make_client()
+        calls = {"n": 0}
+
+        class _Resp:
+            status_code = 200
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {"code": 0, "data": {"isLogin": False}}
+
+        async def fake_get(_url: str):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.ConnectTimeout("boom")
+            return _Resp()
+
+        async def exercise():
+            with unittest.mock.patch.object(client._http, "get", fake_get):
+                return await client.nav()
+
+        try:
+            payload = asyncio.run(exercise())
+        finally:
+            asyncio.run(client.close())
+
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(payload["code"], 0)
+
+    def test_nav_raises_contextual_error_for_non_json_body(self) -> None:
+        client = self._make_client()
+
+        class _HtmlResp:
+            status_code = 200
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self):
+                raise ValueError("Expecting value")
+
+        async def exercise():
+            with unittest.mock.patch.object(
+                client._http, "get", lambda _url: _async_return(_HtmlResp())
+            ):
+                return await client.nav()
+
+        try:
+            with self.assertRaisesRegex(RuntimeError, "非 JSON"):
+                asyncio.run(exercise())
+        finally:
+            asyncio.run(client.close())
+
+    def test_wbi_keys_concurrent_miss_single_flight(self) -> None:
+        client = self._make_client()
+        nav_calls: list[int] = []
+
+        img_key = "abcdefghijklmnopqrstuvwxyzabcdef"
+        sub_key = "1234567890abcdef1234567890abcdef"
+        payload = {
+            "data": {
+                "wbi_img": {
+                    "img_url": f"https://i0.hdslb.com/bfs/wbi/{img_key}.png",
+                    "sub_url": f"https://i0.hdslb.com/bfs/wbi/{sub_key}.png",
+                }
+            }
+        }
+
+        async def slow_nav():
+            nav_calls.append(1)
+            await asyncio.sleep(0.01)
+            return payload
+
+        async def exercise():
+            with unittest.mock.patch.object(client, "nav", slow_nav):
+                return await asyncio.gather(
+                    *(client.get_wbi_keys() for _ in range(5))
+                )
+
+        try:
+            results = asyncio.run(exercise())
+        finally:
+            asyncio.run(client.close())
+
+        # 并发 miss 只应发起一次 nav 请求（单飞），所有调用拿到同一份缓存
+        self.assertEqual(len(nav_calls), 1)
+        self.assertTrue(all(r == results[0] for r in results))
+
+
+def _async_return(value):
+    future = asyncio.get_event_loop().create_future()
+    future.set_result(value)
+    return future
 
 
 if __name__ == "__main__":

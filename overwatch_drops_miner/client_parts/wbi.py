@@ -9,7 +9,12 @@ from overwatch_drops_miner.client_parts.constants import WBI_MIXIN_KEY_ENC_TAB
 
 def get_mixin_key(img_key: str, sub_key: str) -> str:
     raw = img_key + sub_key
-    return "".join(raw[index] for index in WBI_MIXIN_KEY_ENC_TAB)[:32]
+    # 防御：正常 img/sub key 合计 64 字符，若接口返回异常导致长度不足，
+    # ENC_TAB 中较大的索引会越界抛 IndexError；越界位置按空字符串处理，
+    # 保证签名流程不因异常 key 长度而中断
+    return "".join(
+        raw[index] if index < len(raw) else "" for index in WBI_MIXIN_KEY_ENC_TAB
+    )[:32]
 
 
 def encode_query(params: dict[str, Any]) -> str:

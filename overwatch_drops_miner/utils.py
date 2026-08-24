@@ -13,7 +13,9 @@ def parse_room_ids(raw: str) -> list[int]:
         cleaned = token.strip()
         if not cleaned:
             continue
-        if not cleaned.isdigit():
+        if not cleaned.isascii() or not cleaned.isdigit():
+            # '²'.isdigit() 为 True 但 int() 会抛异常，必须用 isascii 过滤
+            # 非 ASCII 数字字符（如上标数字），统一按房间号格式错误处理
             raise ValueError(f"房间号格式错误: {cleaned}")
         room_id = int(cleaned)
         if room_id <= 0:

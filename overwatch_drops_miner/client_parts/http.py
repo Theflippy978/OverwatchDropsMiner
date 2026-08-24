@@ -65,6 +65,17 @@ async def request_with_transient_retry(
     raise RuntimeError("unreachable retry state")
 
 
+def parse_json_response(
+    response: httpx.Response, *, method: str, url: str
+) -> dict[str, Any]:
+    # HTTP 200 但返回 HTML/空 body 的场景（风控软拦截偶发），
+    # 裸 JSONDecodeError 缺少接口上下文，难以定位是哪个请求出错。
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise RuntimeError(f"接口 {method} {url} 返回非 JSON 响应") from exc
+
+
 async def signed_get_json(
     *,
     http: httpx.AsyncClient,
@@ -93,7 +104,7 @@ async def signed_get_json(
             logger=logger,
         )
         response.raise_for_status()
-        payload = response.json()
+        payload = parse_json_response(response, method="GET", url=url)
         if payload.get("code") == 0:
             return payload
         if _should_retry_with_fresh_wbi(
@@ -135,7 +146,7 @@ async def signed_post_json(
             logger=logger,
         )
         response.raise_for_status()
-        payload = response.json()
+        payload = parse_json_response(response, method="POST", url=url)
         if payload.get("code") == 0:
             return payload
         if _should_retry_with_fresh_wbi(
@@ -177,7 +188,7 @@ async def signed_post_query_json(
             logger=logger,
         )
         response.raise_for_status()
-        payload = response.json()
+        payload = parse_json_response(response, method="POST", url=url)
         if payload.get("code") == 0:
             return payload
         if _should_retry_with_fresh_wbi(
@@ -219,7 +230,7 @@ async def signed_post_form_json(
             logger=logger,
         )
         response.raise_for_status()
-        payload = response.json()
+        payload = parse_json_response(response, method="POST", url=url)
         if payload.get("code") == 0:
             return payload
         if _should_retry_with_fresh_wbi(

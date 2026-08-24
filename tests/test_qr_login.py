@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import http.cookiejar
 import os
 import threading
 import time
 import unittest
+import unittest.mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -92,6 +94,88 @@ class QrLoginApiTests(unittest.TestCase):
         response_cookies.delete("bili_jct", domain=".bilibili.com")
         with self.assertRaisesRegex(QrLoginError, "Cookie 不完整"):
             build_login_cookie_string(response_cookies, client_cookies)
+
+    def test_cookie_filter_excludes_foreign_domain_and_expired_cookies(self) -> None:
+        # 异域同名 Cookie 放在先遍历的 client jar 中，验证其被域名过滤、
+        # 且不会覆盖 response jar 中的合法登录态
+        client_cookies = httpx.Cookies()
+        client_cookies.set("buvid3", "device", domain=".bilibili.com")
+        client_cookies.set("bili_jct", "evil-value", domain=".example.com")
+
+        response_cookies = httpx.Cookies()
+        response_cookies.set("SESSDATA", "session", domain=".bilibili.com")
+        response_cookies.set(
+            "DedeUserID", "42", domain=".bilibili.com"
+        )
+        response_cookies.set("bili_jct", "csrf", domain=".bilibili.com")
+        # 已过期的 Cookie 应被忽略
+        expired = http.cookiejar.Cookie(
+            version=0,
+            name="sid",
+            value="stale",
+            port=None,
+            port_specified=False,
+            domain=".bilibili.com",
+            domain_specified=True,
+            domain_initial_dot=False,
+            path="/",
+            path_specified=True,
+            secure=False,
+            expires=1000000000,
+            discard=False,
+            comment=None,
+            comment_url=None,
+            rest={},
+            rfc2109=False,
+        )
+        response_cookies.jar.set_cookie(expired)
+
+        cookie = build_login_cookie_string(response_cookies, client_cookies)
+
+        self.assertIn("SESSDATA=session", cookie)
+        self.assertNotIn("evil-value", cookie)
+        self.assertNotIn("stale", cookie)
+
+    def test_poll_retries_once_on_transient_connect_error(self) -> None:
+        attempts = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts["n"] += 1
+            if request.url.path.endswith("/generate"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": 0,
+                        "data": {
+                            "url": "https://passport.example.invalid/qr",
+                            "qrcode_key": "temporary-key",
+                        },
+                    },
+                )
+            if attempts["n"] == 2:
+                # 第一次轮询抛瞬时连接异常，应触发一次重试
+                raise httpx.ConnectError("boom")
+            return httpx.Response(
+                200, json={"code": 0, "data": {"code": 86101}}
+            )
+
+        client = httpx.Client(
+            transport=httpx.MockTransport(handler),
+            headers={"Referer": "https://passport.bilibili.com/login"},
+        )
+        api = QrLoginApi(client)
+        try:
+            with unittest.mock.patch(
+                "overwatch_drops_miner.client_parts.qr_login.time.sleep"
+            ) as sleep_mock:
+                challenge = api.generate()
+                result = api.poll(challenge.key)
+        finally:
+            api.close()
+
+        self.assertEqual(attempts["n"], 3)
+        self.assertIs(result.status, QrLoginStatus.UNSCANNED)
+        sleep_mock.assert_called_once()
 
     def test_api_reuses_client_and_collects_success_response_cookies(self) -> None:
         requests: list[httpx.Request] = []

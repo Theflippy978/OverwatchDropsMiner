@@ -5,6 +5,10 @@ import logging
 import threading
 from typing import Any
 
+from overwatch_drops_miner.account_log_context import (
+    clear_current_account,
+    set_current_account,
+)
 from overwatch_drops_miner.client import (
     BilibiliClient,
     LiveTraceSession,
@@ -29,6 +33,7 @@ class X25KnWorker:
         primary_session: bool = True,
         stop_event: asyncio.Event | None = None,
         watch_tracker: WatchTimeTracker | None = None,
+        account_id: str = "",
     ) -> None:
         self.client = client
         self.notifier = notifier
@@ -39,6 +44,7 @@ class X25KnWorker:
         self.primary_session = primary_session
         self._stop_event = stop_event or asyncio.Event()
         self.watch_tracker = watch_tracker
+        self.account_id = account_id
         # 跨重连保留的任务进度快照与已完成去重集合：
         # 断线重连会重新进入 _run_once 并新建监控循环，
         # 若放在局部变量会导致重连后重复推送“任务完成”通知、重复打印全部进度。
@@ -87,9 +93,14 @@ class X25KnWorker:
                     primary_only=True,
                 )
             if not self._stop_event.is_set():
-                await asyncio.sleep(self.config.reconnect_delay_seconds)
-                if self._stop_event.is_set():
-                    return
+                # 等待期间响应停止请求，避免停止动作最多延迟一个重连间隔
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(),
+                        timeout=self.config.reconnect_delay_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    pass
 
     async def _run_once(self) -> None:
         trace_heartbeat_task = asyncio.create_task(self._trace_heartbeat_loop())
@@ -108,6 +119,7 @@ class X25KnWorker:
             if stop_wait_task in done:
                 return
 
+            exceptions: list[BaseException] = []
             for task in done:
                 if task is stop_wait_task:
                     continue
@@ -115,7 +127,14 @@ class X25KnWorker:
                     continue
                 exc = task.exception()
                 if exc is not None:
-                    raise exc
+                    # 记录全部子任务异常，避免只 raise 第一个时丢失其余根因
+                    LOGGER.error(
+                        "%s 子任务异常退出: %s", self._ctx, exc, exc_info=exc
+                    )
+                    exceptions.append(exc)
+
+            if exceptions:
+                raise exceptions[0]
 
             raise RuntimeError("x25Kn 子任务意外退出")
 
@@ -251,9 +270,16 @@ class X25KnWorker:
         # Notification adapters are synchronous and may wait on network
         # timeouts. A daemon thread keeps them outside the session event loop;
         # unlike asyncio's default executor, it also cannot delay loop shutdown.
+        def deliver() -> None:
+            set_current_account(self.account_id)
+            try:
+                self._send_task_complete_notification(task)
+            finally:
+                clear_current_account()
+
         threading.Thread(
-            target=self._send_task_complete_notification,
-            args=(task,),
+            target=deliver,
+            args=(),
             name=f"notify-{self.room_id}-{task.task_id}",
             daemon=True,
         ).start()

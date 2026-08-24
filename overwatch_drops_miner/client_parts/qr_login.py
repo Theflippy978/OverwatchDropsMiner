@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping
@@ -104,8 +105,14 @@ def build_login_cookie_string(
     # response jar lets the successful poll response take precedence.
     for cookie_jar in (client_cookies.jar, response_cookies.jar):
         for cookie in cookie_jar:
-            if cookie.name in LOGIN_COOKIE_NAMES and cookie.value:
-                selected[cookie.name] = cookie.value
+            if cookie.name not in LOGIN_COOKIE_NAMES or not cookie.value:
+                continue
+            # 仅取 B 站域的未过期 Cookie，避免同名异域/过期项污染登录态
+            if not (cookie.domain or "").endswith("bilibili.com"):
+                continue
+            if cookie.is_expired():
+                continue
+            selected[cookie.name] = cookie.value
 
     missing = [name for name in REQUIRED_LOGIN_COOKIE_NAMES if not selected.get(name)]
     if missing:
@@ -118,6 +125,12 @@ def build_login_cookie_string(
 class QrLoginApi:
     """One Bilibili QR login session backed by one HTTP client/cookie jar."""
 
+    _TRANSIENT_ERRORS = (
+        httpx.ConnectTimeout,
+        httpx.ConnectError,
+        httpx.RemoteProtocolError,
+    )
+
     def __init__(self, client: httpx.Client | None = None) -> None:
         self._client = client or httpx.Client(
             headers=_HEADERS,
@@ -125,8 +138,17 @@ class QrLoginApi:
             follow_redirects=False,
         )
 
+    def _get_once(self, url: str, **kwargs: Any) -> httpx.Response:
+        # 扫码轮询链路无瞬时重试保护，一次网络抖动就会让整轮扫码流程失败，
+        # 这里对连接类瞬时异常做一次轻量重试。
+        try:
+            return self._client.get(url, **kwargs)
+        except self._TRANSIENT_ERRORS:
+            time.sleep(0.5)
+        return self._client.get(url, **kwargs)
+
     def generate(self) -> QrLoginChallenge:
-        response = self._client.get(QR_GENERATE_URL)
+        response = self._get_once(QR_GENERATE_URL)
         response.raise_for_status()
         try:
             payload = response.json()
@@ -135,7 +157,7 @@ class QrLoginApi:
         return parse_generate_payload(payload)
 
     def poll(self, key: str) -> QrPollResult:
-        response = self._client.get(QR_POLL_URL, params={"qrcode_key": key})
+        response = self._get_once(QR_POLL_URL, params={"qrcode_key": key})
         response.raise_for_status()
         try:
             payload = response.json()

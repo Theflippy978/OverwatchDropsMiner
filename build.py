@@ -12,7 +12,10 @@ def ensure_pyinstaller() -> None:
         import PyInstaller  # noqa: F401
     except ImportError:
         print("PyInstaller not found, installing...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
+        # 锁定最低版本，保证构建行为可重现
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "pyinstaller>=6.0"]
+        )
 
 
 def format_cmd(cmd: list[str]) -> str:
@@ -27,6 +30,9 @@ def build(
     debug: bool = False,
     extra_args: Iterable[str] | None = None,
 ) -> None:
+    # 资源路径基于脚本所在目录解析，避免从其它工作目录运行 build.py 时找不到图标
+    project_root = Path(__file__).resolve().parent
+    icon_path = project_root / "img" / "app.ico"
     cmd = [
         sys.executable,
         "-m",
@@ -39,9 +45,9 @@ def build(
         "--noupx",
         "--clean" if clean else None,
         "--icon",
-        "img/app.ico",
+        str(icon_path),
         "--add-data",
-        f"{Path('img/app.ico')};img",
+        f"{icon_path};img",
     ]
     cmd = [part for part in cmd if part]
 
