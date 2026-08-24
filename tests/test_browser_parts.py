@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
+import threading
+import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PySide6.QtWidgets import QMessageBox
 
+from overwatch_drops_miner.gui_parts import browser_sniffer as browser_sniffer_module
 from overwatch_drops_miner.gui_parts.browser_actions import BrowserActions
 from overwatch_drops_miner.gui_parts.browser_sniffer import (
     classify_sniff_payload,
@@ -362,6 +366,104 @@ class BrowserActionsTest(unittest.TestCase):
         )
 
         self.assertEqual(events["cookies"], ["SESSDATA=sess; DedeUserID=1"])
+
+
+    def test_browser_actions_shutdown_joins_sniff_thread(self) -> None:
+        actions, _events = self._build_actions()
+        release = threading.Event()
+        worker_started = threading.Event()
+
+        def slow_worker() -> None:
+            worker_started.set()
+            release.wait(timeout=5)
+
+        thread = threading.Thread(target=slow_worker, daemon=True)
+        thread.start()
+        self.assertTrue(worker_started.wait(timeout=5))
+        actions._sniff_thread = thread
+        actions._sniff_cancel.clear()
+
+        results: list[bool] = []
+        # shutdown 会阻塞等待 join，放到独立线程中执行
+        shutter = threading.Thread(
+            target=lambda: results.append(actions.shutdown(timeout=0.3)),
+            daemon=True,
+        )
+        shutter.start()
+        shutter.join(timeout=5)
+
+        self.assertEqual(results, [False])
+        self.assertTrue(actions._sniff_cancel.is_set())
+
+        release.set()
+        thread.join(timeout=5)
+        self.assertTrue(actions.shutdown())
+        self.assertFalse(thread.is_alive())
+
+    def test_sniffer_loop_respects_cancel_event(self) -> None:
+        cancel_event = threading.Event()
+        cancel_event.set()
+
+        class _FakeOptions:
+            binary_location = None
+
+            def __init__(self) -> None:
+                self.args: list[str] = []
+
+            def add_argument(self, arg: str) -> None:
+                self.args.append(arg)
+
+        class _FakeChrome:
+            instances: list[_FakeChrome] = []
+
+            def __init__(self, options=None) -> None:
+                self.options = options
+                self.webextension = Mock()
+                self.quit = Mock()
+                self.get = Mock()
+                type(self).instances.append(self)
+
+        class _FakeEdge(_FakeChrome):
+            instances: list[_FakeEdge] = []
+
+        fake_selenium = types.ModuleType("selenium")
+        fake_webdriver = types.ModuleType("selenium.webdriver")
+        fake_webdriver.ChromeOptions = _FakeOptions  # type: ignore[attr-defined]
+        fake_webdriver.EdgeOptions = _FakeOptions  # type: ignore[attr-defined]
+        fake_webdriver.Chrome = _FakeChrome  # type: ignore[attr-defined]
+        fake_webdriver.Edge = _FakeEdge  # type: ignore[attr-defined]
+        fake_selenium.webdriver = fake_webdriver
+
+        on_error = Mock()
+        with patch.dict(
+            sys.modules,
+            {"selenium": fake_selenium, "selenium.webdriver": fake_webdriver},
+        ), patch.object(
+            browser_sniffer_module, "find_browser", return_value=True
+        ), patch.object(
+            browser_sniffer_module, "find_browser_binary", return_value=None
+        ), patch.object(
+            browser_sniffer_module, "write_chrome_extension"
+        ), patch.object(
+            browser_sniffer_module, "write_edge_extension"
+        ), patch(
+            "overwatch_drops_miner.gui_parts.browser_utils.detect_default_browser",
+            return_value="edge",
+        ):
+            thread = browser_sniffer_module.start_browser_sniff(
+                None,
+                "测试提示",
+                on_error=on_error,
+                cancel_event=cancel_event,
+            )
+            thread.join(timeout=10)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(_FakeChrome.instances, [])
+        drivers = _FakeEdge.instances
+        self.assertEqual(len(drivers), 1)
+        drivers[0].quit.assert_called_once()
+        on_error.assert_not_called()
 
 
 if __name__ == "__main__":

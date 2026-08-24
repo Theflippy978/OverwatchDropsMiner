@@ -43,6 +43,9 @@ class BrowserActions:
         self._logger = logger or logging.getLogger(__name__)
         self._task_discovery_lock = threading.Lock()
         self._task_discovery_pending = False
+        # 嗅探线程引用与取消信号，供窗口关闭时优雅停止（修复 H4 进程泄漏）
+        self._sniff_thread: threading.Thread | None = None
+        self._sniff_cancel = threading.Event()
 
     @staticmethod
     def find_browser(name: str) -> bool:
@@ -182,7 +185,9 @@ class BrowserActions:
         def on_error(title: str, message: str) -> None:
             self._post_ui_task(self._show_error, title, message)
 
-        start_browser_sniff(
+        # 启动前重置取消信号，并保存线程引用以便 shutdown 时 join
+        self._sniff_cancel.clear()
+        self._sniff_thread = start_browser_sniff(
             url_keyword,
             hint,
             on_error=on_error,
@@ -194,7 +199,18 @@ class BrowserActions:
             finish_on_any=finish_on_any,
             start_url=start_url,
             logger=self._logger,
+            cancel_event=self._sniff_cancel,
         )
+
+    def shutdown(self, timeout: float = 2.0) -> bool:
+        """请求停止嗅探线程并等待其退出，返回是否在超时内结束。"""
+        self._sniff_cancel.set()
+        thread = self._sniff_thread
+        if thread is None:
+            return True
+        if thread.is_alive():
+            thread.join(timeout=timeout)
+        return not thread.is_alive()
 
     def auto_fetch_room_id(self) -> None:
         ok = QMessageBox.question(

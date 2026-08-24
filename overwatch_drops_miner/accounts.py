@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import threading
 import time
 import uuid
@@ -8,6 +10,8 @@ from dataclasses import dataclass, field
 
 from overwatch_drops_miner import dpapi
 from overwatch_drops_miner.paths import get_accounts_path
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -59,7 +63,21 @@ class AccountStore:
             try:
                 raw = self._path.read_text(encoding="utf-8")
                 data = json.loads(raw) if raw.strip() else []
-            except (OSError, json.JSONDecodeError):
+            except (OSError, ValueError) as exc:
+                # 损坏文件先改名备份，避免下次保存时被永久覆盖
+                timestamp = time.strftime("%Y%m%d-%H%M%S")
+                backup_path = self._path.with_name(
+                    f"{self._path.name}.corrupt-{timestamp}"
+                )
+                try:
+                    os.replace(self._path, backup_path)
+                    LOGGER.warning(
+                        "账号配置文件损坏，已备份为 %s：%s", backup_path, exc
+                    )
+                except OSError:
+                    LOGGER.warning(
+                        "账号配置文件损坏且备份失败（%s）：%s", backup_path, exc
+                    )
                 self._accounts = []
                 return
             accounts = []
@@ -70,15 +88,21 @@ class AccountStore:
                     continue
             self._accounts = accounts
 
+    def _save_locked(self) -> None:
+        """原子写入账号文件：先写同目录临时文件，成功后 os.replace 替换。"""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(
+            [account.to_dict() for account in self._accounts],
+            ensure_ascii=False,
+            indent=2,
+        )
+        tmp_path = self._path.with_name(f"{self._path.name}.tmp")
+        tmp_path.write_text(payload, encoding="utf-8")
+        os.replace(tmp_path, self._path)
+
     def save(self) -> None:
         with self._lock:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            payload = json.dumps(
-                [account.to_dict() for account in self._accounts],
-                ensure_ascii=False,
-                indent=2,
-            )
-            self._path.write_text(payload, encoding="utf-8")
+            self._save_locked()
 
     def list_accounts(self) -> list[Account]:
         with self._lock:
@@ -99,7 +123,7 @@ class AccountStore:
         )
         with self._lock:
             self._accounts.append(account)
-        self.save()
+            self._save_locked()
         return account
 
     def update(
@@ -119,7 +143,7 @@ class AccountStore:
                     break
             else:
                 return None
-        self.save()
+            self._save_locked()
         return account
 
     def remove(self, account_id: str) -> bool:
@@ -129,6 +153,6 @@ class AccountStore:
                 account for account in self._accounts if account.id != account_id
             ]
             removed = len(self._accounts) < before
-        if removed:
-            self.save()
+            if removed:
+                self._save_locked()
         return removed

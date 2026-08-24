@@ -129,10 +129,13 @@ class AccountMinerManager:
         with self._lock:
             sessions = list(self._sessions.values())
         for session in sessions:
-            if force:
-                session.controller.miner.stop(force=True)
-            else:
-                session.controller.miner.stop(force=False)
+            miner = session.controller.miner
+            if miner is None:
+                continue
+            try:
+                miner.stop(force=force)
+            except Exception:
+                LOGGER.exception("停止账号会话失败")
 
     def shutdown_states(self) -> dict[str, str]:
         with self._lock:

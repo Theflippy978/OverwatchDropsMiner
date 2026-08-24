@@ -119,6 +119,7 @@ class WorkerControllerTest(unittest.TestCase):
         miner = FakeMiner(object())
         controller.miner = miner  # type: ignore[assignment]
         controller.worker_thread = FakeThread(alive=True)  # type: ignore[assignment]
+        controller.stopping_in_progress = True
         controller.stop_poll_started_at = time.monotonic() - 1
 
         self.assertEqual(
@@ -141,6 +142,57 @@ class WorkerControllerTest(unittest.TestCase):
         self.assertFalse(controller.has_thread)
         self.assertIsNone(controller.miner)
         self.assertFalse(controller.stop_force_sent)
+
+    def test_poll_shutdown_ignores_running_worker_without_stop_request(self) -> None:
+        logger = logging.getLogger("test.worker_controller")
+        controller = WorkerController(auto_force_stop_after_seconds=0.05)
+        miners: list[FakeMiner] = []
+
+        def create_miner(config: object, **kwargs: object) -> FakeMiner:
+            miner = FakeMiner(config, **kwargs)
+            miners.append(miner)
+            return miner
+
+        with patch(
+            "overwatch_drops_miner.gui_parts.worker_controller.BilibiliWatchTimeMiner",
+            side_effect=create_miner,
+        ):
+            self.assertTrue(controller.start(object(), logger=logger))
+            self.assertTrue(miners[0].started.wait(timeout=1))
+            time.sleep(0.15)
+            for _ in range(5):
+                self.assertEqual(
+                    controller.poll_shutdown(logger=logger), "running"
+                )
+            self.assertEqual(miners[0].stop_calls, [])
+
+            self.assertEqual(
+                controller.request_stop(logger=logger), "stopping_started"
+            )
+            self.assertEqual(miners[0].stop_calls, [False])
+            miners[0].release.set()
+            for _ in range(50):
+                if controller.poll_shutdown(logger=logger) == "stopped":
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("worker thread did not stop")
+            self.assertFalse(controller.has_thread)
+            self.assertIsNone(controller.miner)
+
+    def test_poll_shutdown_cleans_dead_thread_without_stop_request(self) -> None:
+        controller = WorkerController()
+        miner = FakeMiner(object())
+        controller.miner = miner  # type: ignore[assignment]
+        controller.worker_thread = FakeThread(alive=False)  # type: ignore[assignment]
+
+        self.assertEqual(
+            controller.poll_shutdown(logger=logging.getLogger("test.worker_controller")),
+            "stopped",
+        )
+        self.assertFalse(controller.has_thread)
+        self.assertIsNone(controller.miner)
+        self.assertFalse(controller.stopping_in_progress)
 
 
 if __name__ == "__main__":

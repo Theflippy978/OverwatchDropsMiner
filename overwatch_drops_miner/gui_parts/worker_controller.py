@@ -103,6 +103,9 @@ class WorkerController:
             return "no_thread"
 
         if self.worker_thread.is_alive():
+            if not self.stopping_in_progress:
+                # 未发出停止请求：正常运行，绝不计时、绝不强停
+                return "running"
             if self.stop_poll_started_at is None:
                 self.stop_poll_started_at = time.monotonic()
             elapsed = time.monotonic() - self.stop_poll_started_at
@@ -122,7 +125,11 @@ class WorkerController:
                 self.stop_timeout_warned = True
             return "running"
 
-        logger.info("停止成功")
+        # 线程已死：无论是否请求过停止都做最终清理（支撑崩溃残留自动回收）
+        if self.stopping_in_progress:
+            logger.info("停止成功")
+        else:
+            logger.info("后台线程已退出，资源已清理")
         self.worker_thread = None
         self.miner = None
         self._reset_stop_state()

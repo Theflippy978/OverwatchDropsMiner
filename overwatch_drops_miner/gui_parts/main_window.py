@@ -546,14 +546,30 @@ class MinerGUI(QMainWindow):
             self._show_error("配置错误", str(exc))
             return
         if self.miner_manager.start(account, logger=LOGGER):
-            LOGGER.info("账号 [%s] 挂宝已启动", account.remark or account.id[:8])
-            self._start_progress_animation()
-            self._config_sync_timer.start()
-            self._stop_poll_timer.start()
-            self._watch_tick_timer.start()
-            self._schedule_task_refresh()
-            self._update_running_count()
-            self._on_account_selected(account_id)
+            self._finish_account_started(account, account_id)
+            return
+        # 启动失败通常是因为上次会话的线程残留（例如崩溃后未被清理）。
+        # 先尝试轮询回收一次死线程，回收成功则立即重试启动。
+        cleanup = self.miner_manager.poll_shutdown(account_id, logger=LOGGER)
+        if cleanup == "stopped":
+            if self.miner_manager.start(account, logger=LOGGER):
+                self._finish_account_started(account, account_id)
+                return
+        self._show_warning(
+            "启动失败",
+            "该账号后台尚未完全停止，请稍候几秒后重试。",
+        )
+
+    def _finish_account_started(self, account: Account, account_id: str) -> None:
+        """启动成功后的统一 UI 收尾：开启各计时器并刷新状态。"""
+        LOGGER.info("账号 [%s] 挂宝已启动", account.remark or account.id[:8])
+        self._start_progress_animation()
+        self._config_sync_timer.start()
+        self._stop_poll_timer.start()
+        self._watch_tick_timer.start()
+        self._schedule_task_refresh()
+        self._update_running_count()
+        self._on_account_selected(account_id)
 
     def stop_account(self, account_id: str) -> None:
         result = self.miner_manager.request_stop(account_id, logger=LOGGER)
@@ -587,12 +603,17 @@ class MinerGUI(QMainWindow):
             self._watch_tick_timer.stop()
 
     def _poll_shutdown_all(self) -> None:
+        # 对所有已注册账号逐个轮询：新契约下 poll_shutdown 对正常运行中的
+        # 账号是安全的（不会误停），崩溃退出的死线程则会在轮询中被回收。
         states = self.miner_manager.shutdown_states()
-        if not any(state == "running" for state in states.values()):
-            self._stop_poll_timer.stop()
-            return
-        for account_id in states:
+        results = [
             self.miner_manager.poll_shutdown(account_id, logger=LOGGER)
+            for account_id in states
+        ]
+        # 全部账号都已回收（no_thread）才停表；stopped 表示本轮刚完成一次
+        # 清理，下一轮再确认；running 表示仍有活动线程。
+        if not any(r in ("running", "stopped") for r in results):
+            self._stop_poll_timer.stop()
 
     def _start_progress_animation(self) -> None:
         self.progress_bar.setRange(0, 0)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -62,6 +63,58 @@ class AccountStoreTest(unittest.TestCase):
             path.write_text("not json", encoding="utf-8")
             store = AccountStore(path=path)
             self.assertEqual(store.list_accounts(), [])
+
+    def test_save_atomic_no_partial_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "accounts.json"
+            store = AccountStore(path=path)
+            account = store.add("cookie-a", remark="a")
+            original = path.read_text(encoding="utf-8")
+
+            def broken_replace(src, dst):
+                raise OSError("模拟替换失败")
+
+            with unittest.mock.patch(
+                "overwatch_drops_miner.accounts.os.replace",
+                side_effect=broken_replace,
+            ):
+                with self.assertRaises(OSError):
+                    store.add("cookie-b", remark="b")
+
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
+            self.assertEqual(store.get(account.id).remark, "a")
+            # 磁盘原文件未被破坏：重新加载仍只有原账号
+            reloaded = AccountStore(path=path)
+            self.assertEqual(
+                [item.remark for item in reloaded.list_accounts()], ["a"]
+            )
+            # 原子写失败后临时文件残留不影响下次保存
+            store.add("cookie-c", remark="c")
+            reloaded = AccountStore(path=path)
+            self.assertEqual(len(reloaded.list_accounts()), 3)
+
+    def test_load_corrupt_file_backed_up(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "accounts.json"
+            path.write_text("{broken json", encoding="utf-8")
+
+            store = AccountStore(path=path)
+
+            backups = list(Path(temp_dir).glob("accounts.json.corrupt-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_text(encoding="utf-8"), "{broken json")
+            self.assertFalse(path.exists())
+            self.assertEqual(store.list_accounts(), [])
+
+    def test_load_non_utf8_file_no_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "accounts.json"
+            path.write_bytes(b"\xff\xfe\x00bad")
+
+            store = AccountStore(path=path)
+
+            self.assertEqual(store.list_accounts(), [])
+            self.assertTrue(list(Path(temp_dir).glob("accounts.json.corrupt-*")))
 
 
 if __name__ == "__main__":

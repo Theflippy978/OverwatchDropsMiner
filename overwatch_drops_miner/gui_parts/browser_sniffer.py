@@ -5,7 +5,6 @@ import logging
 import shutil
 import tempfile
 import threading
-import time
 from collections.abc import Callable, Iterable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Literal
@@ -70,8 +69,11 @@ def start_browser_sniff(
     browser_preference: str | None = None,
     finish_on_any: bool = False,
     logger: logging.Logger | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> threading.Thread:
     logger = logger or logging.getLogger(__name__)
+    # 向后兼容：未传入取消事件时内部自建一个
+    cancel_event = cancel_event or threading.Event()
 
     def _do() -> None:
         server = None
@@ -201,6 +203,10 @@ def start_browser_sniff(
             html_attempts = 0
             last_cookie_count = 0
             for _ in range(120):
+                # 每次迭代边界响应取消请求，置位则静默退出（finally 会关闭浏览器）
+                if cancel_event.is_set():
+                    logger.info("嗅探操作已取消，正在退出")
+                    break
                 if need_cookie and not cookie_done and cookie_captured:
                     current_cookies = cookie_captured[-1]
                     filtered_cookies = select_login_cookies(current_cookies)
@@ -281,7 +287,10 @@ def start_browser_sniff(
                 ):
                     break
 
-                time.sleep(1)
+                # 等待期间也响应取消信号，避免最长 1 秒的无谓延迟
+                if cancel_event.wait(1):
+                    logger.info("嗅探操作已取消，正在退出")
+                    break
 
         except ImportError as exc:
             on_error("依赖缺失", f"缺少依赖库，请安装后重试: {exc}\n\n")
