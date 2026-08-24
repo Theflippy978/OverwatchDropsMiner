@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from overwatch_drops_miner.gui_parts.app_style import configure_qt_app
 from overwatch_drops_miner.gui_parts.gui_state import GuiStateStore
@@ -146,6 +146,70 @@ class MainWindowPollTests(unittest.TestCase):
             self.assertEqual(manager.start.call_count, 2)
             warn.assert_not_called()
             self.assertTrue(window._stop_poll_timer.isActive())
+        finally:
+            window.close()
+
+
+    def test_close_flow_polls_until_no_thread(self) -> None:
+        """closeEvent 后渐进轮询，全部账号线程回收（no_thread）才调用退出。"""
+        window = self._make_window()
+        try:
+            manager = MagicMock()
+            manager.shutdown_states.return_value = {"a": "idle"}
+            manager.poll_shutdown.side_effect = ["stopped", "no_thread"]
+            window.miner_manager = manager
+
+            with (
+                patch.object(window.browser_actions, "shutdown", return_value=True),
+                patch.object(MinerGUI, "_quit_app") as quit_mock,
+            ):
+                # closeEvent 只触发渐进关窗，不立即退出。
+                window.close()
+                manager.stop_all.assert_called_once()
+                quit_mock.assert_not_called()
+
+                # 第一轮仍在线程收尾（stopped），不应退出。
+                window._close_poll_step()
+                quit_mock.assert_not_called()
+
+                # 第二轮确认全部回收，此时才允许最终退出。
+                window._close_poll_step()
+                quit_mock.assert_called_once()
+                self.assertEqual(manager.poll_shutdown.call_count, 2)
+        finally:
+            window.close()
+
+    def test_remove_account_discards_stale_task_result(self) -> None:
+        """删除账号后迟到的任务结果回调应被丢弃，不再写回结果表。"""
+        window = self._make_window()
+        try:
+            account = SimpleNamespace(id="gone-account", remark="待删除账号")
+            store = MagicMock()
+            store.get.return_value = account
+            store.list_accounts.return_value = []
+            window.account_store = store
+            manager = MagicMock()
+            manager.is_running.return_value = True
+            manager.running_count.return_value = 0
+            window.miner_manager = manager
+
+            with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+                window.remove_account("gone-account")
+
+            self.assertNotIn("gone-account", window._task_controllers)
+            self.assertNotIn("gone-account", window._task_progress_results)
+
+            # 模拟凭据已删除：此后按 id 查询账号应不存在。
+            store.get.return_value = None
+
+            # 模拟后台线程完成后经 post_ui_task 迟到回写结果。
+            window._set_task_progress_text("gone-account", "迟到的任务结果")
+
+            self.assertNotIn(
+                "gone-account",
+                window._task_progress_results,
+                "已删除账号的迟到任务结果不应复活条目",
+            )
         finally:
             window.close()
 

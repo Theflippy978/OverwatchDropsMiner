@@ -89,8 +89,27 @@ class BilibiliWatchTimeMiner:
         task: asyncio.Task[None] | None = None
         try:
             if self._uid is None:
-                uid, _ = await client.get_self_info()
-                self._uid = uid or 0
+                try:
+                    uid, _ = await client.get_self_info()
+                except Exception as exc:
+                    # 首次获取 uid 失败只终结当前连接，不触发全局停机，
+                    # 其余房间的连接应继续正常运行。
+                    LOGGER.error(
+                        "直播间 %s 连接 #%s 获取用户信息失败，本次连接退出: %s",
+                        plan.room_id,
+                        plan.session_no,
+                        exc,
+                    )
+                    return
+                if uid is None:
+                    # uid 获取失败时直接退出，避免以 uid=0 启动 worker。
+                    LOGGER.error(
+                        "直播间 %s 连接 #%s 获取用户信息返回空 UID，本次连接退出",
+                        plan.room_id,
+                        plan.session_no,
+                    )
+                    return
+                self._uid = uid
             runtime_uid = self._uid or 0
 
             worker = X25KnWorker(
@@ -146,9 +165,11 @@ class BilibiliWatchTimeMiner:
         set_current_account(self._account_id)
         try:
             asyncio.run(self._thread_loop(plan, thread_index))
-        except Exception as exc:
-            LOGGER.exception("直播间连接异常退出: %s", exc)
-            self._stop_event.set()
+        except Exception:
+            # 意外异常只终结当前连接线程，不设置全局停止事件，
+            # 其余连接与主循环不受影响；主循环检测到全部线程
+            # 退出后会自然收尾。
+            LOGGER.exception("直播间连接异常退出")
         finally:
             clear_current_account()
 
@@ -220,7 +241,11 @@ class BilibiliWatchTimeMiner:
                         time.monotonic() + LOGIN_WATCHDOG_INTERVAL_SECONDS
                     )
                 for thread in self._threads:
-                    thread.join(timeout=0.5)
+                    thread.join(timeout=0.1)
+                    # 收到停止请求时立即跳出本轮 join，避免 128 线程全活时
+                    # 单轮轮询耗时过长而推迟 stop 响应与登录看门狗复检。
+                    if self._stop_event.is_set():
+                        break
         except KeyboardInterrupt:
             LOGGER.info("收到停止信号，正在停止...")
             self.stop()

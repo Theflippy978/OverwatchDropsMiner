@@ -2,8 +2,16 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
+import logging
 
 CRYPTPROTECT_UI_FORBIDDEN = 0x01
+
+LOGGER = logging.getLogger(__name__)
+
+_kernel32 = ctypes.windll.kernel32
+# 显式声明参数与返回类型，避免 64 位下指针被截断
+_kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+_kernel32.LocalFree.restype = ctypes.c_void_p
 
 
 class DATA_BLOB(ctypes.Structure):
@@ -25,6 +33,12 @@ def _bytes_from_blob(blob: DATA_BLOB) -> bytes:
     return ctypes.string_at(blob.pbData, blob.cbData)
 
 
+def _local_free(blob: DATA_BLOB) -> None:
+    """释放 DPAPI 返回的本地内存；失败仅告警，不中断清理路径。"""
+    if _kernel32.LocalFree(blob.pbData):
+        LOGGER.warning("LocalFree 释放内存失败")
+
+
 def protect(plaintext: str) -> str:
     """Encrypt text with the current Windows user's DPAPI key; base64-like hex output."""
     import base64
@@ -42,11 +56,12 @@ def protect(plaintext: str) -> str:
         ctypes.byref(out_blob),
     )
     if not ok:
-        raise OSError("CryptProtectData failed")
+        # 带上系统错误信息，便于定位失败原因
+        raise OSError(f"CryptProtectData 失败: {ctypes.WinError(ctypes.GetLastError())}")
     try:
         encrypted = _bytes_from_blob(out_blob)
     finally:
-        ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+        _local_free(out_blob)
     return base64.b64encode(encrypted).decode("ascii")
 
 
@@ -70,8 +85,9 @@ def unprotect(ciphertext: str) -> str:
         ctypes.byref(out_blob),
     )
     if not ok:
-        raise OSError("CryptUnprotectData failed")
+        # 带上系统错误信息，便于定位失败原因
+        raise OSError(f"CryptUnprotectData 失败: {ctypes.WinError(ctypes.GetLastError())}")
     try:
         return _bytes_from_blob(out_blob).decode("utf-8")
     finally:
-        ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+        _local_free(out_blob)

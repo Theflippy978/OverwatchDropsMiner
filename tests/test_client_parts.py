@@ -14,7 +14,12 @@ from overwatch_drops_miner.client_parts.cookies import (
     build_live_headers,
     build_mission_headers,
 )
-from overwatch_drops_miner.client_parts.models import MissionRewardInfo, TaskProgress
+from overwatch_drops_miner.client_parts.live import parse_danmu_server_conf
+from overwatch_drops_miner.client_parts.models import (
+    MissionRewardInfo,
+    TaskCheckpointProgress,
+    TaskProgress,
+)
 from overwatch_drops_miner.client_parts.profile import (
     parse_self_info,
     validate_nav_payload,
@@ -132,6 +137,43 @@ class ClientPartsTest(unittest.TestCase):
         self.assertFalse(claimable.is_claimed)
         self.assertFalse(claimed.is_claimable)
         self.assertTrue(claimed.is_claimed)
+
+    def test_is_completed_respects_terminal_status(self) -> None:
+        # 服务器终态（status=3 已完成）优先于本地计数，cur 滞后也应视为完成
+        self.assertTrue(
+            TaskCheckpointProgress(
+                sid="cp-a",
+                alias="watch",
+                status=3,
+                cur_value=10,
+                limit_value=60,
+            ).is_completed
+        )
+        # 计数达标（cur>=limit）即使 status 仍为 0 也视为完成
+        self.assertTrue(
+            TaskCheckpointProgress(
+                sid="cp-b",
+                alias="watch",
+                status=0,
+                cur_value=60,
+                limit_value=60,
+            ).is_completed
+        )
+        self.assertFalse(
+            TaskCheckpointProgress(
+                sid="cp-c",
+                alias="watch",
+                status=0,
+                cur_value=30,
+                limit_value=60,
+            ).is_completed
+        )
+
+    def test_parse_danmu_server_conf_raises_when_token_missing(self) -> None:
+        # 风控软拒绝时 token 缺失应抛出明确 ValueError，而非裸 KeyError
+        payload = {"code": 0, "data": {"host_list": [{"host": "h", "wss_port": 443}]}}
+        with self.assertRaisesRegex(ValueError, "未返回 token"):
+            parse_danmu_server_conf(payload, room_id=123)
 
     def test_task_indicator_parsing_prefers_watch_indicator(self) -> None:
         self.assertEqual(coerce_task_number("12"), 12)

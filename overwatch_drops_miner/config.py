@@ -23,6 +23,10 @@ class MinerConfig:
             raise ValueError("room_ids 中存在非法房间号")
         if self.thread_count <= 0:
             raise ValueError("thread_count 必须大于 0")
+        if self.thread_count > 128:
+            raise ValueError("线程数不能超过 128")
+        if len(self.room_ids) * self.thread_count > 128:
+            raise ValueError("总连接数（房间数 × 线程数）不能超过 128")
         if self.reconnect_delay_seconds <= 0:
             raise ValueError("reconnect_delay_seconds 必须大于 0")
         if self.task_query_interval_seconds <= 0:

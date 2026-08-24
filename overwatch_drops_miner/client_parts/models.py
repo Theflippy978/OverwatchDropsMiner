@@ -57,7 +57,8 @@ class TaskCheckpointProgress:
             limit = float(self.limit_value)
             cur = float(self.cur_value)
             if limit > 0:
-                return cur >= limit
+                # 服务器终态（3=已完成、6=已领取）优先于本地计数，避免 cur 滞后时漏判
+                return self.status in (3, 6) or cur >= limit
         except (TypeError, ValueError):
             pass
         return self.status in (3, 6)
@@ -84,7 +85,8 @@ class TaskProgress:
             limit = float(self.limit_value)
             cur = float(self.cur_value)
             if limit > 0:
-                return cur >= limit
+                # 服务器终态（3=已完成、6=已领取）优先于本地计数，避免 cur 滞后时漏判
+                return self.status in (3, 6) or cur >= limit
         except (TypeError, ValueError):
             pass
         # 无可用进度指标时，仅信任明确的终态（已领取等）。

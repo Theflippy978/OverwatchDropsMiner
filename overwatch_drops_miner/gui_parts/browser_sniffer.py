@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import tempfile
 import threading
@@ -28,6 +29,10 @@ CookiesCallback = Callable[[list[dict[str, Any]]], None]
 PageUrlCallback = Callable[[int], None]
 PageHtmlCallback = Callable[[str, str], bool]
 ErrorCallback = Callable[[str, str], None]
+
+
+class SniffAbortError(RuntimeError):
+    """嗅探前置条件不满足，需要直接终止本次嗅探并通知用户。"""
 
 def classify_sniff_payload(data: dict[str, Any]) -> tuple[SniffPayloadKind, Any]:
     if data.get("type") == "__bili_cookies__":
@@ -178,9 +183,32 @@ def start_browser_sniff(
                         try:
                             driver.webextension.install(path=ext_dir)
                         except Exception as exc:
-                            logger.error("安裝 extension 失败: %s", exc)
+                            # 安装失败时嗅探能力实际为零，降级为与 Edge 分支一致的
+                            # --load-extension 参数方式加载解压后的扩展目录
+                            logger.warning(
+                                "Chrome 扩展安装失败，降级为 --load-extension 参数方式加载: %s",
+                                exc,
+                            )
+                            try:
+                                driver.quit()
+                            except Exception:
+                                pass
+                            driver = None
+                            if not os.path.isfile(
+                                os.path.join(ext_dir, "manifest.json")
+                            ):
+                                raise SniffAbortError(
+                                    "Chrome 扩展安装失败，且本地扩展目录不可用，"
+                                    "无法继续自动获取，请重试或检查浏览器配置。"
+                                ) from exc
+                            opts.add_argument(f"--load-extension={ext_dir}")
+                            driver = webdriver.Chrome(options=opts)
 
                     break
+                except SniffAbortError:
+                    driver = None
+                    browser_type = None
+                    raise
                 except Exception as exc:
                     last_exc = exc
                     driver = None
@@ -200,6 +228,7 @@ def start_browser_sniff(
             net_done = False
             url_done = False
             html_done = False
+            sniff_success = False
             html_attempts = 0
             last_cookie_count = 0
             for _ in range(120):
@@ -285,6 +314,7 @@ def start_browser_sniff(
                     ),
                     finish_on_any=finish_on_any,
                 ):
+                    sniff_success = True
                     break
 
                 # 等待期间也响应取消信号，避免最长 1 秒的无谓延迟
@@ -292,8 +322,16 @@ def start_browser_sniff(
                     logger.info("嗅探操作已取消，正在退出")
                     break
 
+            # 循环自然耗尽仍未捕获到内容且未被取消时，明确反馈用户而不是静默关闭浏览器
+            if not sniff_success and not cancel_event.is_set():
+                logger.warning("嗅探超过 2 分钟未捕获到内容，已自动关闭浏览器")
+                on_error("超时", "超过 2 分钟未捕获到内容，浏览器已关闭，请重试")
+
         except ImportError as exc:
             on_error("依赖缺失", f"缺少依赖库，请安装后重试: {exc}\n\n")
+        except SniffAbortError as exc:
+            logger.error("自动获取终止: %s", exc)
+            on_error("错误", str(exc))
         except Exception as exc:
             logger.exception("自动获取失败")
             on_error("错误", f"自动获取失败: {exc}")

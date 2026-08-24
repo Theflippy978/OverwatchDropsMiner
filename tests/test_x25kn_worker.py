@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import time
 import unittest
@@ -11,7 +12,11 @@ from overwatch_drops_miner.x25kn_worker import X25KnWorker
 
 
 class _TaskClient:
+    def __init__(self) -> None:
+        self.query_calls = 0
+
     async def get_task_progress(self, _task_ids: list[str]) -> list[TaskProgress]:
+        self.query_calls += 1
         return [
             TaskProgress(
                 task_id="done",
@@ -61,6 +66,19 @@ class _BlockingNotifier:
             return True
         finally:
             self.finished.set()
+
+
+class _RecordingNotifier:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.notified = threading.Event()
+
+    def notify(self, *, title: str, body: str) -> bool:
+        self.calls.append((title, body))
+        self.notified.set()
+        return True
 
 
 class X25KnWorkerTest(unittest.TestCase):
@@ -127,6 +145,50 @@ class X25KnWorkerTest(unittest.TestCase):
                 notifier.finished.wait(timeout=1),
                 "notification thread did not finish after release",
             )
+
+    def test_completed_notify_not_repeated_after_reconnect(self) -> None:
+        client = _TaskClient()
+        notifier = _RecordingNotifier()
+        worker = X25KnWorker(
+            client=client,  # type: ignore[arg-type]
+            notifier=notifier,  # type: ignore[arg-type]
+            config=MinerConfig(
+                cookie="cookie",
+                room_ids=[1],
+                task_ids=["done"],
+                task_query_interval_seconds=10,
+            ),
+            uid=42,
+            room_id=1,
+        )
+
+        async def exercise() -> None:
+            # 第一轮监控循环：见到任务完成并发送通知
+            monitor = asyncio.create_task(worker._task_monitor_loop())
+            self.assertTrue(
+                await asyncio.to_thread(notifier.notified.wait, 1),
+                "first round did not notify",
+            )
+            monitor.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await monitor
+
+            # 模拟断线重连：同一 worker 重新进入任务监控循环
+            monitor2 = asyncio.create_task(worker._task_monitor_loop())
+            for _ in range(200):
+                if client.query_calls >= 2:
+                    break
+                await asyncio.sleep(0.01)
+            # 留出处理时间，确保第二轮已完成一次完整查询与判定
+            await asyncio.sleep(0.05)
+            monitor2.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await monitor2
+
+        asyncio.run(exercise())
+
+        self.assertGreaterEqual(client.query_calls, 2)
+        self.assertEqual(len(notifier.calls), 1)
 
 
 if __name__ == "__main__":

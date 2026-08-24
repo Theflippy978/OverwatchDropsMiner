@@ -27,9 +27,15 @@ def parse_danmu_server_conf(payload: dict[str, Any], room_id: int) -> DanmuServe
     if not host_list:
         raise ValueError(f"弹幕 host_list 为空 room_id={room_id}")
     host_item = host_list[0]
+    # 风控软拒绝时可能缺失 token，避免硬索引导致裸 KeyError
+    token = str(data.get("token") or "")
+    if not token:
+        raise ValueError(
+            f"直播间 {room_id} 未返回 token，可能被风控拦截"
+        )
     return DanmuServerConf(
         room_id=room_id,
-        token=str(data["token"]),
+        token=token,
         host=str(
             host_item.get("host")
             or data.get("host")

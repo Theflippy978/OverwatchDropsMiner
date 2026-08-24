@@ -39,6 +39,14 @@ class X25KnWorker:
         self.primary_session = primary_session
         self._stop_event = stop_event or asyncio.Event()
         self.watch_tracker = watch_tracker
+        # 跨重连保留的任务进度快照与已完成去重集合：
+        # 断线重连会重新进入 _run_once 并新建监控循环，
+        # 若放在局部变量会导致重连后重复推送“任务完成”通知、重复打印全部进度。
+        # 监控循环在同一事件循环内顺序执行，无并发访问，直接提升为实例字段即可。
+        self._last_task_snapshot: dict[
+            str, tuple[int | float, int | float, int]
+        ] = {}
+        self._notified_completed_ids: set[str] = set()
 
     @property
     def _ctx(self) -> str:
@@ -165,8 +173,9 @@ class X25KnWorker:
                 pass
 
     async def _task_monitor_loop(self) -> None:
-        last_snapshot: dict[str, tuple[int | float, int | float, int]] = {}
-        notified_completed_ids: set[str] = set()
+        # 使用实例级快照与去重集合，保证跨断线重连不重复通知（首次见到已完成任务仍会通知）
+        last_snapshot = self._last_task_snapshot
+        notified_completed_ids = self._notified_completed_ids
         while not self._stop_event.is_set():
             task_ids = self.config.task_ids
             wait_seconds = max(10, self.config.task_query_interval_seconds)

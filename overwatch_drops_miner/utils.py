@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import re
 
-COOKIE_PATTERN = re.compile(r"\s*([^=;\s]+)\s*=\s*([^;]*)")
+# value 部分排除分号与换行，避免跨行吞并后续键值对
+COOKIE_PATTERN = re.compile(r"\s*([^=;\s]+)\s*=\s*([^;\r\n]*)")
 
 
 def parse_room_ids(raw: str) -> list[int]:
@@ -39,6 +40,20 @@ def parse_task_ids(raw: str) -> list[str]:
         if cleaned:
             task_ids.append(cleaned)
     return task_ids
+
+
+def parse_url_list(text: str) -> list[str]:
+    """按逗号/换行拆分通知地址列表：strip 空白、去重、滤空；不做 & 截断与 task_ids 提取。"""
+    # 通知 URL 可能携带查询参数（含 &），因此这里不做任何 & 截断
+    urls: list[str] = []
+    seen: set[str] = set()
+    for token in text.replace("\r\n", "\n").replace("\n", ",").split(","):
+        cleaned = token.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        urls.append(cleaned)
+    return urls
 
 
 def _extract_json_object_after_marker(raw: str, marker: str) -> dict:
@@ -394,7 +409,8 @@ def extract_bili_live_task_groups(page_html: str) -> list[dict[str, object]]:
 def parse_cookie(cookie_text: str) -> dict[str, str]:
     cookie_map: dict[str, str] = {}
     for key, value in COOKIE_PATTERN.findall(cookie_text):
-        cookie_map[key] = value
+        # 去除键值两端空白，避免尾随空格导致签名失败
+        cookie_map[key.strip()] = value.strip()
     return cookie_map
 
 
@@ -403,4 +419,9 @@ def get_cookie_value(cookie_text: str, key: str) -> str:
 
 
 def join_cookie(cookie_map: dict[str, str]) -> str:
-    return "; ".join(f"{key}={value}" for key, value in cookie_map.items())
+    parts: list[str] = []
+    for key, value in cookie_map.items():
+        # 防御性处理：值中含分号或换行会破坏 Cookie 头结构，直接剔除这些字符
+        cleaned_value = value.replace("\r", "").replace("\n", "").replace(";", "")
+        parts.append(f"{key}={cleaned_value}")
+    return "; ".join(parts)

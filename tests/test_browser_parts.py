@@ -400,10 +400,8 @@ class BrowserActionsTest(unittest.TestCase):
         self.assertTrue(actions.shutdown())
         self.assertFalse(thread.is_alive())
 
-    def test_sniffer_loop_respects_cancel_event(self) -> None:
-        cancel_event = threading.Event()
-        cancel_event.set()
-
+    @staticmethod
+    def _build_fake_selenium() -> tuple[types.ModuleType, types.ModuleType, type, type]:
         class _FakeOptions:
             binary_location = None
 
@@ -433,8 +431,20 @@ class BrowserActionsTest(unittest.TestCase):
         fake_webdriver.Chrome = _FakeChrome  # type: ignore[attr-defined]
         fake_webdriver.Edge = _FakeEdge  # type: ignore[attr-defined]
         fake_selenium.webdriver = fake_webdriver
+        return fake_selenium, fake_webdriver, _FakeChrome, _FakeEdge
 
-        on_error = Mock()
+    def _run_sniff_with_fakes(
+        self,
+        cancel_event: object,
+        on_error: Mock,
+    ) -> tuple[type, type]:
+        (
+            fake_selenium,
+            fake_webdriver,
+            fake_chrome_cls,
+            fake_edge_cls,
+        ) = self._build_fake_selenium()
+
         with patch.dict(
             sys.modules,
             {"selenium": fake_selenium, "selenium.webdriver": fake_webdriver},
@@ -454,16 +464,46 @@ class BrowserActionsTest(unittest.TestCase):
                 None,
                 "测试提示",
                 on_error=on_error,
-                cancel_event=cancel_event,
+                cancel_event=cancel_event,  # type: ignore[arg-type]
             )
             thread.join(timeout=10)
 
         self.assertFalse(thread.is_alive())
-        self.assertEqual(_FakeChrome.instances, [])
-        drivers = _FakeEdge.instances
+        return fake_chrome_cls, fake_edge_cls
+
+    def test_sniffer_loop_respects_cancel_event(self) -> None:
+        cancel_event = threading.Event()
+        cancel_event.set()
+        on_error = Mock()
+
+        _FakeChrome, FakeEdge = self._run_sniff_with_fakes(cancel_event, on_error)
+
+        drivers = FakeEdge.instances
         self.assertEqual(len(drivers), 1)
         drivers[0].quit.assert_called_once()
         on_error.assert_not_called()
+
+    def test_sniffer_timeout_reports_error(self) -> None:
+        class _NoWaitEvent:
+            def __init__(self) -> None:
+                self.cancelled = False
+
+            def is_set(self) -> bool:
+                return self.cancelled
+
+            def wait(self, _timeout: float | None = None) -> bool:
+                return False
+
+        cancel_event = _NoWaitEvent()
+        on_error = Mock()
+
+        _FakeChrome, FakeEdge = self._run_sniff_with_fakes(cancel_event, on_error)
+
+        drivers = FakeEdge.instances
+        self.assertEqual(len(drivers), 1)
+        drivers[0].quit.assert_called_once()
+        on_error.assert_called_once()
+        self.assertIn("2 分钟", str(on_error.call_args.args[1]))
 
 
 if __name__ == "__main__":

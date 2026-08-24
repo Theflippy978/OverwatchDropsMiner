@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 import unittest
 
-from overwatch_drops_miner.utils import extract_bili_live_task_groups
+from overwatch_drops_miner.utils import (
+    extract_bili_live_task_groups,
+    join_cookie,
+    parse_cookie,
+    parse_url_list,
+)
 
 
 def _task_group(task_id: str) -> dict:
@@ -96,6 +101,42 @@ class ExtractBiliLiveTaskGroupsTests(unittest.TestCase):
         for html in invalid_pages:
             with self.subTest(html=html):
                 self.assertEqual(extract_bili_live_task_groups(html), [])
+
+
+class CookieParsingTests(unittest.TestCase):
+    def test_parse_cookie_multiline_not_swallowed(self) -> None:
+        # 跨行 Cookie 各键应独立解析，第一行 value 不能吞并第二行内容
+        cookie_map = parse_cookie("SESSDATA=abc\nbili_jct=xyz")
+        self.assertEqual(cookie_map, {"SESSDATA": "abc", "bili_jct": "xyz"})
+
+    def test_parse_cookie_strips_whitespace(self) -> None:
+        # 值两端空白应被去除，避免尾随空格导致签名失败
+        cookie_map = parse_cookie("bili_jct=abc ; x=1")
+        self.assertEqual(cookie_map, {"bili_jct": "abc", "x": "1"})
+
+    def test_join_cookie_removes_breaking_characters(self) -> None:
+        # 防御性：值中含分号/换行时应剔除，避免破坏 Cookie 头结构
+        header = join_cookie({"a": "x;y", "b": "p\nq"})
+        self.assertEqual(header, "a=xy; b=pq")
+
+
+class ParseUrlListTests(unittest.TestCase):
+    def test_parse_url_list_basic(self) -> None:
+        # 逗号/换行混合分隔、去重、含 & 的 URL 必须完整保留（不做截断）
+        raw = (
+            "https://example.com/hook?a=1&b=2,\n"
+            "https://example.com/hook?a=1&b=2\n\n"
+            "  https://example.com/other  ,"
+        )
+        self.assertEqual(
+            parse_url_list(raw),
+            [
+                "https://example.com/hook?a=1&b=2",
+                "https://example.com/other",
+            ],
+        )
+        self.assertEqual(parse_url_list(""), [])
+        self.assertEqual(parse_url_list("   \n  ,  "), [])
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import logging
 import queue
 import sys
 import threading
+import time
 import webbrowser
 from collections import deque
 from pathlib import Path
@@ -142,6 +143,8 @@ class MinerGUI(QMainWindow):
         self._task_refresh_pending: set[str] = set()
         self._qr_login_dialog: QrLoginDialog | None = None
         self._adding_accounts = 0
+        # 渐进式关窗：等待后台线程退出的截止时刻（time.monotonic 秒）。
+        self._shutdown_deadline = 0.0
 
         self.ui_call.connect(self._on_ui_call, Qt.QueuedConnection)
 
@@ -593,6 +596,9 @@ class MinerGUI(QMainWindow):
         self._post_ui_task(self._on_account_state_ui, account_id, running)
 
     def _on_account_state_ui(self, account_id: str, running: bool) -> None:
+        # 账号已被删除时丢弃迟到的状态回调，避免界面出现幽灵条目。
+        if not self._account_exists(account_id):
+            return
         self.account_panel.set_running(account_id, running)
         self._update_running_count()
         if self._current_account_id == account_id:
@@ -694,6 +700,10 @@ class MinerGUI(QMainWindow):
 
     # ---------- task progress ----------
 
+    def _account_exists(self, account_id: str) -> bool:
+        """校验账号仍存在，用于丢弃删除后迟到的后台回调。"""
+        return self.account_store.get(account_id) is not None
+
     def _task_controller_for(self, account_id: str) -> TaskController:
         controller = self._task_controllers.get(account_id)
         if controller is not None:
@@ -709,6 +719,11 @@ class MinerGUI(QMainWindow):
                 return ""
 
         def _complete_refresh(result_text: str, rerun: bool) -> None:
+            # 账号可能已在刷新期间被删除，迟到结果直接丢弃。
+            if not self._account_exists(account_id):
+                self._task_refresh_pending.discard(account_id)
+                self._progress_values.pop(account_id, None)
+                return
             self._set_task_progress_text(account_id, result_text)
             if rerun:
                 self._task_refresh_pending.add(account_id)
@@ -725,14 +740,20 @@ class MinerGUI(QMainWindow):
             complete_task_refresh=_complete_refresh,
             post_ui_task=self._post_ui_task,
             get_auto_claim_enabled=lambda: self.auto_claim_rewards_check.isChecked(),
-            on_progress_values=lambda cur, limit, aid=account_id: self._progress_values.update(
-                {aid: (cur, limit)}
+            on_progress_values=lambda cur, limit, aid=account_id: (
+                self._progress_values.update({aid: (cur, limit)})
+                if aid in self._task_controllers
+                else None
             ),
         )
         self._task_controllers[account_id] = controller
         return controller
 
     def _set_task_progress_text(self, account_id: str, text: str) -> None:
+        # 账号已被删除时丢弃迟到的任务结果，避免已删条目复活。
+        if not self._account_exists(account_id):
+            self._task_refresh_pending.discard(account_id)
+            return
         self._task_progress_results[account_id] = text
         if self._current_account_id == account_id:
             self._refresh_task_text()
@@ -906,8 +927,33 @@ class MinerGUI(QMainWindow):
             self.miner_manager.stop_all()
         except Exception:
             logging.getLogger(__name__).exception("关闭时停止挂宝失败")
-        QTimer.singleShot(150, QApplication.instance().quit)
-        event.accept()
+        try:
+            self.browser_actions.shutdown()
+        except Exception:
+            LOGGER.exception("关闭浏览器嗅探失败")
+        # 渐进式关窗：给后台线程最多 5 秒优雅退出，期间不阻塞 GUI 线程。
+        self._shutdown_deadline = time.monotonic() + 5.0
+        QTimer.singleShot(200, self._close_poll_step)
+        event.ignore()
+
+    def _close_poll_step(self) -> None:
+        """关窗轮询一步：所有账号线程均已回收或超时后才真正退出。"""
+        results = [
+            self.miner_manager.poll_shutdown(account_id, logger=LOGGER)
+            for account_id in self.miner_manager.shutdown_states()
+        ]
+        if all(r == "no_thread" for r in results) or (
+            time.monotonic() >= self._shutdown_deadline
+        ):
+            self._quit_app()
+            return
+        QTimer.singleShot(200, self._close_poll_step)
+
+    def _quit_app(self) -> None:
+        """最终退出：结束 Qt 事件循环。"""
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     # ---------- config load/save ----------
 

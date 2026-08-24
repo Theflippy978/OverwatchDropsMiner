@@ -127,6 +127,8 @@ class AccountPanel(QFrame):
             self.list_widget.item(row).setForeground(QColor("#22c55e"))
             self.list_widget.item(row).setToolTip("运行中")
         else:
+            # 停止时清除自定义前景色，恢复默认配色，避免绿色残留。
+            self.list_widget.item(row).setData(Qt.ForegroundRole, None)
             self.list_widget.item(row).setToolTip("未运行")
 
     # ---------- internals ----------
