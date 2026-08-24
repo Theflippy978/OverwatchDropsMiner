@@ -3,7 +3,7 @@ from __future__ import annotations
 import winreg
 from collections.abc import Callable
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, QTimer
 from PySide6.QtWidgets import QApplication
 
 from overwatch_drops_miner.gui_parts.gui_state import GuiStateStore
@@ -326,8 +326,6 @@ def build_stylesheet(t: ThemeTokens) -> str:
 class ThemeManager(QObject):
     """Owns the active theme; applies full-app QSS and persists the choice."""
 
-    theme_changed = Signal(str)
-
     def __init__(
         self,
         app: QApplication,
@@ -369,7 +367,6 @@ class ThemeManager(QObject):
         self._apply()
         self._gui_state.setValue(THEME_KEY, theme)
         self._gui_state.sync()
-        self.theme_changed.emit(theme)
 
     def toggle(self) -> None:
         self.set_theme(LIGHT if self._theme == DARK else DARK)

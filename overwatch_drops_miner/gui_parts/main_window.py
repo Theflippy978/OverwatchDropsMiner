@@ -536,6 +536,7 @@ class MinerGUI(QMainWindow):
             self.task_text.setPlainText("未选择账号")
             self.watch_info_label.setText("状态: 待机 | 本次有效观看: -- | 预计剩余: --")
             self.task_progress_bar.setValue(0)
+            self.account_status_label.setText("未选择账号")
         self._refresh_account_list()
         self._refresh_log_text()
         # 删除后若列表为空则不会触发选中信号，这里显式刷新一次按钮状态。
@@ -763,7 +764,6 @@ class MinerGUI(QMainWindow):
             set_task_progress_text=lambda text, aid=account_id: self._set_task_progress_text(
                 aid, text
             ),
-            set_live_watch_time_text=lambda text: None,
             complete_task_refresh=_complete_refresh,
             post_ui_task=self._post_ui_task,
             get_auto_claim_enabled=lambda: self.auto_claim_rewards_check.isChecked(),

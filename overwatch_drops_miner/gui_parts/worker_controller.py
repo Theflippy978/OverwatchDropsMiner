@@ -22,7 +22,6 @@ class WorkerController:
     def __init__(self, *, auto_force_stop_after_seconds: float = 2.0) -> None:
         self.worker_thread: threading.Thread | None = None
         self.miner: BilibiliWatchTimeMiner | None = None
-        self.stop_signal_set = False
         self.stopping_in_progress = False
         self.stop_poll_started_at: float | None = None
         self.stop_timeout_warned = False
@@ -50,7 +49,6 @@ class WorkerController:
         if self.has_thread:
             return False
 
-        self.stop_signal_set = False
         self._reset_stop_state()
 
         self.miner = BilibiliWatchTimeMiner(
@@ -71,7 +69,6 @@ class WorkerController:
         return True
 
     def request_stop(self, *, logger: logging.Logger) -> StopRequestResult:
-        self.stop_signal_set = True
         if not self.is_running:
             self.worker_thread = None
             self.miner = None

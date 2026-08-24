@@ -39,7 +39,6 @@ class BilibiliWatchTimeMiner:
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
         self._uid: int | None = None
-        self._uname: str = ""
         self._notifier = MultiPlatformNotifier(config.notify_urls)
         self._clients: list[BilibiliClient] = []
         self._clients_lock = threading.Lock()
@@ -121,6 +120,7 @@ class BilibiliWatchTimeMiner:
                 session_id=f"s{plan.session_no}",
                 primary_session=plan.session_no == 1,
                 watch_tracker=self.watch_tracker if plan.session_no == 1 else None,
+                account_id=self._account_id,
             )
             task = asyncio.create_task(
                 worker.run_forever(),
@@ -180,7 +180,6 @@ class BilibiliWatchTimeMiner:
 
         uid, uname = asyncio.run(self._probe_login())
         self._uid = uid
-        self._uname = uname
         if uid is None:
             self._login_invalidated.set()
             raise RuntimeError("Cookie 已失效，无法启动")
@@ -246,9 +245,6 @@ class BilibiliWatchTimeMiner:
                     # 单轮轮询耗时过长而推迟 stop 响应与登录看门狗复检。
                     if self._stop_event.is_set():
                         break
-        except KeyboardInterrupt:
-            LOGGER.info("收到停止信号，正在停止...")
-            self.stop()
         finally:
             self.stop(force=self._force_stop_requested)
             join_timeout = 1.2 if self._force_stop_requested else 3.0
@@ -288,12 +284,6 @@ class BilibiliWatchTimeMiner:
         if force:
             self._force_stop_requested = True
         self._stop_event.set()
-
-    def update_cookie(self, new_cookie: str) -> None:
-        with self._clients_lock:
-            self.config.cookie = new_cookie
-            for client in self._clients:
-                client.update_cookie(new_cookie)
 
     def update_notifier(self, notify_urls: list[str]) -> None:
         self.config.notify_urls = notify_urls

@@ -53,7 +53,6 @@ class WorkerControllerTest(unittest.TestCase):
             self.assertTrue(miners[0].started.wait(timeout=1))
             self.assertTrue(controller.is_running)
             self.assertFalse(controller.start(object(), logger=logger))
-            self.assertFalse(controller.stop_signal_set)
 
             self.assertEqual(
                 controller.request_stop(logger=logger),

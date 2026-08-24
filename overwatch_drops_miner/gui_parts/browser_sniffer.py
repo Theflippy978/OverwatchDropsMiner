@@ -86,7 +86,6 @@ def start_browser_sniff(
         ext_dir = None
         driver = None
         browser_type = None
-        cdp_session = None
         try:
             from selenium import webdriver
 
@@ -348,11 +347,6 @@ def start_browser_sniff(
             if server_thread and server_thread.is_alive():
                 try:
                     server_thread.join(timeout=2)
-                except Exception:
-                    pass
-            if cdp_session:
-                try:
-                    cdp_session.close()
                 except Exception:
                     pass
             if driver:

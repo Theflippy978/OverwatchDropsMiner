@@ -46,14 +46,21 @@ class PlusMinusSpinBox(QSpinBox):
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, False)
-        pen = QPen(QColor(color))
-        pen.setWidth(2)
-        pen.setCapStyle(Qt.FlatCap)
-        painter.setPen(pen)
+
+        def symbol_pen(bright: bool) -> QPen:
+            pen = QPen(QColor(hover_color if bright else color))
+            pen.setWidth(2)
+            pen.setCapStyle(Qt.FlatCap)
+            return pen
+
+        # 两个按钮的 hover 高亮行为对称：悬停哪个按钮，哪个按钮的符号变亮
+        up_hover = mouse_over and bool(option.activeSubControls & QStyle.SC_SpinBoxUp)
+        down_hover = mouse_over and bool(
+            option.activeSubControls & QStyle.SC_SpinBoxDown
+        )
+        painter.setPen(symbol_pen(down_hover))
         self._draw_minus(painter, down_rect)
-        if mouse_over and (option.activeSubControls & QStyle.SC_SpinBoxUp):
-            pen.setColor(QColor(hover_color))
-            painter.setPen(pen)
+        painter.setPen(symbol_pen(up_hover))
         self._draw_plus(painter, up_rect)
 
     def _draw_plus(self, painter: QPainter, rect: QRect) -> None:

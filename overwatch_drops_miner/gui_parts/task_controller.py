@@ -10,9 +10,8 @@ from overwatch_drops_miner.account_log_context import (
     clear_current_account,
     set_current_account,
 )
-from overwatch_drops_miner.client import BilibiliClient, LiveWatchTime
+from overwatch_drops_miner.client import BilibiliClient
 from overwatch_drops_miner.gui_parts.task_presenter import (
-    format_live_watch_time_progress,
     format_reward_claim_results,
     format_task_progress,
 )
@@ -61,7 +60,6 @@ class TaskController:
         get_task_ids: Callable[[], list[str]],
         show_warning: Callable[[str, str], None],
         set_task_progress_text: Callable[[str], None],
-        set_live_watch_time_text: Callable[[str], None],
         complete_task_refresh: Callable[[str, bool], None],
         post_ui_task: Callable[..., None],
         get_auto_claim_enabled: Callable[[], bool] | None = None,
@@ -73,7 +71,6 @@ class TaskController:
         self._get_task_ids = get_task_ids
         self._show_warning = show_warning
         self._set_task_progress_text = set_task_progress_text
-        self._set_live_watch_time_text = set_live_watch_time_text
         self._complete_task_refresh = complete_task_refresh
         self._post_ui_task = post_ui_task
         self._get_auto_claim_enabled = get_auto_claim_enabled or (lambda: False)
@@ -89,11 +86,6 @@ class TaskController:
         self._auto_claim_context: AutoClaimContext | None = None
         self._auto_claim_handled_ids: set[str] = set()
         self._auto_claim_pending_ids: set[str] = set()
-        self._watch_time_lock = threading.Lock()
-        self._watch_time_inflight = False
-        self._watch_time_generation = 0
-        self._watch_time_baselines: dict[int, int] = {}
-        self._watch_time_ruids: dict[int, int] = {}
 
     def _spawn_background_thread(self, name: str, body: Callable[[], None]) -> None:
         """以后台线程执行 body，并在执行期间绑定账号日志上下文。
@@ -139,94 +131,6 @@ class TaskController:
         with self._reward_claim_lock:
             if self._auto_claim_context == context:
                 self._auto_claim_pending_ids.difference_update(task_ids)
-
-    def reset_live_watch_time(self) -> None:
-        with self._watch_time_lock:
-            self._watch_time_generation += 1
-            self._watch_time_inflight = False
-            self._watch_time_baselines.clear()
-            self._watch_time_ruids.clear()
-
-    def stop_live_watch_time(self) -> None:
-        with self._watch_time_lock:
-            self._watch_time_generation += 1
-            self._watch_time_inflight = False
-
-    def refresh_live_watch_time(self) -> None:
-        cookie = self._get_cookie().strip()
-        if not cookie:
-            self._set_live_watch_time_text("本次预估观看时长: 等待 Cookie")
-            return
-
-        room_ids = self._get_room_ids()
-        if not room_ids:
-            self._set_live_watch_time_text("本次预估观看时长: 未设置房间")
-            return
-
-        with self._watch_time_lock:
-            if self._watch_time_inflight:
-                return
-            self._watch_time_inflight = True
-            generation = self._watch_time_generation
-            known_ruids = dict(self._watch_time_ruids)
-
-        def _do() -> None:
-            result_text = ""
-            try:
-
-                async def _query() -> tuple[list[LiveWatchTime], list[str]]:
-                    client = BilibiliClient(cookie)
-                    try:
-                        watch_times: list[LiveWatchTime] = []
-                        errors: list[str] = []
-                        for room_id in room_ids:
-                            try:
-                                watch_time = await client.get_live_watch_time(
-                                    room_id,
-                                    ruid=known_ruids.get(room_id),
-                                )
-                                watch_times.append(watch_time)
-                            except Exception as exc:
-                                errors.append(f"房间 {room_id}: {exc}")
-                        return watch_times, errors
-                    finally:
-                        await client.close()
-
-                watch_times, errors = asyncio.run(_query())
-                if not watch_times and errors:
-                    raise ValueError("; ".join(errors))
-
-                with self._watch_time_lock:
-                    if generation != self._watch_time_generation:
-                        return
-                    for item in watch_times:
-                        self._watch_time_ruids[item.room_id] = item.ruid
-                        self._watch_time_baselines.setdefault(
-                            item.room_id,
-                            item.watch_time,
-                        )
-                    baselines = dict(self._watch_time_baselines)
-
-                result_text = format_live_watch_time_progress(watch_times, baselines)
-                if errors:
-                    logging.getLogger(__name__).warning(
-                        "刷新实时观看时长部分失败: %s",
-                        "; ".join(errors),
-                    )
-                    result_text += f"（部分失败 {len(errors)} 个房间）"
-            except Exception as exc:
-                logging.getLogger(__name__).warning("刷新实时观看时长失败: %s", exc)
-                result_text = f"本次预估观看时长: 刷新失败: {exc}"
-            finally:
-                should_update = False
-                with self._watch_time_lock:
-                    if generation == self._watch_time_generation:
-                        self._watch_time_inflight = False
-                        should_update = True
-                if should_update and result_text:
-                    self._post_ui_task(self._set_live_watch_time_text, result_text)
-
-        self._spawn_background_thread("gui-live-watch-time-refresh", _do)
 
     def refresh(self, *, manual: bool = True) -> None:
         cookie = self._get_cookie().strip()

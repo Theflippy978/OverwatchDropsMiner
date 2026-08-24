@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 import unicodedata
 
-from overwatch_drops_miner.client import LiveWatchTime
 from overwatch_drops_miner.watch_time_tracker import estimate_remaining_seconds
 
 
@@ -39,30 +38,6 @@ def format_watch_estimate(
     if float(limit_value) > 0:
         return f"状态: {state} | 本次有效观看: {elapsed_text} | 预计剩余: 已达标"
     return f"状态: {state} | 本次有效观看: {elapsed_text} | 预计剩余: --"
-
-
-def format_live_watch_time_progress(
-    watch_times: list[LiveWatchTime],
-    baselines: dict[int, int],
-) -> str:
-    if not watch_times:
-        return "本次预估观看时长: 无数据"
-
-    parts: list[tuple[str, str]] = []
-    for item in watch_times:
-        baseline = baselines.get(item.room_id, item.watch_time)
-        elapsed = max(0, item.watch_time - baseline)
-        room_label = f"房间 {item.room_id}"
-        if item.rusername:
-            room_label = f"{room_label}，{item.rusername}"
-        parts.append((room_label, format_seconds_zh(elapsed)))
-
-    if len(parts) == 1:
-        room_label, duration = parts[0]
-        return f"本次预估观看时长: {duration} ({room_label})"
-    return "本次预估观看时长: " + " | ".join(
-        f"{room_label}: {duration}" for room_label, duration in parts
-    )
 
 
 BAR_WIDTH = 20

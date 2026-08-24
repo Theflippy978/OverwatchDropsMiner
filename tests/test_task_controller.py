@@ -24,7 +24,6 @@ class _Recorder:
         self.task_ids = ["task-a"]
         self.warnings: list[tuple[str, str]] = []
         self.texts: list[str] = []
-        self.watch_time_texts: list[str] = []
         self.completions: list[tuple[str, bool]] = []
         self.auto_claim_enabled = False
 
@@ -35,7 +34,6 @@ class _Recorder:
             get_task_ids=lambda: list(self.task_ids),
             show_warning=lambda title, msg: self.warnings.append((title, msg)),
             set_task_progress_text=self.texts.append,
-            set_live_watch_time_text=self.watch_time_texts.append,
             complete_task_refresh=self._complete_task_refresh,
             post_ui_task=self._post_ui_task,
             get_auto_claim_enabled=lambda: self.auto_claim_enabled,
@@ -355,20 +353,6 @@ class _ClaimContextProbeClient(_CompletedFakeClient):
         ]
 
 
-class _WatchTimeContextProbeClient(_FakeClient):
-    """记录线程执行期间账号日志上下文的假客户端（观看时长刷新路径）。"""
-
-    observed_accounts: list[str | None] = []
-
-    async def get_live_watch_time(self, room_id: int, ruid=None):
-        _WatchTimeContextProbeClient.observed_accounts.append(get_current_account())
-        return SimpleNamespace(
-            room_id=room_id,
-            ruid=ruid if ruid is not None else 10086,
-            watch_time=120,
-        )
-
-
 class TaskControllerLogContextTest(unittest.TestCase):
     """后台线程必须绑定账号日志上下文，退出时清理且不污染调用线程。"""
 
@@ -376,7 +360,6 @@ class TaskControllerLogContextTest(unittest.TestCase):
         _FakeThread.instances.clear()
         _RefreshContextProbeClient.observed_accounts.clear()
         _ClaimContextProbeClient.observed_accounts.clear()
-        _WatchTimeContextProbeClient.observed_accounts.clear()
 
     def _run_thread_body(self) -> None:
         # _FakeThread.start 不真正开线程，手动执行 target 模拟工作线程。
@@ -446,28 +429,6 @@ class TaskControllerLogContextTest(unittest.TestCase):
             self._run_thread_body()
 
         self.assertEqual(_ClaimContextProbeClient.observed_accounts, ["acct-claim"])
-        self.assertIsNone(get_current_account())
-
-    def test_refresh_live_watch_time_binds_and_clears_account_context(self) -> None:
-        recorder = _Recorder()
-        controller = recorder.build_controller(account_id="acct-watch")
-
-        with (
-            patch(
-                "overwatch_drops_miner.gui_parts.task_controller.threading.Thread",
-                _FakeThread,
-            ),
-            patch(
-                "overwatch_drops_miner.gui_parts.task_controller.BilibiliClient",
-                _WatchTimeContextProbeClient,
-            ),
-        ):
-            controller.refresh_live_watch_time()
-            self.assertIsNone(get_current_account())
-
-            self._run_thread_body()
-
-        self.assertEqual(_WatchTimeContextProbeClient.observed_accounts, ["acct-watch"])
         self.assertIsNone(get_current_account())
 
 

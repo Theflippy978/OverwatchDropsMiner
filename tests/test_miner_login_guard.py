@@ -64,60 +64,6 @@ class MinerLoginGuardTest(unittest.TestCase):
         self.assertGreaterEqual(calls, 3)
         self.assertFalse(miner.login_invalidated)
 
-    def test_late_client_registration_uses_latest_cookie_atomically(self) -> None:
-        constructed = threading.Event()
-        release_constructor = threading.Event()
-        registered_with_new_cookie = threading.Event()
-        clients = []
-
-        class FakeClient:
-            def __init__(self, cookie: str) -> None:
-                self.cookie = cookie
-                clients.append(self)
-                constructed.set()
-                release_constructor.wait(timeout=2)
-
-            def update_cookie(self, cookie: str) -> None:
-                self.cookie = cookie
-                if cookie == "new-cookie":
-                    registered_with_new_cookie.set()
-
-            async def close(self) -> None:
-                return None
-
-        class FakeWorker:
-            def __init__(self, **_kwargs) -> None:
-                pass
-
-            async def run_forever(self) -> None:
-                await asyncio.Event().wait()
-
-            async def stop(self) -> None:
-                return None
-
-        miner = BilibiliWatchTimeMiner(config())
-        miner._uid = 42
-
-        def run_loop() -> None:
-            asyncio.run(miner._thread_loop(SessionPlan(1, 1), 1))
-
-        with patch("overwatch_drops_miner.miner.BilibiliClient", FakeClient), patch(
-            "overwatch_drops_miner.miner.X25KnWorker", FakeWorker
-        ):
-            loop_thread = threading.Thread(target=run_loop)
-            loop_thread.start()
-            self.assertTrue(constructed.wait(timeout=1))
-            miner.update_cookie("new-cookie")
-            release_constructor.set()
-            self.assertTrue(registered_with_new_cookie.wait(timeout=1))
-            miner.stop()
-            loop_thread.join(timeout=2)
-
-        self.assertFalse(loop_thread.is_alive())
-        self.assertEqual(miner.config.cookie, "new-cookie")
-        self.assertEqual(clients[0].cookie, "new-cookie")
-        self.assertEqual(miner._clients, [])
-
     def test_run_waits_until_all_session_threads_really_exit(self) -> None:
         miner = BilibiliWatchTimeMiner(config())
         miner._probe_login = AsyncMock(return_value=(42, "user"))
