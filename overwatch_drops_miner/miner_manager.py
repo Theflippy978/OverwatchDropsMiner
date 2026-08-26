@@ -115,6 +115,18 @@ class AccountMinerManager:
             self._notify(account_id, False)
         return result
 
+    def discard_session(self, account_id: str) -> None:
+        """回收已删除账号的会话资源（J-6）：_sessions 此前只增不减，
+        删除账号后 controller/tracker 常驻内存。仅在会话完全停止时移除。"""
+        with self._lock:
+            session = self._sessions.get(account_id)
+            if session is None:
+                return
+            if session.controller.is_running or session.controller.has_thread:
+                # 尚未完全停止（线程还在退出收尾），等下次轮询再回收
+                return
+            del self._sessions[account_id]
+
     def running_miners(self) -> list:
         from overwatch_drops_miner.miner import BilibiliWatchTimeMiner
 

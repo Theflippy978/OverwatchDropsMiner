@@ -20,6 +20,9 @@ PollResult = Literal["no_thread", "running", "stopped"]
 
 class WorkerController:
     def __init__(self, *, auto_force_stop_after_seconds: float = 2.0) -> None:
+        # start 全程持锁（J-1）：虽然当前所有调用都来自 GUI 单线程事件循环，
+        # 锁可以让"检查-创建-启动"序列对未来的跨线程调用保持原子。
+        self._start_lock = threading.Lock()
         self.worker_thread: threading.Thread | None = None
         self.miner: BilibiliWatchTimeMiner | None = None
         self.stopping_in_progress = False
@@ -44,29 +47,31 @@ class WorkerController:
         account_id: str = "",
         watch_tracker: WatchTimeTracker | None = None,
     ) -> bool:
-        # A completed worker remains owned until the GUI poll finalizes it.
-        # Do not replace its miner reference in that small window.
-        if self.has_thread:
-            return False
+        with self._start_lock:
+            # A completed worker remains owned until the GUI poll finalizes it.
+            # Do not replace its miner reference in that small window.
+            if self.has_thread:
+                return False
 
-        self._reset_stop_state()
+            self._reset_stop_state()
 
-        self.miner = BilibiliWatchTimeMiner(
-            config, watch_tracker=watch_tracker, account_id=account_id
-        )
+            miner = BilibiliWatchTimeMiner(
+                config, watch_tracker=watch_tracker, account_id=account_id
+            )
+            self.miner = miner
 
-        def runner() -> None:
-            try:
-                if self.miner is not None:
-                    self.miner.run()
-            except Exception:
-                logger.exception("GUI worker crashed")
+            def runner() -> None:
+                try:
+                    miner.run()
+                except Exception:
+                    logger.exception("GUI worker crashed")
 
-        self.worker_thread = threading.Thread(
-            target=runner, name="gui-main-worker", daemon=True
-        )
-        self.worker_thread.start()
-        return True
+            thread = threading.Thread(
+                target=runner, name="gui-main-worker", daemon=True
+            )
+            self.worker_thread = thread
+            thread.start()
+            return True
 
     def request_stop(self, *, logger: logging.Logger) -> StopRequestResult:
         if not self.is_running:
@@ -79,7 +84,7 @@ class WorkerController:
             if self.miner is not None and not self.stop_force_sent:
                 self.stop_force_sent = True
                 self.miner.stop(force=True)
-                logger.warning("已发送强制停止请求")
+                logger.warning("停止较慢，已请求加速收尾（线程仍需协作式退出）")
                 return "force_requested"
             logger.info("正在停止，请稍候...")
             return "already_stopping"
@@ -114,7 +119,7 @@ class WorkerController:
                 self.stop_force_sent = True
                 self.miner.stop(force=True)
                 logger.warning(
-                    "停止超过 %.1f 秒，已切换为强制停止",
+                    "停止超过 %.1f 秒，已发送加速收尾请求（等待线程自行退出）",
                     self.auto_force_stop_after_seconds,
                 )
             if elapsed >= 5 and not self.stop_timeout_warned:

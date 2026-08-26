@@ -178,7 +178,28 @@ class BilibiliWatchTimeMiner:
         self._force_stop_requested = False
         self._login_invalidated.clear()
 
-        uid, uname = asyncio.run(self._probe_login())
+        # 启动探测带一次重试并对异常给出明确文案（D-12）：瞬时网络错误
+        # 不应被上层 catch-all 降格为 "worker crashed"，让用户无法区分
+        # 是网络抖动还是 Cookie 失效。
+        uid: int | None = None
+        uname = ""
+        probe_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                uid, uname = asyncio.run(self._probe_login())
+                probe_error = None
+                break
+            except Exception as exc:
+                probe_error = exc
+                LOGGER.warning(
+                    "启动登录检测失败（第 %s/2 次）：%s", attempt + 1, exc
+                )
+                if attempt == 0:
+                    time.sleep(1.0)
+        if probe_error is not None:
+            raise RuntimeError(
+                f"启动登录检测失败，请检查网络后重试：{probe_error}"
+            ) from probe_error
         self._uid = uid
         if uid is None:
             self._login_invalidated.set()
@@ -248,12 +269,22 @@ class BilibiliWatchTimeMiner:
         finally:
             self.stop(force=self._force_stop_requested)
             join_timeout = 1.2 if self._force_stop_requested else 3.0
+            # 收尾等待设总上限（J-5）：极端情况下个别连接线程 hang 死时，
+            # 无限等待会让 GUI 永远显示"运行中"；超时后放弃等待并明确告警，
+            # daemon 线程随进程退出（GUI 侧 poll 会把会话标记为 stopped）。
+            join_deadline = time.monotonic() + (
+                8.0 if self._force_stop_requested else 20.0
+            )
+            gave_up = False
             next_warning_at = time.monotonic() + join_timeout
             while True:
                 alive_threads = [
                     thread for thread in self._threads if thread.is_alive()
                 ]
                 if not alive_threads:
+                    break
+                if time.monotonic() >= join_deadline:
+                    gave_up = True
                     break
 
                 # Keep the miner's owner thread alive until every session has
@@ -272,6 +303,18 @@ class BilibiliWatchTimeMiner:
                             preview += f" ... 共 {len(alive_names)} 个"
                         LOGGER.warning("停止未完成，仍有线程未退出: %s", preview)
                     next_warning_at = time.monotonic() + join_timeout
+
+            if gave_up:
+                stuck_names = [
+                    thread.name for thread in self._threads if thread.is_alive()
+                ]
+                LOGGER.error(
+                    "等待 %s 秒后仍有 %s 个连接线程未退出，放弃等待并继续收尾，"
+                    "这些线程将在进程退出时结束: %s",
+                    8.0 if self._force_stop_requested else 20.0,
+                    len(stuck_names),
+                    ", ".join(stuck_names[:5]),
+                )
 
             LOGGER.info("所有连接已停止")
 
