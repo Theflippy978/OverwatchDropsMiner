@@ -31,6 +31,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Z-6：测试门禁——此前 23 个测试文件在 CI 中从未执行，
+  # 测试红着也照常出包；现在构建必须先过全部单测。
+  test:
+    name: Run tests (pytest, offscreen Qt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install system libraries for PySide6
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libglib2.0-0
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m pip install --disable-pip-version-check -r requirements-dev.txt
+
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest tests/ -q
+
   prepare:
     name: Prepare version
     runs-on: ubuntu-latest
@@ -42,11 +70,21 @@ jobs:
       - name: Determine build version
         id: version
         shell: bash
+        # workflow 输入经 env 间接引用（D-14），不再直接内插进 run 脚本；
+        # tag 额外做白名单校验，杜绝 shell 元数据注入 runner。
+        env:
+          RELEASE_INPUT: ${{ github.event.inputs.release }}
+          TAG_INPUT: ${{ github.event.inputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          release_type="${{ github.event.inputs.release }}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "$release_type" = "stable" ]; then
-            if [ -n "${{ github.event.inputs.tag }}" ]; then
-              version="${{ github.event.inputs.tag }}"
+          release_type="$RELEASE_INPUT"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$release_type" = "stable" ]; then
+            if [ -n "$TAG_INPUT" ]; then
+              if ! printf '%s' "$TAG_INPUT" | grep -Eq '^v?[0-9A-Za-z._-]+$'; then
+                echo "非法 tag：$TAG_INPUT" >&2
+                exit 1
+              fi
+              version="$TAG_INPUT"
             else
               version="v$(date +%Y%m%d.%H%M%S)"
             fi
@@ -67,7 +105,7 @@ jobs:
 
   build-windows:
     name: Windows GUI (PyInstaller onefile)
-    needs: prepare
+    needs: [prepare, test]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -93,7 +131,7 @@ jobs:
         with:
           path: |
             ~\AppData\Local\pyinstaller
-          key: ${{ runner.os }}-pyinstaller-${{ hashFiles('requirements.txt', 'build.py') }}
+          key: ${{ runner.os }}-pyinstaller-${{ hashFiles('requirements.txt', 'requirements-dev.txt', 'build.py') }}
           restore-keys: |
             ${{ runner.os }}-pyinstaller-
 

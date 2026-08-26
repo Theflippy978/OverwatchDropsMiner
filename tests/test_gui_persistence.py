@@ -123,3 +123,31 @@ class GuiPersistenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class NotifyUrlParsingRegressionTest(GuiPersistenceTests):
+    """T-3/H-1 回归：含 & 的通知 URL 不得被截断或做 task_ids= 提取。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+        configure_qt_app(cls.app)
+
+    def test_ampersand_urls_survive_config_build(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = self._state_for(temp_dir)
+            window = MinerGUI(gui_state=state)
+            try:
+                window.rooms_edit.setText("123")
+                window.notify_urls_edit.setText(
+                    "gotify://example.invalid/token?priority=8&nosound=true"
+                )
+                config = window._build_shared_config()
+                self.assertEqual(
+                    config.notify_urls,
+                    ["gotify://example.invalid/token?priority=8&nosound=true"],
+                )
+            finally:
+                window.close()
+

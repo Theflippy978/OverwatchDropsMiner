@@ -54,3 +54,29 @@ class SetupLoggingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class VerboseEffectiveLevelTest(unittest.TestCase):
+    """T-2 盲区：verbose 开关必须真正作用于包级 logger 有效级别。
+
+    历史缺陷：setLevel 打在 "overwatch_miner" 上（不存在于项目 logger
+    层次），「详细日志」勾选后 DEBUG 输出仍被过滤（Z-2）。
+    """
+
+    def test_verbose_true_enables_debug(self) -> None:
+        from overwatch_drops_miner.logging_utils import setup_logging
+
+        setup_logging(verbose=True, no_color=True)
+        package_logger = logging.getLogger("overwatch_drops_miner")
+        self.assertEqual(package_logger.level, logging.DEBUG)
+        self.assertTrue(package_logger.isEnabledFor(logging.DEBUG))
+
+    def test_verbose_false_filters_debug(self) -> None:
+        from overwatch_drops_miner.logging_utils import setup_logging
+
+        setup_logging(verbose=False, no_color=True)
+        package_logger = logging.getLogger("overwatch_drops_miner")
+        self.assertEqual(package_logger.level, logging.INFO)
+        self.assertFalse(package_logger.isEnabledFor(logging.DEBUG))
+

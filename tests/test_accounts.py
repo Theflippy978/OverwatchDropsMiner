@@ -119,3 +119,42 @@ class AccountStoreTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class ConcurrentSaveTest(unittest.TestCase):
+    """T-5/B-2 盲区：并发保存的数据完整性与临时文件清理。"""
+
+    def test_concurrent_saves_keep_store_consistent(self) -> None:
+        import threading
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "accounts.json"
+            store = AccountStore(path=path)
+            store.add("SESSDATA=s1", remark="a")
+
+            errors: list[Exception] = []
+
+            def worker(index: int) -> None:
+                try:
+                    for round_index in range(5):
+                        store.save()
+                        assert path.exists()
+                except Exception as exc:  # pragma: no cover
+                    errors.append(exc)
+
+            threads = [
+                threading.Thread(target=worker, args=(i,)) for i in range(4)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual(errors, [])
+            reloaded = AccountStore(path=path)
+            self.assertEqual(len(reloaded.list_accounts()), 1)
+            # 无 .tmp* 残留（唯一临时名 + replace 后应全部消失）
+            leftovers = list(Path(temp_dir).glob("accounts.json.tmp*"))
+            self.assertEqual(leftovers, [])
+
