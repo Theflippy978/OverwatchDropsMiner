@@ -14,6 +14,7 @@ from overwatch_drops_miner.client import (
     LiveTraceSession,
     TaskProgress,
 )
+from overwatch_drops_miner.client_parts.http import sanitize_exception_text
 from overwatch_drops_miner.config import MinerConfig
 from overwatch_drops_miner.notifier import MultiPlatformNotifier
 from overwatch_drops_miner.watch_time_tracker import WatchTimeTracker
@@ -163,6 +164,11 @@ class X25KnWorker:
                 else:
                     session = await self.client.live_trace_heartbeat(session)
                     wait_seconds = max(5, int(session.heartbeat_interval))
+                    if self.watch_tracker is not None:
+                        # resume 幂等：多房间共享同一 tracker 时，任一房间的
+                        # 一次失败会 pause 时钟，健康房间心跳成功即恢复，
+                        # 避免本地观看估算被无关房间长期冻结（Z-3）。
+                        self.watch_tracker.resume()
                     LOGGER.debug(
                         "%s x25Kn heartbeat success seq=%s ets=%s interval=%s",
                         self._ctx,
@@ -173,7 +179,8 @@ class X25KnWorker:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                detail = str(exc).strip() or repr(exc)
+                # httpx 异常消息携带完整 URL（含 csrf 等敏感参数），脱敏后入日志
+                detail = sanitize_exception_text(exc).strip() or repr(exc)
                 if self.watch_tracker is not None:
                     self.watch_tracker.pause()
                 self._log_warning(
@@ -215,6 +222,15 @@ class X25KnWorker:
                         key = task.task_id
                         current = (task.cur_value, task.limit_value, task.status)
                         previous = last_snapshot.get(key)
+                        # 周期任务（日/周）重置后 cur 归零、status 复位：
+                        # 检测「上一帧完成、当前未完成」的迁移并清出去重
+                        # 集合，让第二个周期完成时能再次推送通知（Z-4）。
+                        if (
+                            previous is not None
+                            and key in notified_completed_ids
+                            and task.is_completed is False
+                        ):
+                            notified_completed_ids.discard(key)
                         if previous != current:
                             self._log_info(
                                 "任务进度: %s %s/%s",

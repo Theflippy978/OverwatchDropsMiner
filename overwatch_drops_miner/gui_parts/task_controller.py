@@ -11,6 +11,7 @@ from overwatch_drops_miner.account_log_context import (
     set_current_account,
 )
 from overwatch_drops_miner.client import BilibiliClient
+from overwatch_drops_miner.client_parts.http import sanitize_exception_text
 from overwatch_drops_miner.gui_parts.task_presenter import (
     format_reward_claim_results,
     format_task_progress,
@@ -198,8 +199,9 @@ class TaskController:
                         )
                         self._auto_claim_pending_ids.update(auto_claim_task_ids)
             except Exception as exc:
-                logging.getLogger(__name__).warning("刷新任务失败: %s", exc)
-                result_text = f"刷新任务失败: {exc}"
+                detail = sanitize_exception_text(exc)
+                logging.getLogger(__name__).warning("刷新任务失败: %s", detail)
+                result_text = f"刷新任务失败: {detail}"
             finally:
                 rerun = False
                 with self._task_refresh_lock:
@@ -289,9 +291,10 @@ class TaskController:
                     if item.success and str(item.task_id).strip()
                 }
             except Exception as exc:
-                logging.getLogger(__name__).warning("领取奖励失败: %s", exc)
+                detail = sanitize_exception_text(exc)
+                logging.getLogger(__name__).warning("领取奖励失败: %s", detail)
                 prefix = "自动领取失败" if automatic else "领取奖励失败"
-                result_text = f"{prefix}: {exc}"
+                result_text = f"{prefix}: {detail}"
             finally:
                 with self._reward_claim_lock:
                     self._reward_claim_inflight = False
