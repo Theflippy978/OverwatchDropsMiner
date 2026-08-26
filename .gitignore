@@ -11,3 +11,7 @@ config.json
 AGENTS.md
 .DS_Store
 .pytest_cache/
+MEMORY.md
+docs/
+debug.log
+requirements-dev.txt

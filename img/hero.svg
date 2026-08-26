@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="400" viewBox="0 0 1200 400"
+     role="img" aria-labelledby="title desc">
+  <title id="title">守望先锋直播掉宝助手</title>
+  <desc id="desc">专为守望先锋直播掉宝设计的自动化挂机工具，支持多账号管理、扫码登录、自动领取奖励</desc>
+
+  <defs>
+    <linearGradient id="bg-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0a0a0a;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1a1a2e;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="accent-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#00a8ff;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#ff6b35;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <!-- 背景 -->
+  <rect width="1200" height="400" rx="12" fill="url(#bg-gradient)"/>
+  
+  <!-- 六边形网格背景 (守望先锋主题) -->
+  <pattern id="hexagons" width="60" height="52" patternUnits="userSpaceOnUse">
+    <path d="M30 0 L60 15 L60 37 L30 52 L0 37 L0 15 Z" fill="none" stroke="#ffffff" stroke-width="0.5" opacity="0.1"/>
+  </pattern>
+  <rect width="1200" height="400" fill="url(#hexagons)" opacity="0.3"/>
+
+  <!-- 左侧标题区域 -->
+  <g id="title-block" transform="translate(56 40)">
+    <!-- 项目分类 -->
+    <text x="0" y="0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="16" fill="#00a8ff" font-weight="600">AUTOMATION TOOL</text>
+    
+    <!-- 项目名称 -->
+    <text x="0" y="60" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="48" fill="#ffffff" font-weight="700">守望先锋直播掉宝助手</text>
+    
+    <!-- 描述 -->
+    <text x="0" y="100" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="20" fill="#aaaaaa">专为守望先锋直播掉宝设计的自动化挂机工具</text>
+    
+    <!-- 元数据标签 -->
+    <g transform="translate(0 140)">
+      <rect width="80" height="30" rx="15" fill="#00a8ff" opacity="0.2"/>
+      <text x="40" y="20" font-family="'SFMono-Regular', Menlo, monospace" font-size="14" fill="#00a8ff" text-anchor="middle">Python 3.10+</text>
+      
+      <g transform="translate(100 0)">
+        <rect width="90" height="30" rx="15" fill="#ff6b35" opacity="0.2"/>
+        <text x="45" y="20" font-family="'SFMono-Regular', Menlo, monospace" font-size="14" fill="#ff6b35" text-anchor="middle">PySide6</text>
+      </g>
+      
+      <g transform="translate(210 0)">
+        <rect width="80" height="30" rx="15" fill="#ffffff" opacity="0.2"/>
+        <text x="40" y="20" font-family="'SFMono-Regular', Menlo, monospace" font-size="14" fill="#ffffff" text-anchor="middle">Windows</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- 右侧终端证明区域 -->
+  <g id="terminal-proof" transform="translate(700 40)">
+    <!-- 终端窗口 -->
+    <rect x="0" y="0" width="440" height="320" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+    
+    <!-- 终端标题栏 -->
+    <rect x="0" y="0" width="440" height="32" rx="8" fill="#161b22"/>
+    <rect x="0" y="24" width="440" height="8" fill="#161b22"/>
+    
+    <!-- 窗口控制按钮 -->
+    <circle cx="20" cy="16" r="6" fill="#ff5f57"/>
+    <circle cx="40" cy="16" r="6" fill="#febc2e"/>
+    <circle cx="60" cy="16" r="6" fill="#28c840"/>
+    
+    <!-- 终端标题 -->
+    <text x="220" y="20" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#8b949e" text-anchor="middle">OverwatchDropsMiner </text>
+    
+    <!-- 终端内容 -->
+    <g transform="translate(20 50)">
+      <!-- 输出内容 -->
+      <text x="0" y="30" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#8b949e">[INFO] 初始化 ...</text>
+      <text x="0" y="50" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#8b949e">[INFO] 加载账号配置...</text>
+      <text x="0" y="70" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#3fb950">[SUCCESS] 找到 3 个账号</text>
+      
+      <!-- 账号状态 -->
+      <g transform="translate(0 100)">
+        <rect x="0" y="0" width="400" height="80" rx="4" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+        <text x="20" y="25" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#00a8ff">账号: OverwatchFan_001</text>
+        <text x="20" y="45" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#8b949e">状态: 监听中 | 掉宝: 已领取 12 个</text>
+        <text x="20" y="65" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#3fb950">进度: ████████████████ 100%</text>
+      </g>
+      
+      <!-- 更多账号 -->
+      <g transform="translate(0 200)">
+        <text x="0" y="0" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#8b949e">[INFO] 所有账号运行正常</text>
+        <text x="0" y="20" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#3fb950">[SUCCESS] 挂宝领取成功</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- 底部装饰线 -->
+  <rect x="56" y="360" width="1088" height="2" fill="url(#accent-gradient)" opacity="0.5"/>
+</svg>
