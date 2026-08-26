@@ -64,12 +64,12 @@
 
 ### 1. 下载发布版
 
-前往 [Releases](https://github.com/Theflippy/OverwatchDropsMiner/releases) 下载最新 OverwatchDropsMiner.exe（约 60 MB，免安装）。
+前往 [Releases](https://github.com/Theflippy978/OverwatchDropsMiner/releases) 下载最新 OverwatchDropsMiner.exe（约 60 MB，免安装）。
 
 ### 2. 从源码运行
 
 ```bash
-git clone https://github.com/Theflippy/OverwatchDropsMiner.git
+git clone https://github.com/Theflippy978/OverwatchDropsMiner.git
 cd OverwatchDropsMiner
 pip install -r requirements.txt
 python build.py
