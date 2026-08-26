@@ -22,15 +22,8 @@ def show_update_available_dialog(
     dialog.setWindowTitle("发现新版本")
     dialog.setModal(True)
     dialog.setMinimumWidth(430)
-    dialog.setStyleSheet(
-        "QDialog{background:#1f232b;color:#e6e7eb;}"
-        "QLabel{color:#e6e7eb;}"
-        "QPushButton{background:#2f343e;color:#e6e7eb;border:1px solid #3a3f4b;"
-        "border-radius:6px;padding:8px 18px;min-width:92px;}"
-        "QPushButton:hover{background:#3a4150;border-color:#4f8cff;}"
-        "QPushButton#primary{background:#4f8cff;color:#ffffff;border-color:#4f8cff;}"
-        "QPushButton#primary:hover{background:#3b73e6;}"
-    )
+    # 配色继承应用全局 QSS（ThemeManager 双主题），不再硬编码深色样式，
+    # 避免浅色主题下弹出突兀的深色块（修复 D-8）。
 
     layout = QVBoxLayout(dialog)
     layout.setContentsMargins(24, 22, 24, 20)
@@ -49,7 +42,6 @@ def show_update_available_dialog(
         "可前往发布页下载最新版本。"
     )
     body.setWordWrap(True)
-    body.setStyleSheet("color:#c9d1d9;line-height:1.45;")
     layout.addWidget(body)
 
     button_row = QHBoxLayout()

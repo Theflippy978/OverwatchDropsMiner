@@ -185,6 +185,15 @@ class BrowserActions:
         def on_error(title: str, message: str) -> None:
             self._post_ui_task(self._show_error, title, message)
 
+        # 并发守卫（Z-7）：嗅探会话进行中再次触发会叠加第二个 Selenium
+        # 浏览器并覆盖线程引用，使旧会话彻底失管；直接拒绝新请求。
+        existing = self._sniff_thread
+        if existing is not None and existing.is_alive():
+            on_error(
+                "自动获取进行中",
+                "已有一个浏览器自动获取任务在进行中，请先完成或关闭主窗口重试。",
+            )
+            return
         # 启动前重置取消信号，并保存线程引用以便 shutdown 时 join
         self._sniff_cancel.clear()
         self._sniff_thread = start_browser_sniff(

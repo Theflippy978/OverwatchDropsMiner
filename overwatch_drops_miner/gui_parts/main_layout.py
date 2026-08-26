@@ -100,6 +100,11 @@ def build_main_window_layout(
     header.addWidget(running_count_label)
     header.addStretch(1)
     theme_button = make_button("切换主题", "purple", callbacks.toggle_theme)
+    # J-8：说明系统主题跟随语义——手动选择会持续到系统深浅色再次变化
+    theme_button.setToolTip(
+        "在深色/浅色主题间切换。\n"
+        "注意：Windows 系统深浅色变化时会自动跟随并覆盖手动选择。"
+    )
     header.addWidget(theme_button)
     root_layout.addLayout(header)
 

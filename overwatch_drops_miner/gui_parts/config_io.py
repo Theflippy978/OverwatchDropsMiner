@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -65,7 +66,18 @@ def build_config_payload(
 
 
 def save_config_data(path: str | Path, data: dict[str, Any]) -> None:
-    Path(path).write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    """原子写入导出配置：临时文件 + os.replace（对齐 accounts 的落盘口径）。
+
+    直接整文件覆盖在写入中途崩溃/断电时会留下截断 JSON，且导出文件常是
+    用户手动保存的唯一副本（修复 D-9）。
+    """
+    target = Path(path)
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    tmp_path = target.with_name(target.name + f".tmp{os.getpid()}")
+    try:
+        tmp_path.write_text(payload, encoding="utf-8")
+        os.replace(tmp_path, target)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 

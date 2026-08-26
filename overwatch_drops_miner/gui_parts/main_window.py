@@ -49,9 +49,12 @@ from overwatch_drops_miner.gui_parts.update_checker import (
     should_check_update,
 )
 from overwatch_drops_miner.gui_parts.update_dialog import show_update_available_dialog
-from overwatch_drops_miner.logging_utils import setup_logging
+from overwatch_drops_miner.logging_utils import (
+    apply_verbose_runtime,
+    setup_logging,
+)
 from overwatch_drops_miner.miner_manager import AccountMinerManager
-from overwatch_drops_miner.utils import parse_room_ids, parse_task_ids
+from overwatch_drops_miner.utils import parse_room_ids, parse_task_ids, parse_url_list
 
 try:
     from overwatch_drops_miner._version import (
@@ -72,6 +75,9 @@ except Exception:
 LOGGER = logging.getLogger(__name__)
 
 LOG_BUFFER_SIZE = 5000
+
+# 日志视图哨兵：区分「尚未渲染过任何内容」与「当前渲染系统日志视图」。
+_LOG_VIEW_UNSET = object()
 
 # 退出保存的共享配置键（任务 ID 明确不保存）。
 KEY_ROOMS = "config/rooms_text"
@@ -139,7 +145,9 @@ class MinerGUI(QMainWindow):
         self._progress_values: dict[str, tuple[float, float]] = {}
         self._task_refresh_pending: set[str] = set()
         self._qr_login_dialog: QrLoginDialog | None = None
-        self._adding_accounts = 0
+        self._logging_ready = False
+        # 日志视图增量渲染状态：当前 log_text 内容对应的账号（None=仅系统日志）
+        self._log_view_account: str | None | object = _LOG_VIEW_UNSET
 
         self.ui_call.connect(self._on_ui_call, Qt.QueuedConnection)
 
@@ -215,6 +223,10 @@ class MinerGUI(QMainWindow):
         self.reconnect_edit = widgets.reconnect_edit
         self.task_interval_edit = widgets.task_interval_edit
         self.verbose_check = widgets.verbose_check
+        # 「详细日志」勾选即时生效：轻量切换级别与格式，不重建 handler（J-9）
+        self.verbose_check.toggled.connect(
+            lambda _: self._install_logging()
+        )
         self.disable_task_notify_check = widgets.disable_task_notify_check
         self.progress_bar = widgets.progress_bar
         self.watch_info_label = widgets.watch_info_label
@@ -268,12 +280,23 @@ class MinerGUI(QMainWindow):
     # ---------- logging / cross-thread ----------
 
     def _install_logging(self) -> None:
-        queue_handler = QueueLogHandler(self.log_queue)
-        setup_logging(
-            verbose=self.verbose_check.isChecked(),
-            no_color=True,
-            extra_handlers=[queue_handler],
-        )
+        """进程内只完整安装一次全局日志；之后仅同步 verbose 级别与格式。
+
+        setup_logging 会移除并 close 根 logger 全部 handler 再重建，运行中
+        账号的 worker 线程会遭遇零 handler 窗口、并对已 close 的 handler
+        并发 emit（D-10）。重复调用（每次启动账号、勾选详细日志）改走
+        apply_verbose_runtime 轻量路径，「详细日志」勾选即时生效（J-9）。
+        """
+        if not self._logging_ready:
+            queue_handler = QueueLogHandler(self.log_queue)
+            setup_logging(
+                verbose=self.verbose_check.isChecked(),
+                no_color=True,
+                extra_handlers=[queue_handler],
+            )
+            self._logging_ready = True
+            return
+        apply_verbose_runtime(verbose=self.verbose_check.isChecked())
 
     def _post_ui_task(self, callback, *args, **kwargs) -> None:
         """线程安全地派发到 GUI 线程执行。"""
@@ -292,22 +315,38 @@ class MinerGUI(QMainWindow):
     def _flush_log_queue(self) -> None:
         if not self._ui_alive:
             return
-        changed = False
+        pending_view: list[str] = []
         while True:
             try:
                 account_id, line = self.log_queue.get_nowait()
             except queue.Empty:
                 break
-            changed = True
             if account_id:
                 buffer = self._account_logs.setdefault(
                     account_id, deque(maxlen=LOG_BUFFER_SIZE)
                 )
                 buffer.append(line)
+                # 属于当前视图的新行走增量追加（D-11），避免每 120ms
+                # 全量 join 近万行文本导致高日志量下 UI 卡顿。
+                if (
+                    self._log_view_account is not _LOG_VIEW_UNSET
+                    and account_id == self._current_account_id
+                ):
+                    pending_view.append(line)
             else:
                 self._system_logs.append(line)
-        if changed:
+                if self._log_view_account is not _LOG_VIEW_UNSET:
+                    pending_view.append(line)
+        if self._log_view_account is _LOG_VIEW_UNSET:
+            # 首批日志：走一次全量渲染建立增量基准（内部记录视图归属）。
             self._refresh_log_text()
+        elif pending_view:
+            scroll_bar = self.log_text.verticalScrollBar()
+            was_at_bottom = scroll_bar.value() >= scroll_bar.maximum() - 30
+            for line in pending_view:
+                self.log_text.appendPlainText(line)
+            if was_at_bottom:
+                scroll_bar.setValue(scroll_bar.maximum())
 
         for account_id in list(self._task_refresh_pending):
             self._task_refresh_pending.discard(account_id)
@@ -368,7 +407,7 @@ class MinerGUI(QMainWindow):
             task_query_interval_seconds=int(
                 self.task_interval_edit.text().strip() or "30"
             ),
-            notify_urls=parse_task_ids(self.notify_urls_edit.text().strip()),
+            notify_urls=parse_url_list(self.notify_urls_edit.text().strip()),
             notify_on_task_complete=not self.disable_task_notify_check.isChecked(),
         )
 
@@ -418,7 +457,6 @@ class MinerGUI(QMainWindow):
         if not cookie:
             self._show_warning("添加账号", "Cookie 为空，无法添加账号。")
             return
-        self._adding_accounts += 1
 
         def _do() -> None:
             uid: int | None = None
@@ -448,7 +486,6 @@ class MinerGUI(QMainWindow):
     def _finish_add_account(
         self, cookie: str, uname: str, valid: bool, error: str
     ) -> None:
-        self._adding_accounts = max(0, self._adding_accounts - 1)
         if not valid:
             self._show_warning(
                 "添加账号失败",
@@ -617,6 +654,9 @@ class MinerGUI(QMainWindow):
     def _on_account_state_ui(self, account_id: str, running: bool) -> None:
         # 账号已被删除时丢弃迟到的状态回调，避免界面出现幽灵条目。
         if not self._account_exists(account_id):
+            # 迟到回调多因 worker 线程真正退出而触发：即便条目已删，
+            # 运行计数仍可能变化，需刷新一次避免「已运行账号数量」滞留旧值。
+            self._update_running_count()
             return
         self.account_panel.set_running(account_id, running)
         self._update_running_count()
@@ -637,6 +677,10 @@ class MinerGUI(QMainWindow):
             self.miner_manager.poll_shutdown(account_id, logger=LOGGER)
             for account_id in states
         ]
+        # 已删除账号的会话完全停止后回收其资源（J-6）
+        for account_id, result in zip(states, results):
+            if result == "stopped" and not self._account_exists(account_id):
+                self.miner_manager.discard_session(account_id)
         # 全部账号都已回收（no_thread）才停表；stopped 表示本轮刚完成一次
         # 清理，下一轮再确认；running 表示仍有活动线程。
         if not any(r in ("running", "stopped") for r in results):
@@ -707,6 +751,8 @@ class MinerGUI(QMainWindow):
         self.log_text.setPlainText("\n".join(lines))
         if was_at_bottom:
             scroll_bar.setValue(scroll_bar.maximum())
+        # 全量重建后，增量追加路径（_flush_log_queue）以此视图为基准。
+        self._log_view_account = account_id
 
     # ---------- task progress ----------
 
@@ -867,7 +913,7 @@ class MinerGUI(QMainWindow):
             interval_val = None
         notify_on_task_complete = not self.disable_task_notify_check.isChecked()
         new_task_ids = parse_task_ids(self.task_ids_edit.text().strip())
-        new_notify_urls = parse_task_ids(self.notify_urls_edit.text().strip())
+        new_notify_urls = parse_url_list(self.notify_urls_edit.text().strip())
 
         verbose = self.verbose_check.isChecked()
         for miner in miners:
@@ -945,10 +991,19 @@ class MinerGUI(QMainWindow):
             dialog.close()
             self._qr_login_dialog = None
         self._ui_alive = False
+        # 嗅探收尾链（server.shutdown + driver.quit + 临时目录清理）通常
+        # 超过 0.5s：预算给足并检查结果，超时则明确告警进程可能残留
+        # （修复 Z-7：此前返回值被忽略且预算不足，daemon 线程被硬杀）。
         try:
-            self.browser_actions.shutdown(timeout=0.5)
+            closed = self.browser_actions.shutdown(timeout=3.0)
         except Exception:
             LOGGER.exception("关闭浏览器嗅探失败")
+        else:
+            if not closed:
+                LOGGER.warning(
+                    "浏览器嗅探线程未在预算时间内退出，"
+                    "webdriver/浏览器进程可能残留，请手动检查任务管理器"
+                )
         event.accept()
 
     # ---------- config load/save ----------
