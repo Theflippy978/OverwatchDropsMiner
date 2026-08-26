@@ -32,10 +32,11 @@ class SymbolGeometryTest(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
         configure_qt_app(cls.app)
 
-    def test_center_is_exact_area_center(self) -> None:
-        # 覆盖奇偶宽高组合；期望值即 ((left+right)/2, (top+bottom)/2)。
+    def test_center_matches_drawing_semantics(self) -> None:
+        # 覆盖奇偶宽高组合；符号必须居中于 drawRoundedRect 所画的方块，
+        # 即绘制语义中心 (left+width/2, top+height/2)。
         cases = [
-            (106, 2, 16, 12),   # 离屏实测的默认按钮矩形（曾偏到 (113,7)）
+            (106, 2, 16, 12),   # 离屏实测的默认按钮条带
             (0, 0, 16, 16),
             (3, 5, 8, 9),
             (0, 0, 19, 17),
@@ -47,26 +48,32 @@ class SymbolGeometryTest(unittest.TestCase):
                 center = _symbol_center(rect)
                 self.assertEqual(
                     center.x(),
-                    (rect.left() + rect.right()) / 2.0,
+                    rect.left() + rect.width() / 2.0,
                 )
                 self.assertEqual(
                     center.y(),
-                    (rect.top() + rect.bottom()) / 2.0,
+                    rect.top() + rect.height() / 2.0,
                 )
 
-    def test_center_avoids_legacy_integer_truncation(self) -> None:
-        # 回归锚点：QRect(106,2,16,12) 的整数 center() 是 (113,7)，
-        # 偏离真实中心 (113.5, 7.5)；新实现必须给出精确值。
+    def test_center_matches_drawn_box_not_pixel_inclusive(self) -> None:
+        # 双重回归锚点：QRect(106,2,16,12)
+        # - 整数 QRect.center() 曾给出 (113,7)（第一次偏移的根因）
+        # - 像素包含式 ((left+right)/2,...) 给出 (113.5,7.5)，与
+        #   drawRoundedRect 方块中心 (114,8) 恒差半像素、方向左上
+        #   （第二次偏移的根因，自绘方块参照显形后暴露）
+        # 符号中心必须等于方块绘制中心 (114, 8)。
         rect = QRect(106, 2, 16, 12)
-        legacy = rect.center()
-        if (legacy.x(), legacy.y()) == (113.5, 7.5):
-            self.skipTest("当前 Qt 版本 center() 未截断，锚点不适用")
+        center = _symbol_center(rect)
+        self.assertEqual(center.x(), 114.0)
+        self.assertEqual(center.y(), 8.0)
         self.assertNotEqual(
-            (_symbol_center(rect).x(), _symbol_center(rect).y()),
-            (legacy.x(), legacy.y()),
+            (center.x(), center.y()), (rect.center().x(), rect.center().y())
         )
-        self.assertEqual(_symbol_center(rect).x(), 113.5)
-        self.assertEqual(_symbol_center(rect).y(), 7.5)
+        self.assertNotEqual(
+            (center.x(), center.y()),
+            ((rect.left() + rect.right()) / 2.0,
+             (rect.top() + rect.bottom()) / 2.0),
+        )
 
     def test_plus_lines_symmetric_around_center(self) -> None:
         rect = QRect(104, 0, 20, 16)

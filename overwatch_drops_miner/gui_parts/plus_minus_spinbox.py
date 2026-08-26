@@ -47,19 +47,22 @@ def _symbol_arm(rect: QRect) -> float:
 
 
 def _symbol_center(rect: QRect) -> QPointF:
-    """按钮矩形覆盖面积的精确几何中心（浮点，单位：逻辑像素）。
+    """按钮矩形的绘制语义中心（浮点，与 drawRoundedRect 对齐）。
 
-    QRect.center() 返回整数坐标：当矩形宽或高为偶数时真实中心落在
-    半像素位置，整数截断会让结果偏向左上（例如 QRect(106, 2, 16, 12)
-    的真实中心是 (113.5, 7.5)，而 center() 返回 (113, 7)）。该半像素
-    偏差在高 DPI（125%~200% 缩放）下被放大为肉眼可见的错位。
-    像素 i 的覆盖面积为 [i-0.5, i+0.5]，故面积中心为
-    ((left+right)/2, (top+bottom)/2)。注意不可用 QRectF(rect).center()
-    代替：QRect→QRectF 转换会把右/下边界外扩 1，同样产生偏差。
+    符号必须居中于 paintEvent 里 drawRoundedRect(inner) 画出的可视
+    方块。Qt 的绘制 API 按「连续区间」解释 QRect：方块覆盖
+    [left, left+width] × [top, top+height]，其中心是
+    (left + width/2, top + height/2)。
+
+    不能用另外两种算法：
+    - QRect.center()（整数）：偶数宽高时截断偏左上半像素；
+    - ((left+right)/2, (top+bottom)/2)：像素包含式语义，right/bottom
+      比绘制边界小 1，同样恒定偏左上半像素（175%~200% DPI 下放大
+      为可见错位，自绘方块参照显形后暴露）。
     """
     return QPointF(
-        (rect.left() + rect.right()) / 2.0,
-        (rect.top() + rect.bottom()) / 2.0,
+        rect.left() + rect.width() / 2.0,
+        rect.top() + rect.height() / 2.0,
     )
 
 
