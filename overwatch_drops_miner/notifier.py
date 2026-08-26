@@ -117,21 +117,36 @@ class _NativeNotifyTarget:
         agentid, secret = parts[0], parts[1]
         query = parse_qs(self.parsed.query)
         touser = query.get("to", query.get("touser", ["@all"]))[0]
+        content = self._format_content(title, body)
+        agent_id_value = int(agentid) if agentid.isdigit() else agentid
+
+        def send(token: str) -> httpx.Response:
+            return httpx.post(
+                "https://qyapi.weixin.qq.com/cgi-bin/message/send",
+                params={"access_token": token},
+                json={
+                    "touser": touser,
+                    "msgtype": "text",
+                    "agentid": agent_id_value,
+                    "text": {"content": content},
+                    "safe": 0,
+                },
+                timeout=10.0,
+            )
 
         access_token = self._get_wxwork_access_token(corpid, secret)
-
-        response = httpx.post(
-            "https://qyapi.weixin.qq.com/cgi-bin/message/send",
-            params={"access_token": access_token},
-            json={
-                "touser": touser,
-                "msgtype": "text",
-                "agentid": int(agentid) if agentid.isdigit() else agentid,
-                "text": {"content": self._format_content(title, body)},
-                "safe": 0,
-            },
-            timeout=10.0,
-        )
+        response = send(access_token)
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict) and str(payload.get("errcode")) == "40014":
+            # access_token 已失效（secret 更换/账号被踢等）：清缓存重取并
+            # 重试一次，避免在缓存到期前通知持续失败（修复 D-3）。
+            self._wxwork_access_token = None
+            self._wxwork_token_fetched_at = 0.0
+            access_token = self._get_wxwork_access_token(corpid, secret)
+            response = send(access_token)
         return self._is_success_response(response)
 
     def _get_wxwork_access_token(self, corpid: str, secret: str) -> str:
@@ -194,7 +209,8 @@ class _NativeNotifyTarget:
             return True
 
         try:
-            error_code = int(str(raw_code))
+            # float() 中转兼容字符串 "0"、浮点 0.0 等形式后再取整
+            error_code = int(float(raw_code))
         except (TypeError, ValueError):
             LOGGER.warning("通知发送失败，无法识别的状态码: %s", payload)
             return False
@@ -214,39 +230,54 @@ class MultiPlatformNotifier:
         self.update_urls(service_urls)
 
     def update_urls(self, service_urls: list[str] | None = None) -> None:
-        self.service_urls = [
-            url.strip() for url in (service_urls or []) if url.strip()
-        ]
-        self._native_targets = []
-        self._apprise = None
-        self._enabled = False
-        if not self.service_urls:
-            return
+        """重建通知目标列表。
 
-        apprise_urls = []
-        for url in self.service_urls:
+        线程安全约定（务必保持）：先在局部变量上完整构建新目标集，
+        最后一次性整体替换实例字段。notify() 可能在 daemon 线程并发执行，
+        整体换引用保证它读到的 _native_targets/_apprise/_enabled 永远
+        自洽；切勿改成原地 append/clear（会引入竞态，B-3）。
+        单条坏 URL 只跳过自身，不再连累其余通知目标（修复 D-4）。
+        """
+        cleaned = [url.strip() for url in (service_urls or []) if url.strip()]
+        native_targets: list[_NativeNotifyTarget] = []
+        apprise_urls: list[str] = []
+        for url in cleaned:
             target = _NativeNotifyTarget.from_url(url)
             if target:
-                self._native_targets.append(target)
+                native_targets.append(target)
             else:
                 apprise_urls.append(url)
 
-        if self._native_targets:
-            self._enabled = True
+        apprise_app = None
+        if apprise_urls:
+            try:
+                import apprise  # type: ignore
 
-        if not apprise_urls:
-            return
+                app = apprise.Apprise()
+                added_any = False
+                for index, url in enumerate(apprise_urls, start=1):
+                    try:
+                        if app.add(url):
+                            added_any = True
+                        else:
+                            # 不打印原始 URL：其中可能携带 token/key 等凭据
+                            LOGGER.warning(
+                                "第 %s 条通知地址无法解析，已跳过", index
+                            )
+                    except Exception:
+                        LOGGER.warning(
+                            "第 %s 条通知地址初始化失败，已跳过", index
+                        )
+                if added_any:
+                    apprise_app = app
+            except Exception as exc:
+                LOGGER.warning("apprise 通知组件初始化失败: %s", exc)
 
-        try:
-            import apprise  # type: ignore
-
-            app = apprise.Apprise()
-            for url in apprise_urls:
-                app.add(url)
-            self._apprise = app
-            self._enabled = True
-        except Exception as exc:
-            LOGGER.warning("通知推送初始化失败: %s", exc)
+        enabled = bool(native_targets) or apprise_app is not None
+        self.service_urls = cleaned
+        self._native_targets = native_targets
+        self._apprise = apprise_app
+        self._enabled = enabled
 
     @property
     def enabled(self) -> bool:

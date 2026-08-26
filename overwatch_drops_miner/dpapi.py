@@ -8,7 +8,11 @@ CRYPTPROTECT_UI_FORBIDDEN = 0x01
 
 LOGGER = logging.getLogger(__name__)
 
-_kernel32 = ctypes.windll.kernel32
+# use_last_error=True：调用前后由 ctypes 保存线程 last error，
+# 配合 ctypes.get_last_error() 取值，避免中间 Python 字节码改写错误码
+# 导致 DPAPI 失败诊断信息失真（修复 D-7）
+_crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 # 显式声明参数与返回类型，避免 64 位下指针被截断
 _kernel32.LocalFree.argtypes = [ctypes.c_void_p]
 _kernel32.LocalFree.restype = ctypes.c_void_p
@@ -46,7 +50,7 @@ def protect(plaintext: str) -> str:
     raw = plaintext.encode("utf-8")
     in_blob = _blob_from_bytes(raw)
     out_blob = DATA_BLOB()
-    ok = ctypes.windll.crypt32.CryptProtectData(
+    ok = _crypt32.CryptProtectData(
         ctypes.byref(in_blob),
         None,
         None,
@@ -57,7 +61,9 @@ def protect(plaintext: str) -> str:
     )
     if not ok:
         # 带上系统错误信息，便于定位失败原因
-        raise OSError(f"CryptProtectData 失败: {ctypes.WinError(ctypes.GetLastError())}")
+        raise OSError(
+            f"CryptProtectData 失败: {ctypes.WinError(ctypes.get_last_error())}"
+        )
     try:
         encrypted = _bytes_from_blob(out_blob)
     finally:
@@ -75,7 +81,7 @@ def unprotect(ciphertext: str) -> str:
         raise ValueError("无效的加密数据") from exc
     in_blob = _blob_from_bytes(raw)
     out_blob = DATA_BLOB()
-    ok = ctypes.windll.crypt32.CryptUnprotectData(
+    ok = _crypt32.CryptUnprotectData(
         ctypes.byref(in_blob),
         None,
         None,
@@ -86,7 +92,9 @@ def unprotect(ciphertext: str) -> str:
     )
     if not ok:
         # 带上系统错误信息，便于定位失败原因
-        raise OSError(f"CryptUnprotectData 失败: {ctypes.WinError(ctypes.GetLastError())}")
+        raise OSError(
+            f"CryptUnprotectData 失败: {ctypes.WinError(ctypes.get_last_error())}"
+        )
     try:
         return _bytes_from_blob(out_blob).decode("utf-8")
     finally:

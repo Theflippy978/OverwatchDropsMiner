@@ -29,5 +29,9 @@ class MinerConfig:
             raise ValueError("总连接数（房间数 × 线程数）不能超过 128")
         if self.reconnect_delay_seconds <= 0:
             raise ValueError("reconnect_delay_seconds 必须大于 0")
+        if self.reconnect_delay_seconds > 3600:
+            raise ValueError("reconnect_delay_seconds 不能超过 3600")
         if self.task_query_interval_seconds <= 0:
             raise ValueError("task_query_interval_seconds 必须大于 0")
+        if self.task_query_interval_seconds > 3600:
+            raise ValueError("task_query_interval_seconds 不能超过 3600")

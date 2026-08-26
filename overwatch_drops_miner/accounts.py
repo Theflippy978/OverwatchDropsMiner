@@ -89,16 +89,27 @@ class AccountStore:
             self._accounts = accounts
 
     def _save_locked(self) -> None:
-        """原子写入账号文件：先写同目录临时文件，成功后 os.replace 替换。"""
+        """原子写入账号文件：先写同目录临时文件，成功后 os.replace 替换。
+
+        - 临时名带 pid（B-2/Z-5）：避免双开实例写同一 .tmp 互相交错；
+        - flush+fsync（B-2）：确保 replace 前内容已落盘，掉电不残留半截文件。
+        """
         self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(
             [account.to_dict() for account in self._accounts],
             ensure_ascii=False,
             indent=2,
         )
-        tmp_path = self._path.with_name(f"{self._path.name}.tmp")
-        tmp_path.write_text(payload, encoding="utf-8")
-        os.replace(tmp_path, self._path)
+        tmp_path = self._path.with_name(f"{self._path.name}.tmp{os.getpid()}")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, self._path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
 
     def save(self) -> None:
         with self._lock:

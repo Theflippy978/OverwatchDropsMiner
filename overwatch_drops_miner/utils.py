@@ -138,7 +138,13 @@ def _partition_task_group_indexes(
 
     blocks: list[list[int]] = []
     for index in range(len(task_groups)):
-        prev_position = _task_group_position(position_boxes, index - 1)
+        # index=0 时取 max(index-1, 0)：负索引会静默读到末元素，
+        # 当前因 blocks 为空而短路无害，但属易碎写法（B-1）
+        prev_position = _task_group_position(
+            position_boxes, max(index - 1, 0) if index > 0 else 0
+        )
+        if index == 0:
+            prev_position = None
         cur_position = _task_group_position(position_boxes, index)
         if blocks and _is_same_panel_column(prev_position, cur_position):
             blocks[-1].append(index)
@@ -376,6 +382,17 @@ def _extract_task_groups_from_state(state: dict) -> list[dict[str, object]]:
 
 
 def extract_bili_live_task_groups(page_html: str) -> list[dict[str, object]]:
+    try:
+        return _extract_bili_live_task_groups_impl(page_html)
+    except RecursionError:
+        # 异常构造的超深嵌套活动页可能令递归解析触底（D-5）：
+        # 按"无法解析"处理返回空列表，避免异常传播打断调用线程。
+        return []
+
+
+def _extract_bili_live_task_groups_impl(
+    page_html: str,
+) -> list[dict[str, object]]:
     # 新版活动页把组件 props 服务端渲染在 layerTree 中，浏览器脚本随后才会
     # 按组件名合并到运行时 __initialState。这里直接完成同样的归组，以便纯
     # HTTP 获取到的静态 HTML 也能复用旧版任务分组、标签页和多列映射逻辑。
