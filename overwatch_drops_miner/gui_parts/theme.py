@@ -207,9 +207,11 @@ def build_stylesheet(t: ThemeTokens) -> str:
         QSpinBox:focus {{ border-color: {t.accent}; }}
         QSpinBox::up-button, QSpinBox::down-button {{
             background: {t.hover}; border: 1px solid {t.neutral_border_hover};
-            border-radius: 3px; width: 18px;
+            /* 高度显式压缩：未指定时 Qt 默认各占控件一半，上下按钮紧贴粘连，
+               视觉上加号按钮下半被减号按钮"覆盖"；13px 贴顶/贴底后中间自然留白 */
+            border-radius: 3px; width: 18px; height: 13px;
         }}
-        QSpinBox::up-button {{ subcontrol-origin: border; subcontrol-position: top right; border-bottom: 0; border-bottom-right-radius: 0; border-bottom-left-radius: 0; }}
+        QSpinBox::up-button {{ subcontrol-origin: border; subcontrol-position: top right; }}
         QSpinBox::down-button {{ subcontrol-origin: border; subcontrol-position: bottom right; }}
         QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
             background: {t.neutral_border_hover};

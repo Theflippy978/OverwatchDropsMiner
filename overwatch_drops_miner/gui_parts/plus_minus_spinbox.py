@@ -14,8 +14,18 @@ DEFAULT_SYMBOL_COLOR = "#94a3b8"
 HOVER_SYMBOL_COLOR_PROPERTY = "ow_spin_symbol_hover_color"
 DEFAULT_HOVER_COLOR = "#f8fafc"
 
-# 加减号四臂长度（逻辑像素），横竖对称。
+# 加减号四臂长度（逻辑像素），横竖对称；按钮过小时自动收缩防溢出。
 SYMBOL_ARM = 4.0
+
+
+def _symbol_arm(rect: QRect) -> float:
+    """按按钮矩形收缩臂长：线段含 2px 笔宽需完整落在按钮内。
+
+    adjusted 后矩形半边长 half = min(w, h) / 2，笔迹外缘为 arm + 1，
+    故 arm ≤ half - 1.5 时四周仍各留约 0.5px 余量。
+    """
+    half = min(rect.width(), rect.height()) / 2.0
+    return max(2.0, min(SYMBOL_ARM, half - 1.5))
 
 
 def _symbol_center(rect: QRect) -> QPointF:
@@ -38,14 +48,14 @@ def _symbol_center(rect: QRect) -> QPointF:
 def _minus_line(rect: QRect) -> QLineF:
     """减号水平线段：关于按钮面积中心左右对称。"""
     c = _symbol_center(rect)
-    arm = SYMBOL_ARM
+    arm = _symbol_arm(rect)
     return QLineF(c.x() - arm, c.y(), c.x() + arm, c.y())
 
 
 def _plus_lines(rect: QRect) -> tuple[QLineF, QLineF]:
     """加号横竖两条线段：交点即按钮面积中心。"""
     c = _symbol_center(rect)
-    arm = SYMBOL_ARM
+    arm = _symbol_arm(rect)
     horizontal = QLineF(c.x() - arm, c.y(), c.x() + arm, c.y())
     vertical = QLineF(c.x(), c.y() - arm, c.x(), c.y() + arm)
     return horizontal, vertical
