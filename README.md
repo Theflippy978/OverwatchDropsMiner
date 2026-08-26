@@ -1,7 +1,7 @@
 <p align="center">
   <img src="img\hero.svg" width="100%" alt="守望先锋直播掉宝助手 - 专为守望先锋直播掉宝设计的自动化挂机工具">
 </p>
-<div style="text-align: center; font-size: 40px;"><img src="img\app.png" style="zoom:4%;" /> 守望先锋直播挂宝助手</div>
+<div style="text-align: center; font-size: 40px;">守望先锋直播挂宝助手</div>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL%20v3-blue.svg" alt="License: GPL v3"></a>
@@ -64,12 +64,12 @@
 
 ### 1. 下载发布版
 
-前往 [Releases](https://github.com/Theflippy/OverwatchDropsMiner/releases) 下载最新 OverwatchDropsMiner.exe（约 60 MB，免安装）。
+前往 [Releases](https://github.com/Theflippy978/OverwatchDropsMiner/releases) 下载最新 OverwatchDropsMiner.exe（约 60 MB，免安装）。
 
 ### 2. 从源码运行
 
 ```bash
-git clone https://github.com/Theflippy/OverwatchDropsMiner.git
+git clone https://github.com/Theflippy978/OverwatchDropsMiner.git
 cd OverwatchDropsMiner
 pip install -r requirements.txt
 python build.py
