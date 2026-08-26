@@ -107,8 +107,10 @@ def build_login_cookie_string(
         for cookie in cookie_jar:
             if cookie.name not in LOGIN_COOKIE_NAMES or not cookie.value:
                 continue
-            # 仅取 B 站域的未过期 Cookie，避免同名异域/过期项污染登录态
-            if not (cookie.domain or "").endswith("bilibili.com"):
+            # 仅取 B 站主域的未过期 Cookie，避免同名异域/过期项污染登录态；
+            # 精确匹配主域或其子域，防止 xbilibili.com 类同形后缀域（J-3）
+            domain = (cookie.domain or "").lstrip(".")
+            if domain != "bilibili.com" and not domain.endswith(".bilibili.com"):
                 continue
             if cookie.is_expired():
                 continue
@@ -125,8 +127,11 @@ def build_login_cookie_string(
 class QrLoginApi:
     """One Bilibili QR login session backed by one HTTP client/cookie jar."""
 
+    # 与 client_parts/http.py 的 GET 瞬时异常口径一致（J-4）：扫码
+    # 「确认中」轮询遇读超时不应终止整轮登录。
     _TRANSIENT_ERRORS = (
         httpx.ConnectTimeout,
+        httpx.ReadTimeout,
         httpx.ConnectError,
         httpx.RemoteProtocolError,
     )

@@ -2,10 +2,45 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
+
+# URL 查询串中的会话敏感参数：出现在 httpx 异常消息里的完整 URL 必须
+# 打码后再进入日志/GUI（修复 Z-1 凭据泄漏面）。
+_SENSITIVE_PARAM_RE = re.compile(
+    r"(?i)([?&])(?:csrf|bili_jct|access_key|token|sessdata)=([^&\s'\"]+)"
+)
+
+
+def sanitize_url(url: str) -> str:
+    """打码 URL 查询串中的敏感参数值，其余部分保持原样。"""
+    return _SENSITIVE_PARAM_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}=***", url)
+
+
+def sanitize_exception_text(exc: BaseException) -> str:
+    """供所有 str(exc) 日志点复用的脱敏入口（httpx 异常常携带完整 URL）。"""
+    return sanitize_url(str(exc))
+
+
+def raise_for_status_sanitized(response: httpx.Response, *, method: str) -> None:
+    """raise_for_status 的脱敏包装。
+
+    httpx.HTTPStatusError 的消息固定携带完整 request.url（含 query），
+    而 csrf/bili_jct 等会话凭据正走在查询串里；捕获后以脱敏消息重抛，
+    并用 from None 切断异常链，避免原始消息经 traceback 再次外泄。
+    """
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        safe_url = sanitize_url(str(exc.request.url))
+        raise httpx.HTTPStatusError(
+            f"{method} {safe_url} 返回 HTTP {exc.response.status_code}",
+            request=exc.request,
+            response=exc.response,
+        ) from None
 
 
 def is_rate_limited_payload(payload: dict[str, Any]) -> bool:
@@ -37,17 +72,29 @@ async def request_with_transient_retry(
 ) -> httpx.Response:
     # 高并发时，x25Kn/live API 偶发 ConnectTimeout/ReadTimeout。
     # 对这类瞬时网络异常做短退避重试，避免单次抖动就打断会话。
+    #
+    # 非幂等 POST 的重试口径更紧（D-1）：ConnectTimeout/ConnectError
+    # 意味着连接未建立、请求必然未发出，可安全重试；而 ReadTimeout/
+    # RemoteProtocolError 表示请求可能已被服务端受理、仅响应丢失，
+    # 盲目重试会导致领奖/上报等重复提交——只记录不重试。
     delays = (0.35, 0.8)
     attempt_total = len(delays) + 1
-    for attempt in range(1, attempt_total + 1):
-        try:
-            return await request_coro()
-        except (
+    if method.upper() == "POST":
+        transient_errors: tuple[type[BaseException], ...] = (
+            httpx.ConnectTimeout,
+            httpx.ConnectError,
+        )
+    else:
+        transient_errors = (
             httpx.ConnectTimeout,
             httpx.ReadTimeout,
             httpx.ConnectError,
             httpx.RemoteProtocolError,
-        ) as exc:
+        )
+    for attempt in range(1, attempt_total + 1):
+        try:
+            return await request_coro()
+        except transient_errors as exc:
             if attempt >= attempt_total:
                 raise
             delay = delays[attempt - 1]
@@ -103,7 +150,7 @@ async def signed_get_json(
             url=url,
             logger=logger,
         )
-        response.raise_for_status()
+        raise_for_status_sanitized(response, method="GET")
         payload = parse_json_response(response, method="GET", url=url)
         if payload.get("code") == 0:
             return payload
@@ -145,7 +192,7 @@ async def signed_post_json(
             url=url,
             logger=logger,
         )
-        response.raise_for_status()
+        raise_for_status_sanitized(response, method="POST")
         payload = parse_json_response(response, method="POST", url=url)
         if payload.get("code") == 0:
             return payload
@@ -187,7 +234,7 @@ async def signed_post_query_json(
             url=url,
             logger=logger,
         )
-        response.raise_for_status()
+        raise_for_status_sanitized(response, method="POST")
         payload = parse_json_response(response, method="POST", url=url)
         if payload.get("code") == 0:
             return payload
@@ -229,7 +276,7 @@ async def signed_post_form_json(
             url=url,
             logger=logger,
         )
-        response.raise_for_status()
+        raise_for_status_sanitized(response, method="POST")
         payload = parse_json_response(response, method="POST", url=url)
         if payload.get("code") == 0:
             return payload

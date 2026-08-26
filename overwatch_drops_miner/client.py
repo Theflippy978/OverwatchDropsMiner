@@ -6,10 +6,8 @@ from overwatch_drops_miner.client_parts.core import (
     _extract_task_indicator_values,
 )
 from overwatch_drops_miner.client_parts.models import (
-    DanmuServerConf,
     LiveRoomInfo,
     LiveTraceSession,
-    LiveWatchTime,
     MissionRewardClaimResult,
     MissionRewardInfo,
     TaskCheckpointProgress,
@@ -18,10 +16,8 @@ from overwatch_drops_miner.client_parts.models import (
 
 __all__ = [
     "BilibiliClient",
-    "DanmuServerConf",
     "LiveRoomInfo",
     "LiveTraceSession",
-    "LiveWatchTime",
     "MissionRewardClaimResult",
     "MissionRewardInfo",
     "TaskCheckpointProgress",

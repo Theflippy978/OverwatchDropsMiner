@@ -17,7 +17,6 @@ from overwatch_drops_miner.client_parts.cookies import (
     build_live_headers,
     build_mission_headers,
 )
-from overwatch_drops_miner.client_parts.live import parse_danmu_server_conf
 from overwatch_drops_miner.client_parts.models import (
     MissionRewardInfo,
     TaskCheckpointProgress,
@@ -171,12 +170,6 @@ class ClientPartsTest(unittest.TestCase):
                 limit_value=60,
             ).is_completed
         )
-
-    def test_parse_danmu_server_conf_raises_when_token_missing(self) -> None:
-        # 风控软拒绝时 token 缺失应抛出明确 ValueError，而非裸 KeyError
-        payload = {"code": 0, "data": {"host_list": [{"host": "h", "wss_port": 443}]}}
-        with self.assertRaisesRegex(ValueError, "未返回 token"):
-            parse_danmu_server_conf(payload, room_id=123)
 
     def test_task_indicator_parsing_prefers_watch_indicator(self) -> None:
         self.assertEqual(coerce_task_number("12"), 12)
