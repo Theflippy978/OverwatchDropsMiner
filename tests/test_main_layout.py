@@ -55,8 +55,12 @@ class MainLayoutTest(unittest.TestCase):
             self.assertEqual(widgets.threads_spin.value(), 1)
             self.assertEqual(widgets.threads_spin.maximum(), MAX_THREAD_COUNT)
             self.assertEqual(widgets.threads_spin.toolTip(), THREADS_TOOLTIP)
-            self.assertEqual(widgets.reconnect_edit.text(), "8")
-            self.assertEqual(widgets.task_interval_edit.text(), "30")
+            self.assertEqual(widgets.reconnect_spin.value(), 8)
+            self.assertEqual(widgets.reconnect_spin.minimum(), 1)
+            self.assertEqual(widgets.reconnect_spin.maximum(), 3600)
+            self.assertEqual(widgets.task_interval_spin.value(), 30)
+            self.assertEqual(widgets.task_interval_spin.minimum(), 1)
+            self.assertEqual(widgets.task_interval_spin.maximum(), 3600)
             self.assertEqual(
                 widgets.account_status_label.text(), "未选择账号"
             )

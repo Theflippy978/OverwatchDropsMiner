@@ -55,8 +55,8 @@ class MainWindowWidgets:
     task_ids_edit: QLineEdit
     notify_urls_edit: QLineEdit
     threads_spin: PlusMinusSpinBox
-    reconnect_edit: QLineEdit
-    task_interval_edit: QLineEdit
+    reconnect_spin: PlusMinusSpinBox
+    task_interval_spin: PlusMinusSpinBox
     verbose_check: QCheckBox
     disable_task_notify_check: QCheckBox
     progress_bar: QProgressBar
@@ -153,8 +153,12 @@ def build_main_window_layout(
     threads_spin.setValue(1)
     threads_spin.setToolTip(THREADS_TOOLTIP)
     threads_spin.setAlignment(Qt.AlignLeft)
-    reconnect_edit = _make_small_edit("8")
-    task_interval_edit = _make_small_edit("30")
+    reconnect_spin = PlusMinusSpinBox()
+    reconnect_spin.setRange(1, 3600)   # 秒；上限与 config.validate 对齐（J-12）
+    reconnect_spin.setValue(8)
+    task_interval_spin = PlusMinusSpinBox()
+    task_interval_spin.setRange(1, 3600)
+    task_interval_spin.setValue(30)
     verbose_check = QCheckBox("详细日志")
     disable_task_notify_check = QCheckBox("禁用任务完成通知")
 
@@ -166,8 +170,8 @@ def build_main_window_layout(
     num_row.addWidget(threads_label)
     num_row.addWidget(threads_spin)
     for text, widget in (
-        ("重连延迟(s)", reconnect_edit),
-        ("任务查询间隔(s)", task_interval_edit),
+        ("重连延迟(s)", reconnect_spin),
+        ("任务查询间隔(s)", task_interval_spin),
     ):
         lbl = QLabel(text)
         lbl.setObjectName("dimLabel")
@@ -327,8 +331,8 @@ def build_main_window_layout(
         task_ids_edit=task_ids_edit,
         notify_urls_edit=notify_urls_edit,
         threads_spin=threads_spin,
-        reconnect_edit=reconnect_edit,
-        task_interval_edit=task_interval_edit,
+        reconnect_spin=reconnect_spin,
+        task_interval_spin=task_interval_spin,
         verbose_check=verbose_check,
         disable_task_notify_check=disable_task_notify_check,
         progress_bar=progress_bar,
@@ -373,15 +377,6 @@ def _make_card() -> QFrame:
 def _make_line_edit(placeholder: str) -> QLineEdit:
     widget = QLineEdit()
     widget.setPlaceholderText(placeholder)
-    return widget
-
-
-def _make_small_edit(default: str) -> QLineEdit:
-    widget = QLineEdit()
-    widget.setText(default)
-    widget.setMinimumWidth(70)
-    widget.setMaximumWidth(120)
-    widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
     return widget
 
 

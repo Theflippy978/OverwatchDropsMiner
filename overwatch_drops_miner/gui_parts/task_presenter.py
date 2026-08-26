@@ -17,27 +17,46 @@ def format_seconds_zh(total_seconds: int | float) -> str:
     return f"{seconds}秒"
 
 
-def format_watch_estimate(
-    elapsed_seconds: float,
-    cur_value: int | float,
-    limit_value: int | float,
+def format_watch_status_line(
+    *,
     running: bool,
+    bili_cur_minutes: float | None,
+    local_elapsed_seconds: float,
+    limit_value: float = 0.0,
 ) -> str:
-    """本地有效观看时长 + 预计剩余时间的粗略估算行（掉宝进度由进度条展示）。"""
-    elapsed_text = format_seconds_zh(elapsed_seconds)
+    """方案 B 四段状态行。
+
+    - 有效观看(B站)：任务进度里的当前认可分钟数（B 站权威数据，
+      随任务轮询更新）；无任务数据时显示 --
+    - 本地连接：本次启动以来连接健康的墙钟时长（纯参考计时）
+    - 预计剩余：基于 B 站进度差与本地健康时长的速率外推；
+      无任务数据时 --，达标时「已达标」
+    """
+    elapsed_text = format_seconds_zh(local_elapsed_seconds)
     state = "挂宝中" if running else "已暂停"
-    if float(limit_value) > 0 and float(cur_value) < float(limit_value):
+
+    has_bili_data = bili_cur_minutes is not None
+    if has_bili_data:
+        bili_seg = f"有效观看(B站): {_format_task_number(bili_cur_minutes)}分钟"
+    else:
+        bili_seg = "有效观看(B站): --"
+
+    cur = float(bili_cur_minutes or 0.0)
+    limit = float(limit_value)
+    if limit > 0 and cur < limit:
         remaining = estimate_remaining_seconds(
-            elapsed_seconds, cur_value, limit_value
+            local_elapsed_seconds, cur, limit
         )
         remaining_text = "--" if remaining is None else format_seconds_zh(remaining)
-        return (
-            f"状态: {state} | 本次有效观看: {elapsed_text} | "
-            f"预计剩余: {remaining_text}"
-        )
-    if float(limit_value) > 0:
-        return f"状态: {state} | 本次有效观看: {elapsed_text} | 预计剩余: 已达标"
-    return f"状态: {state} | 本次有效观看: {elapsed_text} | 预计剩余: --"
+    elif limit > 0:
+        remaining_text = "已达标"
+    else:
+        remaining_text = "--"
+
+    return (
+        f"状态: {state} | {bili_seg} | "
+        f"本地连接: {elapsed_text} | 预计剩余: {remaining_text}"
+    )
 
 
 BAR_WIDTH = 20

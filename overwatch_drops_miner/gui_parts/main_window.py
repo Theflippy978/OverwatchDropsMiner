@@ -220,8 +220,8 @@ class MinerGUI(QMainWindow):
         self.task_ids_edit = widgets.task_ids_edit
         self.notify_urls_edit = widgets.notify_urls_edit
         self.threads_spin = widgets.threads_spin
-        self.reconnect_edit = widgets.reconnect_edit
-        self.task_interval_edit = widgets.task_interval_edit
+        self.reconnect_spin = widgets.reconnect_spin
+        self.task_interval_spin = widgets.task_interval_spin
         self.verbose_check = widgets.verbose_check
         # 「详细日志」勾选即时生效：轻量切换级别与格式，不重建 handler（J-9）
         self.verbose_check.toggled.connect(
@@ -402,11 +402,9 @@ class MinerGUI(QMainWindow):
             cookie="",
             room_ids=parse_room_ids(self.rooms_edit.text().strip()),
             thread_count=int(self.threads_spin.value()),
-            reconnect_delay_seconds=int(self.reconnect_edit.text().strip() or "8"),
+            reconnect_delay_seconds=self.reconnect_spin.value(),
             task_ids=parse_task_ids(self.task_ids_edit.text().strip()),
-            task_query_interval_seconds=int(
-                self.task_interval_edit.text().strip() or "30"
-            ),
+            task_query_interval_seconds=self.task_interval_spin.value(),
             notify_urls=parse_url_list(self.notify_urls_edit.text().strip()),
             notify_on_task_complete=not self.disable_task_notify_check.isChecked(),
         )
@@ -567,7 +565,9 @@ class MinerGUI(QMainWindow):
         if self._current_account_id == account_id:
             self._current_account_id = None
             self.task_text.setPlainText("未选择账号")
-            self.watch_info_label.setText("状态: 待机 | 本次有效观看: -- | 预计剩余: --")
+            self.watch_info_label.setText(
+            "状态: 待机 | 有效观看(B站): -- | 本地连接: -- | 预计剩余: --"
+        )
             self.task_progress_bar.setValue(0)
             self.account_status_label.setText("未选择账号")
         self._refresh_account_list()
@@ -699,20 +699,29 @@ class MinerGUI(QMainWindow):
 
     def _update_watch_estimate(self) -> None:
         from overwatch_drops_miner.gui_parts.task_presenter import (
-            format_watch_estimate,
+            format_watch_status_line,
         )
 
         account_id = self._current_account_id
         if account_id is None:
-            self.watch_info_label.setText("状态: 待机 | 本次有效观看: -- | 预计剩余: --")
+            self.watch_info_label.setText(
+                "状态: 待机 | 有效观看(B站): -- | 本地连接: -- | 预计剩余: --"
+            )
             self.task_progress_bar.setValue(0)
             return
         tracker = self.miner_manager.tracker(account_id)
         elapsed = tracker.elapsed_seconds() if tracker is not None else 0.0
         cur_value, limit_value = self._progress_values.get(account_id, (0.0, 0.0))
+        # 任务未配置/尚未首次查询成功时无 B 站数据，显示 --（方案 B）
+        has_bili_data = bool(limit_value) or bool(cur_value)
         running = self.miner_manager.is_running(account_id)
         self.watch_info_label.setText(
-            format_watch_estimate(elapsed, cur_value, limit_value, running)
+            format_watch_status_line(
+                running=running,
+                bili_cur_minutes=cur_value if has_bili_data else None,
+                local_elapsed_seconds=elapsed,
+                limit_value=limit_value,
+            )
         )
         if limit_value > 0:
             percent = max(0, min(100, int(cur_value / limit_value * 100)))
@@ -853,7 +862,7 @@ class MinerGUI(QMainWindow):
             if state == "running":
                 self.refresh_account_tasks(account_id, manual=False)
         try:
-            interval = int(self.task_interval_edit.text().strip() or "30")
+            interval = self.task_interval_spin.value()
         except ValueError:
             interval = 30
         self._task_refresh_timer.start(max(10, interval) * 1000)
@@ -903,14 +912,8 @@ class MinerGUI(QMainWindow):
             self._config_sync_timer.stop()
             return
 
-        try:
-            reconnect_val = int(self.reconnect_edit.text().strip() or "8")
-        except ValueError:
-            reconnect_val = None
-        try:
-            interval_val = int(self.task_interval_edit.text().strip() or "30")
-        except ValueError:
-            interval_val = None
+        reconnect_val = self.reconnect_spin.value()
+        interval_val = self.task_interval_spin.value()
         notify_on_task_complete = not self.disable_task_notify_check.isChecked()
         new_task_ids = parse_task_ids(self.task_ids_edit.text().strip())
         new_notify_urls = parse_url_list(self.notify_urls_edit.text().strip())
@@ -933,8 +936,8 @@ class MinerGUI(QMainWindow):
         self._gui_state.setValue(KEY_ROOMS, self.rooms_edit.text().strip())
         self._gui_state.setValue(KEY_NOTIFY_URLS, self.notify_urls_edit.text().strip())
         self._gui_state.setValue(KEY_THREAD_COUNT, self.threads_spin.value())
-        self._gui_state.setValue(KEY_RECONNECT_DELAY, self.reconnect_edit.text().strip())
-        self._gui_state.setValue(KEY_TASK_INTERVAL, self.task_interval_edit.text().strip())
+        self._gui_state.setValue(KEY_RECONNECT_DELAY, str(self.reconnect_spin.value()))
+        self._gui_state.setValue(KEY_TASK_INTERVAL, str(self.task_interval_spin.value()))
         self._gui_state.setValue(KEY_VERBOSE, self.verbose_check.isChecked())
         self._gui_state.setValue(
             KEY_DISABLE_TASK_NOTIFY, self.disable_task_notify_check.isChecked()
@@ -956,10 +959,16 @@ class MinerGUI(QMainWindow):
         except (TypeError, ValueError):
             threads = 1
         self.threads_spin.setValue(max(1, min(128, threads)))
-        reconnect = str(self._gui_state.value(KEY_RECONNECT_DELAY, "8") or "8")
-        self.reconnect_edit.setText(reconnect)
-        interval = str(self._gui_state.value(KEY_TASK_INTERVAL, "30") or "30")
-        self.task_interval_edit.setText(interval)
+        try:
+            reconnect = int(str(self._gui_state.value(KEY_RECONNECT_DELAY, 8)))
+        except (TypeError, ValueError):
+            reconnect = 8
+        self.reconnect_spin.setValue(max(1, min(3600, reconnect)))
+        try:
+            interval = int(str(self._gui_state.value(KEY_TASK_INTERVAL, 30)))
+        except (TypeError, ValueError):
+            interval = 30
+        self.task_interval_spin.setValue(max(1, min(3600, interval)))
         self.verbose_check.setChecked(_to_bool(self._gui_state.value(KEY_VERBOSE, False)))
         self.disable_task_notify_check.setChecked(
             _to_bool(self._gui_state.value(KEY_DISABLE_TASK_NOTIFY, False))
@@ -1015,9 +1024,19 @@ class MinerGUI(QMainWindow):
             self.threads_spin.setValue(max(1, min(128, int(values.thread_count_text))))
         except ValueError:
             pass
-        self.reconnect_edit.setText(values.reconnect_delay_text)
+        try:
+            self.reconnect_spin.setValue(
+                max(1, min(3600, int(values.reconnect_delay_text)))
+            )
+        except ValueError:
+            pass
         self.task_ids_edit.setText(values.task_ids_text)
-        self.task_interval_edit.setText(values.task_query_interval_text)
+        try:
+            self.task_interval_spin.setValue(
+                max(1, min(3600, int(values.task_query_interval_text)))
+            )
+        except ValueError:
+            pass
         self.notify_urls_edit.setText(values.notify_urls_text)
         self.disable_task_notify_check.setChecked(not values.notify_on_task_complete)
         self.auto_claim_rewards_check.setChecked(values.auto_claim_rewards)

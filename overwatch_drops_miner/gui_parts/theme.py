@@ -206,16 +206,14 @@ def build_stylesheet(t: ThemeTokens) -> str:
         }}
         QSpinBox:focus {{ border-color: {t.accent}; }}
         QSpinBox::up-button, QSpinBox::down-button {{
-            background: {t.hover}; border: 1px solid {t.neutral_border_hover};
-            /* 高度显式压缩：未指定时 Qt 默认各占控件一半，上下按钮紧贴粘连，
-               视觉上加号按钮下半被减号按钮"覆盖"；13px 贴顶/贴底后中间自然留白 */
-            border-radius: 3px; width: 18px; height: 13px;
+            /* 按钮可视外观由 PlusMinusSpinBox.paintEvent 自绘（可在命中条带
+               内自由内缩，与输入框顶/底边及彼此之间保持留白）；此处仅保留
+               透明命中条带，宽度和上下两段划分仍由 Qt 布局提供 */
+            background: transparent; border: 0;
+            width: 20px;
         }}
         QSpinBox::up-button {{ subcontrol-origin: border; subcontrol-position: top right; }}
         QSpinBox::down-button {{ subcontrol-origin: border; subcontrol-position: bottom right; }}
-        QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
-            background: {t.neutral_border_hover};
-        }}
         QSpinBox::up-arrow {{ width: 0; height: 0; }}
         QSpinBox::down-arrow {{ width: 0; height: 0; }}
 
@@ -408,3 +406,7 @@ class ThemeManager(QObject):
         # PlusMinusSpinBox 从应用属性读取符号颜色，保证双主题下清晰可见。
         self._app.setProperty("ow_spin_symbol_color", tokens.text_dim)
         self._app.setProperty("ow_spin_symbol_hover_color", tokens.text)
+        # 自绘按钮方块的底色/边框色（hover 用高亮底）
+        self._app.setProperty("ow_spin_btn_bg", tokens.hover)
+        self._app.setProperty("ow_spin_btn_bg_hover", tokens.neutral_border_hover)
+        self._app.setProperty("ow_spin_btn_border", tokens.neutral_border_hover)
