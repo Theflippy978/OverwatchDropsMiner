@@ -247,8 +247,7 @@ def build_stylesheet(t: ThemeTokens) -> str:
             min-height: 6px; max-height: 6px;
         }}
         QProgressBar::chunk {{
-            background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                                        stop:0 {t.accent}, stop:1 {t.purple});
+            background: {t.accent};
             border-radius: 4px;
         }}
 
@@ -259,8 +258,7 @@ def build_stylesheet(t: ThemeTokens) -> str:
             padding: 0 10px;
         }}
         QProgressBar#taskProgress::chunk {{
-            background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                                        stop:0 {t.accent}, stop:1 {t.purple});
+            background: {t.accent};
             border-radius: 7px;
         }}
 
