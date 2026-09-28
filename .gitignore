@@ -24,3 +24,6 @@ src-tauri/target/
 # 不加入 git
 docs/
 plan.md
+
+# VS
+.vs/
