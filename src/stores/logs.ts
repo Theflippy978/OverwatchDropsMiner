@@ -19,3 +19,4 @@ export const useLogsStore = defineStore("logs", () => {
 
   return { logs, addLog, clear };
 });
+

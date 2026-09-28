@@ -70,9 +70,10 @@ pub struct SidecarManager {
 }
 
 impl SidecarManager {
-    pub fn new() -> Self {
+    pub fn new(app_handle: tauri::AppHandle) -> Self {
         SidecarManager {
             child: Arc::new(Mutex::new(None)),
+            app_handle,
         }
     }
     
@@ -249,3 +250,8 @@ pub async fn refresh_tasks(account_id: String, sidecar: tauri::State<'_, Sidecar
     sidecar.call("refresh_tasks", serde_json::json!({ "account_id": account_id }))?;
     Ok(())
 }
+
+
+
+
+

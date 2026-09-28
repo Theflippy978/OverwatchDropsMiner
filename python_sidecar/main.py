@@ -83,7 +83,7 @@ class PythonSidecar:
             "get_account_status": self._get_account_status,
             "save_config": self._save_config,
             "load_config": self._load_config,
-            "qr_login": self._qr_login,
+            "qr_login": self._qr_login,\n            "qr_poll": self._qr_poll,
             "browser_capture": self._browser_capture,
             "claim_rewards": self._claim_rewards,
             "refresh_tasks": self._refresh_tasks,
@@ -274,3 +274,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+
+

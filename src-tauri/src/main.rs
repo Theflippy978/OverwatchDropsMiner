@@ -8,7 +8,7 @@ use tauri::Manager;
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(commands::SidecarManager::new())
+        .manage(commands::SidecarManager::new(app.handle().clone()))
         .invoke_handler(tauri::generate_handler![
             commands::get_accounts,
             commands::add_account,
@@ -26,3 +26,5 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+
