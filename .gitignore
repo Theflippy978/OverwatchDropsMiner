@@ -1,17 +1,26 @@
+# Python
 __pycache__/
 *.pyc
 build/
 dist/
-*.spec
-.venv/
-.claude/
+*.spec.venv/
 *.har
 *.exe
 config.json
 AGENTS.md
 .DS_Store
 .pytest_cache/
-MEMORY.md
-docs/
 debug.log
 requirements-dev.txt
+
+# Node.js
+node_modules/
+dist/
+
+# Rust / Tauri
+target/
+src-tauri/target/
+
+# 不加入 git
+docs/
+plan.md
