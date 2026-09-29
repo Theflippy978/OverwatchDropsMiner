@@ -4,15 +4,49 @@ Python Sidecar - 作为 Tauri 2 的后端服务
 """
 import asyncio
 import json
+import logging
 import sys
 import os
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 # 添加项目根目录到 Python 路径
 project_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(project_root))
+
+
+class FrontendLogHandler(logging.Handler):
+    """把后端日志转发为 stdout 上的 log-entry 事件（前端 LogViewer 显示）"""
+
+    def __init__(self, sidecar: "PythonSidecar") -> None:
+        super().__init__()
+        self._sidecar = sidecar
+        self.setFormatter(logging.Formatter("%(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            from overwatch_drops_miner.account_log_context import get_current_account
+
+            level = record.levelno
+            if level >= logging.ERROR:
+                level_name = "error"
+            elif level >= logging.WARNING:
+                level_name = "warning"
+            elif level < logging.INFO:
+                level_name = "debug"
+            else:
+                level_name = "info"
+
+            self._sidecar._emit_event("log-entry", {
+                "timestamp": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+                "account_id": get_current_account(),
+                "level": level_name,
+                "message": self.format(record),
+            })
+        except Exception:
+            self.handleError(record)
 
 
 class PythonSidecar:
@@ -23,9 +57,14 @@ class PythonSidecar:
         self.miner_manager = None
         self._config_data = {}
         self._event_callbacks = []
+        # stdout 是 JSON 协议通道：日志线程与响应线程并发写入必须串行化
+        self._stdout_lock = threading.Lock()
         self._init_backend()
         self._browser_capture_result: dict | None = None
         self._browser_capture_event: threading.Event | None = None
+        # 扫码登录会话（跨命令保持一个 HTTP client）
+        self._qr_api: Any | None = None
+        self._qr_key = ""
     
     def _init_backend(self):
         """初始化现有后端模块"""
@@ -45,10 +84,13 @@ class PythonSidecar:
             self._setup_logging(False)
 
     def _setup_logging(self, verbose: bool) -> None:
-        """初始化/重建日志输出到 stderr"""
+        """初始化/重建日志输出到 stderr，并附带转发到前端的事件 handler"""
         try:
             from overwatch_drops_miner.logging_utils import setup_logging
             setup_logging(verbose=verbose, no_color=True)
+            root = logging.getLogger()
+            if not any(isinstance(h, FrontendLogHandler) for h in root.handlers):
+                root.addHandler(FrontendLogHandler(self))
         except Exception as e:
             print(f"[Sidecar] 初始化日志失败: {e}", file=sys.stderr)
 
@@ -86,12 +128,22 @@ class PythonSidecar:
         """添加事件回调"""
         self._event_callbacks.append(callback)
     
+    def _write_line(self, text: str) -> None:
+        """向 stdout 写入一行（线程安全，stdout 是 JSON 协议通道）"""
+        with self._stdout_lock:
+            sys.stdout.write(text + "\n")
+            sys.stdout.flush()
+
     def _emit_event(self, event_type: str, data: dict):
-        """发送事件到 Tauri"""
-        event = {"type": event_type, "data": data}
+        """发送事件到 Tauri：{"type": "event", "event": xxx, "data": {...}}"""
+        payload = {"type": "event", "event": event_type, "data": data}
+        try:
+            self._write_line(json.dumps(payload, ensure_ascii=False))
+        except Exception as e:
+            print(f"[Sidecar] 事件输出失败: {e}", file=sys.stderr)
         for callback in self._event_callbacks:
             try:
-                callback(event)
+                callback(payload)
             except Exception as e:
                 print(f"[Sidecar] 事件回调失败: {e}", file=sys.stderr)
     
@@ -109,6 +161,7 @@ class PythonSidecar:
             "load_config": self._load_config,
             "qr_login": self._qr_login,
             "qr_poll": self._qr_poll,
+            "qr_cancel": self._qr_cancel,
             "browser_capture": self._browser_capture,
             "claim_rewards": self._claim_rewards,
             "refresh_tasks": self._refresh_tasks,
@@ -286,13 +339,216 @@ class PythonSidecar:
         }
     
     async def _qr_login(self, params: dict) -> dict:
-        """扫码登录"""
-        return {"error": "扫码登录功能待实现"}
-    
+        """生成登录二维码（复用原后端 QrLoginApi）"""
+        try:
+            from overwatch_drops_miner.client_parts.qr_login import QrLoginApi
+
+            self._qr_close()
+            api = QrLoginApi()
+            try:
+                challenge = await asyncio.to_thread(api.generate)
+            except Exception:
+                api.close()
+                raise
+
+            self._qr_api = api
+            self._qr_key = challenge.key
+            return {
+                "qr_url": challenge.url,
+                "qr_key": challenge.key,
+                "qr_image": self._make_qr_data_url(challenge.url),
+            }
+        except Exception as e:
+            self._qr_close()
+            return {"error": f"生成二维码失败: {e}"}
+
     async def _qr_poll(self, params: dict) -> dict:
-        """轮询扫码状态"""
-        return {"error": "扫码轮询功能待实现"}
-    
+        """轮询扫码状态：unscanned / scanned / expired / success"""
+        from overwatch_drops_miner.client_parts.qr_login import QrLoginStatus
+
+        api = self._qr_api
+        key = str(params.get("qr_key", "") or self._qr_key)
+        if api is None or not key:
+            return {"error": "二维码会话不存在，请重新生成"}
+
+        try:
+            result = await asyncio.to_thread(api.poll, key)
+        except Exception as e:
+            return {"error": f"查询扫码状态失败: {e}"}
+
+        if result.status is QrLoginStatus.UNSCANNED:
+            return {"status": "unscanned"}
+        if result.status is QrLoginStatus.CONFIRMED_PENDING:
+            return {"status": "scanned"}
+        if result.status is QrLoginStatus.EXPIRED:
+            self._qr_close()
+            return {"status": "expired"}
+        # QrLoginStatus.SUCCESS：Cookie 已就绪，会话结束
+        cookie = result.cookie
+        self._qr_close()
+        return {"status": "success", "cookie": cookie}
+
+    async def _qr_cancel(self, params: dict) -> dict:
+        """关闭扫码登录会话（对话框取消/成功后释放连接）"""
+        self._qr_close()
+        return {}
+
+    def _qr_close(self) -> None:
+        api = self._qr_api
+        self._qr_api = None
+        self._qr_key = ""
+        if api is not None:
+            try:
+                api.close()
+            except Exception:
+                print("[Sidecar] 关闭扫码登录连接失败", file=sys.stderr)
+
+    @staticmethod
+    def _make_qr_data_url(url: str) -> str:
+        """本地生成二维码 PNG（不经过任何第三方服务）"""
+        import base64
+        import io
+
+        import qrcode
+        from qrcode.image.pil import PilImage
+
+        qr = qrcode.QRCode(
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=4,
+            border=2,
+        )
+        qr.add_data(url)
+        qr.make(fit=True)
+        image = qr.make_image(image_factory=PilImage, fill_color="black", back_color="white")
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/png;base64,{encoded}"
+
+    def _resolve_task_context(self, account_id: str) -> tuple[tuple[str, list[str]] | None, str | None]:
+        """取账号 Cookie 与任务 ID，返回 (context, error)"""
+        if not account_id:
+            return None, "账号 ID 不能为空"
+        if not self.account_store:
+            return None, "后端未初始化"
+        account = self.account_store.get(account_id)
+        if account is None:
+            return None, "账号不存在"
+
+        cookie = account.cookie().strip()
+        if not cookie:
+            return None, "该账号缺少 Cookie，请重新登录"
+
+        task_ids = [str(t).strip() for t in self._config_data.get("task_ids", []) if str(t).strip()]
+        if not task_ids:
+            return None, "未填写任务 ID，请先在配置中填写"
+        return (cookie, task_ids), None
+
+    async def _refresh_tasks(self, params: dict) -> dict:
+        """刷新任务进度（查询 B 站任务接口）"""
+        context, error = self._resolve_task_context(str(params.get("account_id", "")))
+        if error:
+            return {"error": error}
+        cookie, task_ids = context  # type: ignore[misc]
+
+        from overwatch_drops_miner.client import BilibiliClient
+        from overwatch_drops_miner.gui_parts.task_presenter import format_task_progress
+
+        client = BilibiliClient(cookie)
+        try:
+            progresses = await asyncio.wait_for(
+                client.get_task_progress(task_ids), timeout=60.0
+            )
+        finally:
+            try:
+                await client.close()
+            except Exception:
+                pass
+
+        return {
+            "tasks": [self._serialize_task(task) for task in progresses],
+            "text": format_task_progress(progresses),
+        }
+
+    async def _claim_rewards(self, params: dict) -> dict:
+        """领取奖励（可领取的全部任务奖励）"""
+        context, error = self._resolve_task_context(str(params.get("account_id", "")))
+        if error:
+            return {"error": error}
+        cookie, task_ids = context  # type: ignore[misc]
+
+        from overwatch_drops_miner.client import BilibiliClient
+        from overwatch_drops_miner.gui_parts.task_presenter import format_reward_claim_results
+
+        client = BilibiliClient(cookie)
+        try:
+            results = await asyncio.wait_for(
+                client.receive_all_mission_rewards(task_ids), timeout=180.0
+            )
+        finally:
+            try:
+                await client.close()
+            except Exception:
+                pass
+
+        items = [
+            {
+                "task_id": str(item.task_id),
+                "reward_name": str(item.reward_name or item.task_name or ""),
+                "success": bool(item.success),
+                "skipped": bool(item.skipped),
+                "message": str(item.message or ""),
+            }
+            for item in results
+        ]
+        return {
+            "success": bool(items) and all(i["success"] for i in items),
+            "results": items,
+            "text": format_reward_claim_results(results),
+        }
+
+    @staticmethod
+    def _serialize_task(task: Any) -> dict:
+        """TaskProgress 模型 → 前端结构"""
+        rewards = []
+        for point in list(getattr(task, "check_points", None) or []):
+            name = str(getattr(point, "award_name", "") or "").strip()
+            if not name:
+                continue
+            count_raw = getattr(point, "award_count", 1)
+            try:
+                count = int(float(count_raw))
+            except (TypeError, ValueError):
+                count = 1
+            rewards.append({"name": name, "icon": "", "count": max(count, 1)})
+
+        status_code = int(getattr(task, "status", 0) or 0)
+        completed = bool(getattr(task, "is_completed", False))
+        if status_code == 6:
+            status_text = "已领取"
+        elif completed:
+            status_text = "已完成"
+        else:
+            status_text = "进行中"
+
+        try:
+            progress = float(getattr(task, "cur_value", 0) or 0)
+        except (TypeError, ValueError):
+            progress = 0.0
+        try:
+            target = float(getattr(task, "limit_value", 0) or 0)
+        except (TypeError, ValueError):
+            target = 0.0
+
+        return {
+            "task_id": str(getattr(task, "task_id", "") or ""),
+            "title": str(getattr(task, "task_name", "") or "未知任务"),
+            "progress": progress,
+            "target": target,
+            "status": status_text,
+            "rewards": rewards,
+        }
+
     async def _browser_capture(self, params: dict) -> dict:
         """浏览器捕获 - 使用 Selenium + 扩展捕获 B 站 Cookie"""
         try:
@@ -375,40 +631,35 @@ class PythonSidecar:
             import traceback
             traceback.print_exc()
             return {"error": str(e)}
-    
-    async def _claim_rewards(self, params: dict) -> dict:
-        """领取奖励"""
-        return {"error": "领取奖励功能待实现"}
-    
-    async def _refresh_tasks(self, params: dict) -> dict:
-        """刷新任务"""
-        return {"error": "刷新任务功能待实现"}
 
 
 async def main():
     """Sidecar 主循环 - 通过 stdin/stdout 与 Tauri 通信"""
-    # 修复 stderr 中文乱码
+    # 修复 stderr/stdout 中文乱码（stdout 承载 JSON 协议，必须 UTF-8）
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8")
-    
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
     sidecar = PythonSidecar()
     print("[Sidecar] 启动成功，等待 Tauri 连接...", file=sys.stderr)
-    
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
-        
+
         try:
             request = json.loads(line)
             command = request.get("command")
             params = request.get("params", {})
             response = await sidecar.handle_command(command, params)
-            print(json.dumps(response), flush=True)
         except json.JSONDecodeError:
-            print(json.dumps({"error": "无效的 JSON"}), flush=True)
+            response = {"error": "无效的 JSON"}
         except Exception as e:
-            print(json.dumps({"error": str(e)}), flush=True)
+            response = {"error": str(e)}
+
+        sidecar._write_line(json.dumps(response, ensure_ascii=False))
 
 
 if __name__ == "__main__":

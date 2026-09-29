@@ -1,12 +1,15 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { Account, AccountStatus } from "@/lib/types";
 
 export const useAccountsStore = defineStore("accounts", () => {
   const accounts = ref<Account[]>([]);
   const loading = ref(false);
   const selectedAccountId = ref<string | null>(null);
+  let accountUnlisten: UnlistenFn | null = null;
+  let initialized = false;
 
   async function fetchAccounts() {
     loading.value = true;
@@ -55,6 +58,33 @@ export const useAccountsStore = defineStore("accounts", () => {
     return await invoke<string>("browser_capture");
   }
 
+  // 监听 sidecar 转发的账号状态事件（幂等）
+  async function initListeners() {
+    if (initialized) return;
+    initialized = true;
+    try {
+      accountUnlisten = await listen<{ account_id: string; running: boolean }>(
+        "account-state-changed",
+        (event) => {
+          const { account_id, running } = event.payload;
+          const account = accounts.value.find((a) => a.id === account_id);
+          if (account) account.running = running;
+        }
+      );
+    } catch (e) {
+      initialized = false;
+      console.error("注册账号状态监听失败:", e);
+    }
+  }
+
+  function dispose() {
+    if (accountUnlisten) {
+      accountUnlisten();
+      accountUnlisten = null;
+    }
+    initialized = false;
+  }
+
   return {
     accounts,
     loading,
@@ -67,5 +97,7 @@ export const useAccountsStore = defineStore("accounts", () => {
     stopMiner,
     getStatus,
     browserCapture,
+    initListeners,
+    dispose,
   };
 });

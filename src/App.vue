@@ -2,6 +2,7 @@
 import { ref, onMounted } from "vue";
 import { useAccountsStore } from "@/stores/accounts";
 import { useConfigStore } from "@/stores/config";
+import { useLogsStore } from "@/stores/logs";
 import AccountList from "@/components/AccountList.vue";
 import ConfigForm from "@/components/ConfigForm.vue";
 import LogViewer from "@/components/LogViewer.vue";
@@ -11,14 +12,15 @@ import QrLoginDialog from "@/components/QrLoginDialog.vue";
 
 const accountsStore = useAccountsStore();
 const configStore = useConfigStore();
+const logsStore = useLogsStore();
 
 const darkMode = ref(false);
 const selectedAccountId = ref<string | null>(null);
-const taskProgress = ref<any>(null);
-const watchTimeSeconds = ref(0);
 const showQrLogin = ref(false);
 
 onMounted(async () => {
+  await logsStore.initListeners();
+  await accountsStore.initListeners();
   await accountsStore.fetchAccounts();
   await configStore.load();
   
@@ -73,7 +75,7 @@ function selectAccount(accountId: string) {
       <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <!-- 账号列表 -->
         <div class="lg:col-span-1">
-          <AccountList @select="selectAccount" />
+          <AccountList @select="selectAccount" @qr-login="showQrLogin = true" />
         </div>
 
         <!-- 配置、任务进度和日志 -->
@@ -86,8 +88,6 @@ function selectAccount(accountId: string) {
             v-if="selectedAccountId"
             :account-id="selectedAccountId"
             :running="accountsStore.accounts.find((a) => a.id === selectedAccountId)?.running ?? false"
-            :watch-time-seconds="watchTimeSeconds"
-            :task-progress="taskProgress"
           />
 
           <!-- 日志查看器 -->

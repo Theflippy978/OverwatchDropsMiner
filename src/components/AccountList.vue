@@ -11,6 +11,7 @@ const accountsStore = useAccountsStore();
 
 const emit = defineEmits<{
   select: [accountId: string];
+  "qr-login": [];
 }>();
 
 const showAddDialog = ref(false);
@@ -93,6 +94,10 @@ async function handleStop(accountId: string) {
     <CardHeader class="pb-3">
       <div class="flex items-center justify-between">
         <CardTitle class="text-sm">账号列表</CardTitle>
+        <div class="flex items-center gap-2">
+          <Button size="sm" variant="outline" class="h-7 text-xs" @click="emit('qr-login')">
+            扫码登录
+          </Button>
         <Dialog v-model:open="showAddDialog">
           <DialogTrigger as-child>
             <Button size="sm" class="h-7 text-xs">
@@ -135,6 +140,7 @@ async function handleStop(accountId: string) {
             </div>
           </DialogContent>
         </Dialog>
+        </div>
 
         <Dialog v-model:open="showRenameDialog">
           <DialogContent class="sm:max-w-sm">

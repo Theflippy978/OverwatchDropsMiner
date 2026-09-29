@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::io::{BufRead, BufReader, Write};
 use std::sync::Mutex;
 use std::sync::Arc;
+use tauri::Emitter;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Account {
@@ -37,6 +38,41 @@ pub struct Reward {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct QrChallenge {
+    pub qr_url: String,
+    pub qr_key: String,
+    pub qr_image: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QrPollResult {
+    pub status: String,
+    pub cookie: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RefreshTasksResult {
+    pub tasks: Vec<TaskProgress>,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ClaimRewardItem {
+    pub task_id: String,
+    pub reward_name: String,
+    pub success: bool,
+    pub skipped: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ClaimRewardsResult {
+    pub success: bool,
+    pub results: Vec<ClaimRewardItem>,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MinerConfig {
     pub cookie: String,
     pub room_ids: Vec<i64>,
@@ -65,9 +101,17 @@ pub struct GuiConfigValues {
 }
 
 // Python sidecar 进程管理
-pub struct SidecarManager {
-    child: Arc<Mutex<Option<std::process::Child>>>,
+// stdin/reader 必须跨 call 复用：每次新建 BufReader 会把预读缓冲里的
+// 后续行（响应或事件）一并丢弃，导致命令响应错位。
+struct SidecarProcess {
     #[allow(dead_code)]
+    process: Child,
+    stdin: ChildStdin,
+    reader: BufReader<ChildStdout>,
+}
+
+pub struct SidecarManager {
+    child: Arc<Mutex<Option<SidecarProcess>>>,
     app_handle: tauri::AppHandle,
 }
 
@@ -94,7 +138,7 @@ impl SidecarManager {
         
         let python_exe = std::env::var("PYTHON_EXE").unwrap_or_else(|_| "python".to_string());
         
-        let process = Command::new(&python_exe)
+        let mut process = Command::new(&python_exe)
             .arg(sidecar_path.join("main.py"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -102,38 +146,68 @@ impl SidecarManager {
             .spawn()
             .map_err(|e| format!("启动 Python sidecar 失败: {}", e))?;
         
-        *child = Some(process);
+        let stdin = process.stdin.take().ok_or("无法获取 sidecar stdin")?;
+        let stdout = process.stdout.take().ok_or("无法获取 sidecar stdout")?;
+        
+        *child = Some(SidecarProcess {
+            process,
+            stdin,
+            reader: BufReader::new(stdout),
+        });
         Ok(())
     }
     
     pub fn call(&self, command: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
         self.start()?;
         
-        let mut child = self.child.lock().unwrap();
-        let process = child.as_mut().ok_or("Sidecar 未运行")?;
+        let mut guard = self.child.lock().unwrap();
+        let proc = guard.as_mut().ok_or("Sidecar 未运行")?;
         
         let request = serde_json::json!({
             "command": command,
             "params": params,
         });
         
-        let stdin = process.stdin.as_mut().ok_or("无法写入 sidecar")?;
-        writeln!(stdin, "{}", request.to_string())
+        writeln!(proc.stdin, "{}", request)
             .map_err(|e| format!("写入 sidecar 失败: {}", e))?;
         
-        let stdout = process.stdout.as_mut().ok_or("无法读取 sidecar")?;
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        reader.read_line(&mut line).map_err(|e| format!("读取 sidecar 失败: {}", e))?;
-        
-        let response: serde_json::Value = serde_json::from_str(&line)
-            .map_err(|e| format!("解析 sidecar 响应失败: {}", e))?;
-        
-        if let Some(error) = response.get("error") {
-            return Err(error.as_str().unwrap_or("未知错误").to_string());
+        // 循环读取：跳过事件行（转发到前端），只把真正的响应返回给命令调用方
+        loop {
+            let mut line = String::new();
+            let read = proc
+                .reader
+                .read_line(&mut line)
+                .map_err(|e| format!("读取 sidecar 失败: {}", e))?;
+            if read == 0 {
+                return Err("sidecar 进程已退出".to_string());
+            }
+            
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            
+            let value: serde_json::Value = serde_json::from_str(trimmed)
+                .map_err(|e| format!("解析 sidecar 响应失败: {}", e))?;
+            
+            if value.get("type").and_then(|v| v.as_str()) == Some("event") {
+                let event_name = value
+                    .get("event")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("sidecar-event");
+                let data = value.get("data").cloned().unwrap_or(serde_json::Value::Null);
+                if let Err(e) = self.app_handle.emit(event_name, &data) {
+                    eprintln!("转发 sidecar 事件失败: {}", e);
+                }
+                continue;
+            }
+            
+            if let Some(error) = value.get("error") {
+                return Err(error.as_str().unwrap_or("未知错误").to_string());
+            }
+            
+            return Ok(value);
         }
-        
-        Ok(response)
     }
 }
 
@@ -242,9 +316,35 @@ pub async fn load_config(sidecar: tauri::State<'_, SidecarManager>) -> Result<Gu
 }
 
 #[tauri::command]
-pub async fn qr_login(sidecar: tauri::State<'_, SidecarManager>) -> Result<String, String> {
+pub async fn qr_login(sidecar: tauri::State<'_, SidecarManager>) -> Result<QrChallenge, String> {
     let resp = sidecar.call("qr_login", serde_json::json!({}))?;
-    Ok(resp.get("qr_code").and_then(|v| v.as_str()).unwrap_or("").to_string())
+    serde_json::from_value(resp).map_err(|e| format!("解析二维码响应失败: {}", e))
+}
+
+#[tauri::command]
+pub async fn qr_poll(
+    qr_key: String,
+    sidecar: tauri::State<'_, SidecarManager>,
+) -> Result<QrPollResult, String> {
+    let resp = sidecar.call("qr_poll", serde_json::json!({ "qr_key": qr_key }))?;
+    Ok(QrPollResult {
+        status: resp
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unscanned")
+            .to_string(),
+        cookie: resp
+            .get("cookie")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn qr_cancel(sidecar: tauri::State<'_, SidecarManager>) -> Result<(), String> {
+    sidecar.call("qr_cancel", serde_json::json!({}))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -267,15 +367,52 @@ pub async fn send_notification(
 }
 
 #[tauri::command]
-pub async fn claim_rewards(account_id: String, sidecar: tauri::State<'_, SidecarManager>) -> Result<(), String> {
-    sidecar.call("claim_rewards", serde_json::json!({ "account_id": account_id }))?;
-    Ok(())
+pub async fn claim_rewards(
+    account_id: String,
+    sidecar: tauri::State<'_, SidecarManager>,
+) -> Result<ClaimRewardsResult, String> {
+    let resp = sidecar.call("claim_rewards", serde_json::json!({ "account_id": account_id }))?;
+    let results = resp
+        .get("results")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| format!("解析领取结果失败: {}", e))?
+        .unwrap_or_default();
+
+    Ok(ClaimRewardsResult {
+        success: resp.get("success").and_then(|v| v.as_bool()).unwrap_or(false),
+        results,
+        text: resp
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
 }
 
 #[tauri::command]
-pub async fn refresh_tasks(account_id: String, sidecar: tauri::State<'_, SidecarManager>) -> Result<(), String> {
-    sidecar.call("refresh_tasks", serde_json::json!({ "account_id": account_id }))?;
-    Ok(())
+pub async fn refresh_tasks(
+    account_id: String,
+    sidecar: tauri::State<'_, SidecarManager>,
+) -> Result<RefreshTasksResult, String> {
+    let resp = sidecar.call("refresh_tasks", serde_json::json!({ "account_id": account_id }))?;
+    let tasks = resp
+        .get("tasks")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| format!("解析任务进度失败: {}", e))?
+        .unwrap_or_default();
+
+    Ok(RefreshTasksResult {
+        tasks,
+        text: resp
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
 }
 
 

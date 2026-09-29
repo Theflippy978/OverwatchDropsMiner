@@ -24,6 +24,8 @@ fn main() {
             commands::save_config,
             commands::load_config,
             commands::qr_login,
+            commands::qr_poll,
+            commands::qr_cancel,
             commands::browser_capture,
             commands::send_notification,
             commands::claim_rewards,
