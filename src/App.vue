@@ -2,7 +2,6 @@
 import { ref, onMounted } from "vue";
 import { useAccountsStore } from "@/stores/accounts";
 import { useConfigStore } from "@/stores/config";
-import { useLogsStore } from "@/stores/logs";
 import AccountList from "@/components/AccountList.vue";
 import ConfigForm from "@/components/ConfigForm.vue";
 import LogViewer from "@/components/LogViewer.vue";
@@ -12,7 +11,6 @@ import QrLoginDialog from "@/components/QrLoginDialog.vue";
 
 const accountsStore = useAccountsStore();
 const configStore = useConfigStore();
-const logsStore = useLogsStore();
 
 const darkMode = ref(false);
 const selectedAccountId = ref<string | null>(null);
@@ -39,10 +37,6 @@ function updateTheme() {
 function toggleTheme() {
   darkMode.value = !darkMode.value;
   updateTheme();
-}
-
-function selectAccount(accountId: string) {
-  selectedAccountId.value = accountId;
 }
 
 function handleQrSuccess(cookie: string) {

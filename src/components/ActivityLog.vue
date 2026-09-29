@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { computed } from "vue";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
@@ -19,7 +18,7 @@ const levelColors = {
   warning: "secondary",
   error: "destructive",
   debug: "outline",
-};
+} as const;
 
 const levelLabels = {
   info: "信息",

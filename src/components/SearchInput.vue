@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { computed } from "vue";
 import { Input } from "@/components/ui/input";
 
 const props = defineProps<{
@@ -20,7 +20,6 @@ const currentValue = computed({
   },
 });
 
-const searchQuery = ref("");
 </script>
 
 <template>

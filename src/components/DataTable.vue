@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { computed } from "vue";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 const props = defineProps<{

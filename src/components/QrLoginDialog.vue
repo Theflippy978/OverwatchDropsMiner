@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from "vue";
-import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -62,10 +61,6 @@ function startCountdown() {
   }, 1000);
 }
 
-function handleSuccess() {
-  emit("success", "cookie_string");
-  emit("update:open", false);
-}
 </script>
 
 <template>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from "vue";
+import { ref, onMounted, watch, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +9,12 @@ import { Separator } from "@/components/ui/separator";
 const props = defineProps<{
   accountId: string;
   running: boolean;
+}>();
+
+const emit = defineEmits<{
+  start: [accountId: string];
+  stop: [accountId: string];
+  refresh: [accountId: string];
 }>();
 
 const watchTimeSeconds = ref(0);
@@ -54,8 +60,6 @@ const progressPercent = computed(() => {
   if (target <= 0) return 0;
   return Math.min(100, Math.round((progress / target) * 100));
 });
-
-import { computed } from "vue";
 </script>
 
 <template>
@@ -140,9 +144,3 @@ import { computed } from "vue";
     </CardContent>
   </Card>
 </template>
-
-<script lang="ts">
-export default {
-  emits: ["start", "stop", "refresh"],
-};
-</script>
