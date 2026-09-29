@@ -6,6 +6,7 @@ import asyncio
 import json
 import sys
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,8 @@ class PythonSidecar:
         self._config_data = {}
         self._event_callbacks = []
         self._init_backend()
+        self._browser_capture_result: dict | None = None
+        self._browser_capture_event: threading.Event | None = None
     
     def _init_backend(self):
         """初始化现有后端模块"""
@@ -88,6 +91,7 @@ class PythonSidecar:
             "browser_capture": self._browser_capture,
             "claim_rewards": self._claim_rewards,
             "refresh_tasks": self._refresh_tasks,
+            "send_notification": self._send_notification,
         }
         
         handler = handlers.get(command)
@@ -238,9 +242,92 @@ class PythonSidecar:
         """扫码登录"""
         return {"error": "扫码登录功能待实现"}
     
+    async def _qr_poll(self, params: dict) -> dict:
+        """轮询扫码状态"""
+        return {"error": "扫码轮询功能待实现"}
+    
     async def _browser_capture(self, params: dict) -> dict:
-        """浏览器捕获"""
-        return {"error": "浏览器捕获功能待实现"}
+        """浏览器捕获 - 使用 Selenium + 扩展捕获 B 站 Cookie"""
+        try:
+            from overwatch_drops_miner.gui_parts.browser_sniffer import start_browser_sniff
+            
+            self._browser_capture_result = None
+            self._browser_capture_event = threading.Event()
+            
+            def on_cookies(cookies: list[dict[str, Any]]) -> None:
+                """Cookie 捕获回调"""
+                # 构建 Cookie 字符串
+                cookie_parts = [f"{c['name']}={c['value']}" for c in cookies]
+                cookie_str = "; ".join(cookie_parts)
+                self._browser_capture_result = {"cookie": cookie_str}
+                if self._browser_capture_event:
+                    self._browser_capture_event.set()
+            
+            def on_error(err_type: str, err_msg: str) -> None:
+                """错误回调"""
+                self._browser_capture_result = {"error": f"{err_type}: {err_msg}"}
+                if self._browser_capture_event:
+                    self._browser_capture_event.set()
+            
+            # 在线程池中运行浏览器捕获（避免阻塞事件循环）
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: start_browser_sniff(
+                    url_keyword="bilibili.com",
+                    hint="正在打开浏览器捕获 B 站 Cookie...",
+                    start_url="https://www.bilibili.com/",
+                    on_cookies=on_cookies,
+                    on_error=on_error,
+                    browser_preference=None,
+                    finish_on_any=True,
+                )
+            )
+            
+            # 等待捕获完成或超时（120秒）
+            if self._browser_capture_event:
+                await asyncio.wait_for(
+                    asyncio.wrap_future(asyncio.to_thread(self._browser_capture_event.wait)),
+                    timeout=120.0
+                )
+            
+            if self._browser_capture_result:
+                return self._browser_capture_result
+            
+            return {"error": "浏览器捕获超时或被取消"}
+            
+        except ImportError as e:
+            return {"error": f"缺少依赖: {e}，请安装 selenium"}
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return {"error": str(e)}
+    
+    async def _send_notification(self, params: dict) -> dict:
+        """发送通知"""
+        try:
+            from overwatch_drops_miner.notifier import MultiPlatformNotifier
+            
+            title = params.get("title", "通知")
+            body = params.get("body", "")
+            notify_urls = params.get("notify_urls", self._config_data.get("notify_urls", []))
+            
+            if not notify_urls:
+                return {"error": "未配置通知 URL"}
+            
+            notifier = MultiPlatformNotifier(notify_urls)
+            if not notifier.enabled:
+                return {"error": "无可用的通知渠道"}
+            
+            success = notifier.notify(title, body)
+            return {"success": success}
+            
+        except ImportError as e:
+            return {"error": f"缺少依赖: {e}，请安装 httpx"}
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return {"error": str(e)}
     
     async def _claim_rewards(self, params: dict) -> dict:
         """领取奖励"""
@@ -253,6 +340,10 @@ class PythonSidecar:
 
 async def main():
     """Sidecar 主循环 - 通过 stdin/stdout 与 Tauri 通信"""
+    # 修复 stderr 中文乱码
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+    
     sidecar = PythonSidecar()
     print("[Sidecar] 启动成功，等待 Tauri 连接...", file=sys.stderr)
     

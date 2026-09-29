@@ -3,7 +3,7 @@ import { ref } from "vue";
 import { useAccountsStore } from "@/stores/accounts";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
@@ -16,6 +16,19 @@ const emit = defineEmits<{
 const showAddDialog = ref(false);
 const newCookie = ref("");
 const adding = ref(false);
+const capturing = ref(false);
+
+async function handleBrowserCapture() {
+  capturing.value = true;
+  try {
+    const cookie = await accountsStore.browserCapture();
+    if (cookie) newCookie.value = cookie;
+  } catch {
+    // 捕获失败时保持输入框原内容
+  } finally {
+    capturing.value = false;
+  }
+}
 
 async function handleAddAccount() {
   if (!newCookie.value.trim()) return;
@@ -66,6 +79,9 @@ async function handleStop(accountId: string) {
           <DialogContent class="sm:max-w-md">
             <DialogHeader>
               <DialogTitle>添加账号</DialogTitle>
+              <DialogDescription>
+                粘贴 B 站 Cookie 以添加新账号
+              </DialogDescription>
             </DialogHeader>
             <div class="space-y-4 py-4">
               <div class="space-y-2">
@@ -75,6 +91,15 @@ async function handleStop(accountId: string) {
                   placeholder="粘贴 B 站 Cookie..."
                   class="font-mono text-xs"
                 />
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  class="mt-2 h-7 w-full text-xs"
+                  :disabled="capturing"
+                  @click="handleBrowserCapture"
+                >
+                  {{ capturing ? "捕获中，请在浏览器完成登录..." : "从浏览器捕获" }}
+                </Button>
               </div>
               <div class="flex justify-end gap-2">
                 <Button variant="outline" size="sm" @click="showAddDialog = false">

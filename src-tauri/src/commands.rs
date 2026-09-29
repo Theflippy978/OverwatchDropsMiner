@@ -67,6 +67,7 @@ pub struct GuiConfigValues {
 // Python sidecar 进程管理
 pub struct SidecarManager {
     child: Arc<Mutex<Option<std::process::Child>>>,
+    #[allow(dead_code)]
     app_handle: tauri::AppHandle,
 }
 
@@ -232,6 +233,19 @@ pub async fn qr_login(sidecar: tauri::State<'_, SidecarManager>) -> Result<Strin
 pub async fn browser_capture(sidecar: tauri::State<'_, SidecarManager>) -> Result<String, String> {
     let resp = sidecar.call("browser_capture", serde_json::json!({}))?;
     Ok(resp.get("cookie").and_then(|v| v.as_str()).unwrap_or("").to_string())
+}
+
+#[tauri::command]
+pub async fn send_notification(
+    title: String,
+    body: String,
+    sidecar: tauri::State<'_, SidecarManager>
+) -> Result<bool, String> {
+    let resp = sidecar.call("send_notification", serde_json::json!({
+        "title": title,
+        "body": body,
+    }))?;
+    Ok(resp.get("success").and_then(|v| v.as_bool()).unwrap_or(false))
 }
 
 #[tauri::command]

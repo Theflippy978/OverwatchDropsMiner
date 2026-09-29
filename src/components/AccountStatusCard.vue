@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch, computed } from "vue";
+import { ref, onMounted, onUnmounted, watch, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -34,11 +34,17 @@ async function fetchStatus() {
   }
 }
 
+const intervalRef = ref<number | null>(null);
+
 onMounted(() => {
   fetchStatus();
   // 每 5 秒刷新一次状态
   const interval = setInterval(fetchStatus, 5000);
-  return () => clearInterval(interval);
+  intervalRef.value = interval;
+});
+
+onUnmounted(() => {
+  if (intervalRef.value) clearInterval(intervalRef.value);
 });
 
 watch(() => props.running, (newVal) => {

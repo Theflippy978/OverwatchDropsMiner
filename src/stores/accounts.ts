@@ -44,6 +44,10 @@ export const useAccountsStore = defineStore("accounts", () => {
     return await invoke<AccountStatus>("get_account_status", { accountId });
   }
 
+  async function browserCapture(): Promise<string> {
+    return await invoke<string>("browser_capture");
+  }
+
   return {
     accounts,
     loading,
@@ -54,5 +58,6 @@ export const useAccountsStore = defineStore("accounts", () => {
     startMiner,
     stopMiner,
     getStatus,
+    browserCapture,
   };
 });

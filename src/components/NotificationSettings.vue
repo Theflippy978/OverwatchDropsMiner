@@ -13,6 +13,8 @@ const notifyOnTaskComplete = ref(true);
 const autoClaimRewards = ref(false);
 const verbose = ref(false);
 const loading = ref(false);
+const testing = ref(false);
+const testResult = ref("");
 
 onMounted(async () => {
   loading.value = true;
@@ -48,6 +50,22 @@ async function handleSave() {
     loading.value = false;
   }
 }
+
+async function handleTest() {
+  testing.value = true;
+  testResult.value = "";
+  try {
+    const ok = await invoke<boolean>("send_notification", {
+      title: "Overwatch Drops Miner",
+      body: "这是一条测试通知，收到即表示配置成功",
+    });
+    testResult.value = ok ? "已发送" : "发送失败，请检查通知 URL";
+  } catch (e) {
+    testResult.value = `发送失败: ${e}`;
+  } finally {
+    testing.value = false;
+  }
+}
 </script>
 
 <template>
@@ -74,6 +92,12 @@ async function handleSave() {
           <p class="text-xs text-muted-foreground">
             支持 Gotify、企业微信、Server酱 等通知渠道，多个用逗号分隔
           </p>
+          <div class="flex items-center gap-2">
+            <Button size="sm" variant="secondary" class="h-7 text-xs" :disabled="testing" @click="handleTest">
+              {{ testing ? "发送中..." : "测试通知" }}
+            </Button>
+            <span v-if="testResult" class="text-xs text-muted-foreground">{{ testResult }}</span>
+          </div>
         </div>
 
         <Separator />
