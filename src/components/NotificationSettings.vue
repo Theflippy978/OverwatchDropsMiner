@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { useConfigStore } from "@/stores/config";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -8,10 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 
-const notifyUrls = ref("");
-const notifyOnTaskComplete = ref(true);
-const autoClaimRewards = ref(false);
-const verbose = ref(false);
+const configStore = useConfigStore();
 const loading = ref(false);
 const testing = ref(false);
 const testResult = ref("");
@@ -19,33 +17,18 @@ const testResult = ref("");
 onMounted(async () => {
   loading.value = true;
   try {
-    const config = await invoke<any>("load_config");
-    notifyUrls.value = config.notify_urls_text || "";
-    notifyOnTaskComplete.value = config.notify_on_task_complete ?? true;
-    autoClaimRewards.value = config.auto_claim_rewards ?? false;
-    verbose.value = config.verbose ?? false;
+    await configStore.ensureLoaded();
   } finally {
     loading.value = false;
   }
 });
 
+// 统一走 configStore.save()：原实现自构造 config 会用空值覆盖
+// 房间号/线程数等配置（与 ConfigForm 数据源分裂）
 async function handleSave() {
   loading.value = true;
   try {
-    await invoke("save_config", {
-      config: {
-        cookie: "",
-        rooms_text: "",
-        thread_count_text: "60",
-        reconnect_delay_text: "8",
-        task_ids_text: "",
-        task_query_interval_text: "30",
-        notify_urls_text: notifyUrls.value,
-        notify_on_task_complete: notifyOnTaskComplete.value,
-        verbose: verbose.value,
-        auto_claim_rewards: autoClaimRewards.value,
-      },
-    });
+    await configStore.save();
   } finally {
     loading.value = false;
   }
@@ -85,7 +68,7 @@ async function handleTest() {
           <Label for="notifyUrls" class="text-xs">通知 Webhook URL</Label>
           <Input
             id="notifyUrls"
-            v-model="notifyUrls"
+            v-model="configStore.config.notify_urls_text"
             placeholder="Gotify / 企业微信 / Server酱"
             class="h-8 text-xs"
           />
@@ -109,7 +92,7 @@ async function handleTest() {
               <Label class="text-xs">任务完成通知</Label>
               <p class="text-xs text-muted-foreground">任务完成时发送通知</p>
             </div>
-            <Switch v-model:checked="notifyOnTaskComplete" />
+            <Switch v-model:checked="configStore.config.notify_on_task_complete" />
           </div>
 
           <div class="flex items-center justify-between">
@@ -117,7 +100,7 @@ async function handleTest() {
               <Label class="text-xs">自动领取奖励</Label>
               <p class="text-xs text-muted-foreground">任务完成后自动领取奖励</p>
             </div>
-            <Switch v-model:checked="autoClaimRewards" />
+            <Switch v-model:checked="configStore.config.auto_claim_rewards" />
           </div>
 
           <div class="flex items-center justify-between">
@@ -125,7 +108,7 @@ async function handleTest() {
               <Label class="text-xs">详细日志</Label>
               <p class="text-xs text-muted-foreground">输出更详细的运行日志</p>
             </div>
-            <Switch v-model:checked="verbose" />
+            <Switch v-model:checked="configStore.config.verbose" />
           </div>
         </div>
       </div>

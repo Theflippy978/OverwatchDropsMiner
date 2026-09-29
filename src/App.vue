@@ -27,7 +27,7 @@ onMounted(async () => {
   await logsStore.initListeners();
   await accountsStore.initListeners();
   await accountsStore.fetchAccounts();
-  await configStore.load();
+  await configStore.ensureLoaded();
   
   darkMode.value = window.matchMedia("(prefers-color-scheme: dark)").matches;
   updateTheme();

@@ -18,19 +18,26 @@ export const useConfigStore = defineStore("config", () => {
   });
 
   const loading = ref(false);
+  let loaded = false;
 
   async function load() {
     loading.value = true;
     try {
       config.value = await invoke<GuiConfigValues>("load_config");
+      loaded = true;
     } finally {
       loading.value = false;
     }
+  }
+
+  // 幂等加载：多个组件 onMounted 竞争时只发一次 load_config
+  async function ensureLoaded() {
+    if (!loaded) await load();
   }
 
   async function save() {
     await invoke("save_config", { config: config.value });
   }
 
-  return { config, loading, load, save };
+  return { config, loading, load, ensureLoaded, save };
 });

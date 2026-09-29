@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
+import { useConfigStore } from "@/stores/config";
 
 interface Reward {
   name: string;
@@ -50,6 +51,11 @@ const refreshing = ref(false);
 const claiming = ref(false);
 const actionError = ref("");
 
+const configStore = useConfigStore();
+// 已自动领取过的任务 ID（对齐原 _auto_claim_handled_ids：防领取后状态
+// 未及时刷新造成的重复触发；成功/已领取的记录，失败的下次重试）
+const autoClaimHandled = new Set<string>();
+
 let statusTimer: number | null = null;
 let autoRefreshTimer: number | null = null;
 
@@ -85,6 +91,7 @@ async function handleRefresh() {
     });
     tasks.value = result.tasks;
     statusText.value = result.text;
+    maybeAutoClaim();
   } catch (e) {
     actionError.value = `刷新任务失败: ${e}`;
   } finally {
@@ -92,7 +99,20 @@ async function handleRefresh() {
   }
 }
 
-async function handleClaim() {
+// 对齐原 task_controller.refresh 的自动领取触发：开关开启时，
+// 刷新后存在"已完成且未处理"的任务即自动领取
+function maybeAutoClaim() {
+  if (!configStore.config.auto_claim_rewards) return;
+  if (claiming.value) return;
+  const pendingClaim = tasks.value.some(
+    (t) => t.status === "已完成" && !autoClaimHandled.has(t.task_id.trim())
+  );
+  if (!pendingClaim) return;
+  statusText.value = "检测到任务完成，正在自动领取奖励...";
+  void handleClaim(true);
+}
+
+async function handleClaim(automatic = false) {
   if (claiming.value) return;
   claiming.value = true;
   actionError.value = "";
@@ -100,12 +120,18 @@ async function handleClaim() {
     const result = await invoke<ClaimRewardsResult>("claim_rewards", {
       accountId: props.accountId,
     });
-    statusText.value = result.text;
+    for (const item of result.results) {
+      if ((item.success || item.skipped) && item.task_id.trim()) {
+        autoClaimHandled.add(item.task_id.trim());
+      }
+    }
+    statusText.value =
+      (automatic ? "自动领取\n" : "") + result.text;
     if (result.results.length > 0) {
       await handleRefresh();
     }
   } catch (e) {
-    actionError.value = `领取奖励失败: ${e}`;
+    actionError.value = `${automatic ? "自动领取" : "领取奖励"}失败: ${e}`;
   } finally {
     claiming.value = false;
   }
@@ -162,6 +188,7 @@ watch(
     tasks.value = [];
     statusText.value = "";
     actionError.value = "";
+    autoClaimHandled.clear();
     startStatusTimer();
     syncAutoRefresh();
     void handleRefresh();
@@ -213,7 +240,7 @@ onUnmounted(() => {
             size="sm"
             class="h-7 text-xs"
             :disabled="claiming || !hasTasks"
-            @click="handleClaim"
+            @click="handleClaim()"
           >
             {{ claiming ? "领取中..." : "领取奖励" }}
           </Button>

@@ -73,6 +73,31 @@ pub struct ClaimRewardsResult {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct TaskGroup {
+    pub label: String,
+    pub task_ids: Vec<String>,
+    pub active: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FetchRoomIdResult {
+    pub room_id: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FetchTaskIdsResult {
+    pub room_id: i64,
+    pub groups: Vec<TaskGroup>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FetchTaskIdsMode2Result {
+    #[serde(default)]
+    pub room_id: Option<i64>,
+    pub groups: Vec<TaskGroup>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MinerConfig {
     pub cookie: String,
     pub room_ids: Vec<i64>,
@@ -413,6 +438,38 @@ pub async fn refresh_tasks(
             .unwrap_or("")
             .to_string(),
     })
+}
+
+#[tauri::command]
+pub async fn auto_fetch_room_id(
+    sidecar: tauri::State<'_, SidecarManager>,
+) -> Result<FetchRoomIdResult, String> {
+    let resp = sidecar.call("auto_fetch_room_id", serde_json::json!({}))?;
+    serde_json::from_value(resp).map_err(|e| format!("解析房间号失败: {}", e))
+}
+
+#[tauri::command]
+pub async fn auto_fetch_task_ids(
+    room_id: i64,
+    sidecar: tauri::State<'_, SidecarManager>,
+) -> Result<FetchTaskIdsResult, String> {
+    let resp = sidecar.call(
+        "auto_fetch_task_ids",
+        serde_json::json!({ "room_id": room_id }),
+    )?;
+    serde_json::from_value(resp).map_err(|e| format!("解析任务组失败: {}", e))
+}
+
+#[tauri::command]
+pub async fn auto_fetch_task_ids_mode2(
+    room_id: Option<i64>,
+    sidecar: tauri::State<'_, SidecarManager>,
+) -> Result<FetchTaskIdsMode2Result, String> {
+    let resp = sidecar.call(
+        "auto_fetch_task_ids_mode2",
+        serde_json::json!({ "room_id": room_id }),
+    )?;
+    serde_json::from_value(resp).map_err(|e| format!("解析任务组失败: {}", e))
 }
 
 

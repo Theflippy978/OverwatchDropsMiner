@@ -65,6 +65,8 @@ class PythonSidecar:
         # 扫码登录会话（跨命令保持一个 HTTP client）
         self._qr_api: Any | None = None
         self._qr_key = ""
+        # 浏览器嗅探会话守卫（Cookie 捕获 / 房间号 / 任务ID 模式2 共用，单会话）
+        self._sniff_busy = False
     
     def _init_backend(self):
         """初始化现有后端模块"""
@@ -166,6 +168,9 @@ class PythonSidecar:
             "claim_rewards": self._claim_rewards,
             "refresh_tasks": self._refresh_tasks,
             "send_notification": self._send_notification,
+            "auto_fetch_room_id": self._auto_fetch_room_id,
+            "auto_fetch_task_ids": self._auto_fetch_task_ids,
+            "auto_fetch_task_ids_mode2": self._auto_fetch_task_ids_mode2,
         }
         
         handler = handlers.get(command)
@@ -551,6 +556,10 @@ class PythonSidecar:
 
     async def _browser_capture(self, params: dict) -> dict:
         """浏览器捕获 - 使用 Selenium + 扩展捕获 B 站 Cookie"""
+        if self._sniff_busy:
+            return {"error": "已有一个浏览器自动获取任务在进行中，请稍候"}
+        self._sniff_busy = True
+        sniff_cancel = threading.Event()
         try:
             from overwatch_drops_miner.gui_parts.browser_sniffer import start_browser_sniff
             
@@ -584,6 +593,7 @@ class PythonSidecar:
                     on_error=on_error,
                     browser_preference=None,
                     finish_on_any=True,
+                    cancel_event=sniff_cancel,
                 )
             )
             
@@ -605,7 +615,190 @@ class PythonSidecar:
             import traceback
             traceback.print_exc()
             return {"error": str(e)}
+        finally:
+            sniff_cancel.set()
+            self._sniff_busy = False
     
+    @staticmethod
+    def _normalize_task_groups(groups: Any) -> list[dict[str, Any]]:
+        """extract_bili_live_task_groups 结果 → [{label, task_ids, active}]"""
+        normalized: list[dict[str, Any]] = []
+        for group in groups or []:
+            if not isinstance(group, dict):
+                continue
+            task_ids = [
+                str(t).strip()
+                for t in (group.get("task_ids") or [])
+                if str(t).strip()
+            ]
+            if not task_ids:
+                continue
+            normalized.append({
+                "label": str(group.get("label") or "").strip() or "任务组",
+                "task_ids": task_ids,
+                "active": bool(group.get("active")),
+            })
+        return normalized
+
+    async def _auto_fetch_task_ids(self, params: dict) -> dict:
+        """自动获取任务ID（模式1：纯 HTTP 抓取直播间静态页，无需浏览器）"""
+        try:
+            room_id = int(params.get("room_id") or 0)
+        except (TypeError, ValueError):
+            room_id = 0
+        if room_id <= 0:
+            return {"error": "请先填写房间号，或改用模式2（浏览器嗅探）"}
+
+        from overwatch_drops_miner.client_parts.task_discovery import fetch_live_task_groups
+
+        try:
+            groups = await asyncio.wait_for(
+                asyncio.to_thread(fetch_live_task_groups, room_id), timeout=30.0
+            )
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return {"error": f"自动获取模式1失败: {type(e).__name__}（可改用模式2）"}
+
+        normalized = self._normalize_task_groups(groups)
+        if not normalized:
+            return {"error": "未解析到掉宝任务分组，请改用模式2（浏览器嗅探）"}
+        return {"room_id": room_id, "groups": normalized}
+
+    async def _run_browser_sniff(self, *, kind: str, room_id: int) -> dict:
+        """浏览器嗅探会话（kind: room=房间号 / task=任务ID模式2），单会话，120s 超时"""
+        if self._sniff_busy:
+            return {"error": "已有一个浏览器自动获取任务在进行中，请稍候"}
+        self._sniff_busy = True
+        cancel_event = threading.Event()
+        result_box: dict[str, Any] = {}
+        done = threading.Event()
+
+        def _finish(payload: dict[str, Any]) -> None:
+            if not done.is_set():
+                result_box.update(payload)
+                done.set()
+
+        try:
+            from overwatch_drops_miner.gui_parts.browser_sniffer import start_browser_sniff
+
+            def on_error(title: str, message: str) -> None:
+                _finish({"error": f"{title}: {message}"})
+
+            sniff_kwargs: dict[str, Any]
+            if kind == "room":
+                def on_room_url(captured_room_id: int) -> None:
+                    _finish({"room_id": int(captured_room_id)})
+
+                sniff_kwargs = {
+                    "url_keyword": None,
+                    "hint": "已打开浏览器，请在 2 分钟内进入目标直播间",
+                    "on_page_url": on_room_url,
+                    "finish_on_any": True,
+                }
+            else:
+                from overwatch_drops_miner.gui_parts.browser_utils import (
+                    extract_room_id_from_live_url,
+                )
+                from overwatch_drops_miner.utils import extract_bili_live_task_groups
+
+                def on_page_html(page_html: str, page_url: str) -> bool:
+                    found_room = extract_room_id_from_live_url(page_url)
+                    normalized = self._normalize_task_groups(
+                        extract_bili_live_task_groups(page_html)
+                    )
+                    if not normalized:
+                        return False
+                    payload: dict[str, Any] = {"groups": normalized}
+                    if found_room:
+                        payload["room_id"] = int(found_room)
+                    _finish(payload)
+                    return True
+
+                def on_network_match(payload_raw: Any) -> None:
+                    try:
+                        payload_data = payload_raw if isinstance(payload_raw, dict) else {}
+                        request_url = str(payload_data.get("url") or "")
+                        page_url = str(payload_data.get("page_url") or "")
+                        found_room = extract_room_id_from_live_url(page_url)
+                        if found_room is None:
+                            found_room = extract_room_id_from_live_url(request_url)
+                        data = payload_data.get("data")
+                        if not isinstance(data, dict) or data.get("code") != 0:
+                            return
+                        tasks = (data.get("data") or {}).get("list") or []
+                        task_ids = [
+                            str(t.get("task_id")).strip()
+                            for t in tasks
+                            if isinstance(t, dict) and t.get("task_id")
+                        ]
+                        if not task_ids:
+                            return
+                        payload = {
+                            "groups": [{
+                                "label": "页面任务接口捕获",
+                                "task_ids": task_ids,
+                                "active": True,
+                            }],
+                        }
+                        if found_room is not None:
+                            payload["room_id"] = int(found_room)
+                        _finish(payload)
+                    except Exception:
+                        return
+
+                sniff_kwargs = {
+                    "url_keyword": "/x/task/totalv2",
+                    "hint": "已打开浏览器，请打开有当前任务的直播间并等待页面加载完成",
+                    "on_network_match": on_network_match,
+                    "on_page_html": on_page_html,
+                    "finish_on_any": True,
+                    "start_url": (
+                        f"https://live.bilibili.com/{room_id}" if room_id > 0 else None
+                    ),
+                }
+
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: start_browser_sniff(
+                    on_error=on_error,
+                    browser_preference=None,
+                    cancel_event=cancel_event,
+                    **sniff_kwargs,
+                ),
+            )
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.wrap_future(asyncio.to_thread(done.wait)),
+                    timeout=120.0,
+                )
+            except asyncio.TimeoutError:
+                return {"error": "浏览器捕获超时（2 分钟）"}
+            return dict(result_box)
+        except ImportError as e:
+            return {"error": f"缺少依赖: {e}，请安装 selenium"}
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return {"error": str(e)}
+        finally:
+            cancel_event.set()
+            self._sniff_busy = False
+
+    async def _auto_fetch_room_id(self, params: dict) -> dict:
+        """自动获取房间号（浏览器嗅探：打开目标直播间捕获 URL）"""
+        return await self._run_browser_sniff(kind="room", room_id=0)
+
+    async def _auto_fetch_task_ids_mode2(self, params: dict) -> dict:
+        """自动获取任务ID（模式2：嗅探任务接口/页面 HTML，可同时拿到房间号）"""
+        try:
+            room_id = int(params.get("room_id") or 0)
+        except (TypeError, ValueError):
+            room_id = 0
+        return await self._run_browser_sniff(kind="task", room_id=room_id)
+
     async def _send_notification(self, params: dict) -> dict:
         """发送通知"""
         try:

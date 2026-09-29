@@ -30,6 +30,9 @@ fn main() {
             commands::send_notification,
             commands::claim_rewards,
             commands::refresh_tasks,
+            commands::auto_fetch_room_id,
+            commands::auto_fetch_task_ids,
+            commands::auto_fetch_task_ids_mode2,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
