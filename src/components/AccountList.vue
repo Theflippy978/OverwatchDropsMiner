@@ -9,6 +9,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 
 const accountsStore = useAccountsStore();
 
+const emit = defineEmits<{
+  select: [accountId: string];
+}>();
+
 const showAddDialog = ref(false);
 const newCookie = ref("");
 const adding = ref(false);
@@ -143,3 +147,4 @@ async function handleStop(accountId: string) {
     </CardContent>
   </Card>
 </template>
+

@@ -42,6 +42,10 @@ function toggleTheme() {
 function handleQrSuccess(cookie: string) {
   accountsStore.addAccount(cookie);
 }
+
+function selectAccount(accountId: string) {
+  selectedAccountId.value = accountId;
+}
 </script>
 
 <template>
@@ -69,7 +73,7 @@ function handleQrSuccess(cookie: string) {
       <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <!-- 账号列表 -->
         <div class="lg:col-span-1">
-          <AccountList />
+          <AccountList @select="selectAccount" />
         </div>
 
         <!-- 配置、任务进度和日志 -->
@@ -100,3 +104,4 @@ function handleQrSuccess(cookie: string) {
     />
   </div>
 </template>
+
