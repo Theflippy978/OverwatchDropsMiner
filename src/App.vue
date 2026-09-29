@@ -11,6 +11,7 @@ import LogViewer from "@/components/LogViewer.vue";
 import TaskProgress from "@/components/TaskProgress.vue";
 import NotificationSettings from "@/components/NotificationSettings.vue";
 import QrLoginDialog from "@/components/QrLoginDialog.vue";
+import UpdateDialog from "@/components/UpdateDialog.vue";
 
 const accountsStore = useAccountsStore();
 const configStore = useConfigStore();
@@ -21,6 +22,10 @@ const selectedAccountId = ref<string | null>(null);
 const showQrLogin = ref(false);
 const themeFollowSystem = ref(true);
 let themePollTimer: number | null = null;
+
+const showUpdateDialog = ref(false);
+const updateLatestVersion = ref("");
+const updateReleaseUrl = ref("");
 
 const anyRunning = computed(() =>
   accountsStore.accounts.some((a) => a.running)
@@ -38,6 +43,7 @@ onMounted(async () => {
   restoreWindowGeometry();
   registerCloseHandler();
   startConfigSync();
+  setTimeout(() => checkUpdate(), 3000);
 });
 
 onUnmounted(() => {
@@ -77,6 +83,22 @@ function stopConfigSync() {
   }
 }
 
+async function checkUpdate() {
+  try {
+    const result = await invoke<{
+      update_available: boolean;
+      latest_version: string;
+      release_url: string;
+    }>("check_update");
+    if (result.update_available) {
+      updateLatestVersion.value = result.latest_version;
+      updateReleaseUrl.value = result.release_url;
+      showUpdateDialog.value = true;
+    }
+  } catch {
+  }
+}
+
 async function restoreWindowGeometry() {
   try {
     const saved = localStorage.getItem("window_geometry");
@@ -90,6 +112,8 @@ async function restoreWindowGeometry() {
         await win.setPosition(new PhysicalPosition(geo.x, geo.y));
       }
     }
+    const win = getCurrentWindow();
+    await win.setMinSize(new PhysicalSize(800, 600));
   } catch (e) {
     console.error("恢复窗口几何失败:", e);
   }
@@ -163,12 +187,19 @@ function selectAccount(accountId: string) {
           <span class="text-sm text-muted-foreground">
             {{ accountsStore.accounts.filter((a) => a.running).length }} 个账号运行中
           </span>
-          <button
-            class="rounded-md p-2 hover:bg-accent transition-colors"
-            @click="toggleTheme"
-          >
-            {{ darkMode ? "☀️" : "🌙" }}
-          </button>
+          <div class="group relative">
+            <button
+              class="rounded-md p-2 hover:bg-accent transition-colors"
+              @click="toggleTheme"
+            >
+              {{ darkMode ? "☀️" : "🌙" }}
+            </button>
+            <div class="pointer-events-none absolute right-0 top-full z-50 mt-1 w-48 rounded-md border border-border bg-popover p-2 text-xs text-popover-foreground opacity-0 shadow-md transition-opacity group-hover:opacity-100">
+              {{ themeFollowSystem ? "当前跟随系统主题" : "已手动切换主题" }}
+              <br />
+              点击切换深/浅色模式
+            </div>
+          </div>
         </div>
       </div>
       <!-- 运行中全局 indeterminate 进度动画 -->
@@ -215,6 +246,13 @@ function selectAccount(accountId: string) {
       :open="showQrLogin"
       @update:open="showQrLogin = $event"
       @success="handleQrSuccess"
+    />
+
+    <!-- 更新对话框 -->
+    <UpdateDialog
+      v-model:open="showUpdateDialog"
+      :latest-version="updateLatestVersion"
+      :release-url="updateReleaseUrl"
     />
   </div>
 </template>

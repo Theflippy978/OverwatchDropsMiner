@@ -108,7 +108,10 @@ async function handleTest() {
               <Label class="text-xs">详细日志</Label>
               <p class="text-xs text-muted-foreground">输出更详细的运行日志</p>
             </div>
-            <Switch v-model:checked="configStore.config.verbose" />
+            <Switch
+              v-model:checked="configStore.config.verbose"
+              @update:checked="configStore.save()"
+            />
           </div>
         </div>
       </div>

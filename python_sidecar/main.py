@@ -226,6 +226,8 @@ class PythonSidecar:
             "import_config": self._import_config,
             "sync_config_to_miners": self._sync_config_to_miners,
             "shutdown": self._shutdown,
+            "check_update": self._check_update,
+            "detect_browsers": self._detect_browsers,
         }
         
         handler = handlers.get(command)
@@ -948,6 +950,43 @@ class PythonSidecar:
             if notify_urls != miner.config.notify_urls:
                 miner.update_notifier(notify_urls)
         return {}
+
+    async def _detect_browsers(self, params: dict) -> dict:
+        try:
+            from overwatch_drops_miner.gui_parts.browser_utils import (
+                available_browsers,
+                detect_default_browser,
+                browser_label,
+            )
+            available = available_browsers()
+            default = detect_default_browser()
+            return {
+                "available": available,
+                "default": default,
+                "labels": {b: browser_label(b) for b in available},
+            }
+        except Exception as e:
+            return {"error": f"检测浏览器失败: {e}"}
+
+    async def _check_update(self, params: dict) -> dict:
+        try:
+            from overwatch_drops_miner.gui_parts.update_checker import check_latest_release
+            result = check_latest_release(
+                app_version="0.1.0",
+                update_channel="release",
+                latest_release_api="https://api.github.com/repos/OverwatchDropsMiner/OverwatchDropsMiner/releases/latest",
+                releases_url="https://github.com/OverwatchDropsMiner/OverwatchDropsMiner/releases",
+                timeout=8,
+            )
+            if result is None:
+                return {"update_available": False}
+            return {
+                "update_available": True,
+                "latest_version": result.latest_version,
+                "release_url": result.release_url,
+            }
+        except Exception as e:
+            return {"error": f"检查更新失败: {e}"}
 
     async def _shutdown(self, params: dict) -> dict:
         """应用关闭时清理浏览器资源"""

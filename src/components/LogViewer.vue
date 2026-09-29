@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 const logsStore = useLogsStore();
 const accountsStore = useAccountsStore();
 const scrollRef = ref<HTMLElement | null>(null);
+const collapsed = ref(false);
 
 watch(
   () => logsStore.filteredLogs.length,
@@ -63,6 +64,14 @@ function formatTime(timestamp: string) {
             size="sm"
             variant="ghost"
             class="h-7 text-xs text-muted-foreground"
+            @click="collapsed = !collapsed"
+          >
+            {{ collapsed ? "展开" : "折叠" }}
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            class="h-7 text-xs text-muted-foreground"
             @click="logsStore.clear()"
           >
             清空
@@ -73,7 +82,8 @@ function formatTime(timestamp: string) {
     <CardContent class="pt-0">
       <div
         ref="scrollRef"
-        class="h-[calc(100vh-320px)] overflow-y-auto rounded-md border border-border bg-muted/30 p-3"
+        class="overflow-y-auto rounded-md border border-border bg-muted/30 p-3 transition-all duration-300"
+        :class="collapsed ? 'max-h-0' : 'h-[calc(100vh-320px)]'"
       >
         <div v-if="logsStore.logs.length === 0" class="py-8 text-center text-sm text-muted-foreground">
           暂无日志
