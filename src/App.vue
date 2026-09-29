@@ -40,6 +40,10 @@ function saveTheme(theme: string) {
   }
 }
 
+function detectSystemTheme(): boolean {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
 const showUpdateDialog = ref(false);
 const updateLatestVersion = ref("");
 const updateReleaseUrl = ref("");
@@ -59,7 +63,7 @@ onMounted(async () => {
     darkMode.value = savedTheme === "dark";
     themeFollowSystem.value = false;
   } else {
-    darkMode.value = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    darkMode.value = detectSystemTheme();
   }
   updateTheme();
   startSystemThemePolling();
@@ -214,6 +218,7 @@ function selectAccount(accountId: string) {
           <div class="group relative">
             <button
               class="rounded-md p-2 hover:bg-accent transition-colors"
+              :title="themeFollowSystem ? '当前跟随系统主题' : '已手动切换主题'"
               @click="toggleTheme"
             >
               {{ darkMode ? "☀️" : "🌙" }}

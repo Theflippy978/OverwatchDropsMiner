@@ -3,7 +3,7 @@ import { ref } from "vue";
 import { useAccountsStore } from "@/stores/accounts";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
@@ -120,18 +120,38 @@ function cancelCaptureCookie() {
 <template>
   <Card class="h-full">
     <CardHeader class="pb-3">
-      <div class="flex items-center justify-between">
-        <CardTitle class="text-sm">账号列表</CardTitle>
-        <div class="flex items-center gap-2">
-          <Button size="sm" variant="outline" class="h-7 text-xs" @click="emit('qr-login')">
-            扫码登录
-          </Button>
+        <div class="flex items-center justify-between">
+          <CardTitle class="text-sm">账号列表</CardTitle>
+          <div class="flex items-center gap-2">
+            <div class="group relative">
+              <Button size="sm" class="h-7 text-xs">
+                + 添加账号
+              </Button>
+              <div class="pointer-events-none absolute right-0 top-full z-50 mt-1 w-40 rounded-md border border-border bg-popover p-1 text-xs text-popover-foreground opacity-0 shadow-md transition-opacity group-hover:opacity-100">
+                <button
+                  class="block w-full rounded px-2 py-1.5 text-left hover:bg-accent"
+                  @click="emit('qr-login')"
+                >
+                  扫码登录
+                </button>
+                <button
+                  class="block w-full rounded px-2 py-1.5 text-left hover:bg-accent"
+                  @click="showAddDialog = true"
+                >
+                  手动粘贴 Cookie
+                </button>
+                <button
+                  class="block w-full rounded px-2 py-1.5 text-left hover:bg-accent"
+                  @click="handleCaptureCookie"
+                >
+                  浏览器自动捕获
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <Dialog v-model:open="showAddDialog">
-          <DialogTrigger as-child>
-            <Button size="sm" class="h-7 text-xs">
-              + 添加账号
-            </Button>
-          </DialogTrigger>
           <DialogContent class="sm:max-w-md">
             <DialogHeader>
               <DialogTitle>添加账号</DialogTitle>
@@ -168,7 +188,6 @@ function cancelCaptureCookie() {
             </div>
           </DialogContent>
         </Dialog>
-        </div>
 
         <Dialog v-model:open="showRenameDialog">
           <DialogContent class="sm:max-w-sm">
@@ -199,7 +218,6 @@ function cancelCaptureCookie() {
             </div>
           </DialogContent>
         </Dialog>
-      </div>
     </CardHeader>
     <CardContent class="pt-0">
       <ScrollArea class="h-[calc(100vh-280px)]">

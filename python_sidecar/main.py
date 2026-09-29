@@ -69,6 +69,7 @@ class PythonSidecar:
         self._sniff_busy = False
         self._config_file = self._get_config_file()
         self._load_config_file()
+        self._watch_trackers: dict[str, Any] = {}
     
     def _init_backend(self):
         """初始化现有后端模块"""
@@ -139,20 +140,25 @@ class PythonSidecar:
 
     def _save_config_file(self):
         try:
-            payload = {
-                "room_ids": self._config_data.get("room_ids", []),
-                "thread_count": self._config_data.get("thread_count", 60),
-                "reconnect_delay_seconds": self._config_data.get("reconnect_delay_seconds", 8),
-                "task_ids": self._config_data.get("task_ids", []),
-                "task_query_interval_seconds": self._config_data.get("task_query_interval_seconds", 30),
-                "notify_urls": self._config_data.get("notify_urls", []),
-                "notify_on_task_complete": self._config_data.get("notify_on_task_complete", True),
-                "auto_claim_rewards": self._config_data.get("auto_claim_rewards", False),
-                "verbose": self._config_data.get("verbose", False),
-            }
-            tmp = self._config_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(self._config_file)
+            from overwatch_drops_miner.gui_parts.config_io import build_config_payload
+            from overwatch_drops_miner.config import MinerConfig
+            config = MinerConfig(
+                cookie="",
+                room_ids=self._config_data.get("room_ids", []),
+                thread_count=self._config_data.get("thread_count", 60),
+                reconnect_delay_seconds=self._config_data.get("reconnect_delay_seconds", 8),
+                task_ids=self._config_data.get("task_ids", []),
+                task_query_interval_seconds=self._config_data.get("task_query_interval_seconds", 30),
+                notify_urls=self._config_data.get("notify_urls", []),
+                notify_on_task_complete=self._config_data.get("notify_on_task_complete", True),
+            )
+            payload = build_config_payload(
+                config,
+                verbose=self._config_data.get("verbose", False),
+                auto_claim_rewards=self._config_data.get("auto_claim_rewards", False),
+            )
+            from overwatch_drops_miner.gui_parts.config_io import save_config_data
+            save_config_data(self._config_file, payload)
         except Exception as e:
             print(f"[Sidecar] 保存配置文件失败: {e}", file=sys.stderr)
 
@@ -349,6 +355,11 @@ class PythonSidecar:
         if not account:
             return {"error": "账号不存在"}
         
+        from overwatch_drops_miner.watch_time_tracker import WatchTimeTracker
+        tracker = WatchTimeTracker()
+        self._watch_trackers[account_id] = tracker
+        tracker.resume()
+
         success = self.miner_manager.start(account)
         if not success:
             return {"error": "启动失败"}
@@ -366,6 +377,9 @@ class PythonSidecar:
             return {"error": "后端未初始化"}
         
         self.miner_manager.request_stop(account_id)
+        tracker = self._watch_trackers.get(account_id)
+        if tracker:
+            tracker.pause()
         self._emit_event("account-state-changed", {"account_id": account_id, "running": False})
         return {}
     
@@ -374,18 +388,27 @@ class PythonSidecar:
         account_id = params.get("account_id", "")
         if not account_id:
             return {"error": "账号 ID 不能为空"}
-        
+
         running = self.miner_manager.is_running(account_id) if self.miner_manager else False
         tracker = self.miner_manager.tracker(account_id) if self.miner_manager else None
-        
+
         watch_time = 0
         if tracker:
-            watch_time = int(tracker.total_seconds())
-        
+            watch_time = int(tracker.elapsed_seconds())
+
+        from overwatch_drops_miner.gui_parts.task_presenter import format_watch_status_line
+        from overwatch_drops_miner.watch_time_tracker import estimate_remaining_seconds
+        status_line = format_watch_status_line(
+            running=running,
+            bili_cur_minutes=None,
+            local_elapsed_seconds=watch_time,
+        )
+
         return {
             "account_id": account_id,
             "running": running,
             "watch_time_seconds": watch_time,
+            "status_line": status_line,
             "task_progress": None,
         }
     
@@ -992,12 +1015,17 @@ class PythonSidecar:
     async def _check_update(self, params: dict) -> dict:
         try:
             from overwatch_drops_miner.gui_parts.update_checker import check_latest_release
-            from overwatch_drops_miner._version import APP_VERSION
+            from overwatch_drops_miner._version import (
+                APP_VERSION,
+                UPDATE_CHANNEL,
+                LATEST_RELEASE_API,
+                RELEASES_URL,
+            )
             result = check_latest_release(
                 app_version=APP_VERSION,
-                update_channel="release",
-                latest_release_api="https://api.github.com/repos/OverwatchDropsMiner/OverwatchDropsMiner/releases/latest",
-                releases_url="https://github.com/OverwatchDropsMiner/OverwatchDropsMiner/releases",
+                update_channel=UPDATE_CHANNEL,
+                latest_release_api=LATEST_RELEASE_API,
+                releases_url=RELEASES_URL,
                 timeout=8,
             )
             if result is None:
