@@ -9,6 +9,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 
 const accountsStore = useAccountsStore();
 
+defineProps<{
+  selectedId: string | null;
+}>();
+
 const emit = defineEmits<{
   select: [accountId: string];
   "qr-login": [];
@@ -23,6 +27,13 @@ const showRenameDialog = ref(false);
 const renameTargetId = ref("");
 const renameValue = ref("");
 const renaming = ref(false);
+
+const pendingAction = ref("");
+
+function pendingLabel(accountId: string, idle: string) {
+  if (!pendingAction.value.startsWith(`${accountId}:`)) return idle;
+  return pendingAction.value.endsWith(":start") ? "启动中..." : "停止中...";
+}
 
 function openRenameDialog(accountId: string, currentRemark: string) {
   renameTargetId.value = accountId;
@@ -73,19 +84,33 @@ async function handleRemoveAccount(accountId: string) {
 }
 
 async function handleStart(accountId: string) {
-  const config = {
-    room_ids: [],
-    thread_count: 60,
-    reconnect_delay_seconds: 8,
-    task_ids: [],
-    task_query_interval_seconds: 30,
-    notify_urls: [],
-  };
-  await accountsStore.startMiner(accountId, config);
+  if (pendingAction.value) return;
+  pendingAction.value = `${accountId}:start`;
+  try {
+    const config = {
+      room_ids: [],
+      thread_count: 60,
+      reconnect_delay_seconds: 8,
+      task_ids: [],
+      task_query_interval_seconds: 30,
+      notify_urls: [],
+    };
+    await accountsStore.startMiner(accountId, config);
+    // 对齐原 _finish_account_started：启动后自动选中该账号
+    emit("select", accountId);
+  } finally {
+    pendingAction.value = "";
+  }
 }
 
 async function handleStop(accountId: string) {
-  await accountsStore.stopMiner(accountId);
+  if (pendingAction.value) return;
+  pendingAction.value = `${accountId}:stop`;
+  try {
+    await accountsStore.stopMiner(accountId);
+  } finally {
+    pendingAction.value = "";
+  }
 }
 </script>
 
@@ -185,7 +210,13 @@ async function handleStop(accountId: string) {
           <div
             v-for="account in accountsStore.accounts"
             :key="account.id"
-            class="flex items-center justify-between rounded-lg border border-border p-3 hover:bg-accent/50"
+            class="flex cursor-pointer items-center justify-between rounded-lg border p-3 transition-colors"
+            :class="
+              account.id === selectedId
+                ? 'border-primary bg-accent/60'
+                : 'border-border hover:bg-accent/50'
+            "
+            @click="emit('select', account.id)"
           >
             <div class="flex items-center gap-3">
               <span
@@ -203,24 +234,26 @@ async function handleStop(accountId: string) {
                 size="sm"
                 variant="outline"
                 class="h-7 text-xs"
-                @click="handleStart(account.id)"
+                :disabled="pendingAction !== ''"
+                @click.stop="handleStart(account.id)"
               >
-                启动
+                {{ pendingLabel(account.id, "启动") }}
               </Button>
               <Button
                 v-else
                 size="sm"
                 variant="destructive"
                 class="h-7 text-xs"
-                @click="handleStop(account.id)"
+                :disabled="pendingAction !== ''"
+                @click.stop="handleStop(account.id)"
               >
-                停止
+                {{ pendingLabel(account.id, "停止") }}
               </Button>
               <Button
                 size="sm"
                 variant="ghost"
                 class="h-7 text-xs text-muted-foreground hover:text-foreground"
-                @click="openRenameDialog(account.id, account.remark)"
+                @click.stop="openRenameDialog(account.id, account.remark)"
               >
                 改名
               </Button>
@@ -228,7 +261,8 @@ async function handleStop(accountId: string) {
                 size="sm"
                 variant="ghost"
                 class="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
-                @click="handleRemoveAccount(account.id)"
+                :disabled="pendingAction !== ''"
+                @click.stop="handleRemoveAccount(account.id)"
               >
                 ✕
               </Button>

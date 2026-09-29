@@ -51,6 +51,9 @@ const claiming = ref(false);
 const actionError = ref("");
 
 let statusTimer: number | null = null;
+let autoRefreshTimer: number | null = null;
+
+const AUTO_REFRESH_INTERVAL = 30_000;
 
 const hasTasks = computed(() => tasks.value.length > 0);
 
@@ -135,6 +138,24 @@ function stopStatusTimer() {
   }
 }
 
+// 对齐原 GUI _schedule_task_refresh：账号运行中每 30s 自动刷新任务进度，
+// 无运行账号则不重排定时器。
+function syncAutoRefresh() {
+  stopAutoRefresh();
+  if (props.running && props.accountId) {
+    autoRefreshTimer = window.setInterval(() => {
+      void handleRefresh();
+    }, AUTO_REFRESH_INTERVAL);
+  }
+}
+
+function stopAutoRefresh() {
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
+}
+
 watch(
   () => props.accountId,
   () => {
@@ -142,6 +163,7 @@ watch(
     statusText.value = "";
     actionError.value = "";
     startStatusTimer();
+    syncAutoRefresh();
     void handleRefresh();
   }
 );
@@ -150,16 +172,19 @@ watch(
   () => props.running,
   (running) => {
     if (running) startStatusTimer();
+    syncAutoRefresh();
   }
 );
 
 onMounted(() => {
   startStatusTimer();
+  syncAutoRefresh();
   void handleRefresh();
 });
 
 onUnmounted(() => {
   stopStatusTimer();
+  stopAutoRefresh();
 });
 </script>
 

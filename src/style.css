@@ -32,3 +32,17 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* 账号运行中的全局进度条动画（对齐原 GUI _start_progress_animation 的 indeterminate 效果） */
+@keyframes progress-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+
+.progress-indeterminate {
+  animation: progress-indeterminate 1.2s ease-in-out infinite;
+}

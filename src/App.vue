@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { useAccountsStore } from "@/stores/accounts";
 import { useConfigStore } from "@/stores/config";
 import { useLogsStore } from "@/stores/logs";
@@ -17,6 +17,11 @@ const logsStore = useLogsStore();
 const darkMode = ref(false);
 const selectedAccountId = ref<string | null>(null);
 const showQrLogin = ref(false);
+
+// 任一账号运行中 → 顶栏显示 indeterminate 进度动画（对齐原 _start/_stop_progress_animation）
+const anyRunning = computed(() =>
+  accountsStore.accounts.some((a) => a.running)
+);
 
 onMounted(async () => {
   await logsStore.initListeners();
@@ -68,6 +73,13 @@ function selectAccount(accountId: string) {
           </button>
         </div>
       </div>
+      <!-- 运行中全局 indeterminate 进度动画 -->
+      <div
+        v-if="anyRunning"
+        class="relative h-1.5 w-full overflow-hidden bg-secondary"
+      >
+        <div class="progress-indeterminate absolute h-full w-1/3 bg-primary" />
+      </div>
     </header>
 
     <!-- 主内容 -->
@@ -75,7 +87,11 @@ function selectAccount(accountId: string) {
       <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <!-- 账号列表 -->
         <div class="lg:col-span-1">
-          <AccountList @select="selectAccount" @qr-login="showQrLogin = true" />
+          <AccountList
+            :selected-id="selectedAccountId"
+            @select="selectAccount"
+            @qr-login="showQrLogin = true"
+          />
         </div>
 
         <!-- 配置、任务进度和日志 -->
@@ -85,7 +101,7 @@ function selectAccount(accountId: string) {
           
           <!-- 任务进度 -->
           <TaskProgress
-            v-if="selectedAccountId"
+            v-if="selectedAccountId && accountsStore.accounts.some((a) => a.id === selectedAccountId)"
             :account-id="selectedAccountId"
             :running="accountsStore.accounts.find((a) => a.id === selectedAccountId)?.running ?? false"
           />

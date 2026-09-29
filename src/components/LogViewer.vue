@@ -2,20 +2,23 @@
 import { ref, watch, nextTick } from "vue";
 import { useLogsStore } from "@/stores/logs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 
 const logsStore = useLogsStore();
 const scrollRef = ref<HTMLElement | null>(null);
 
-// 自动滚动到底部
+// 底部锁定（对齐原 GUI _flush_log_queue）：
+// 仅当新日志到达前视口停在底部（30px 容差）才跟随滚动；
+// 上翻查看历史时不会被新日志拽回底部。
 watch(
   () => logsStore.logs.length,
   async () => {
+    const el = scrollRef.value;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 30;
+    if (!atBottom) return;
     await nextTick();
-    if (scrollRef.value) {
-      scrollRef.value.scrollTop = scrollRef.value.scrollHeight;
-    }
+    el.scrollTop = el.scrollHeight;
   }
 );
 
@@ -53,14 +56,17 @@ function formatTime(timestamp: string) {
       </div>
     </CardHeader>
     <CardContent class="pt-0">
-      <ScrollArea ref="scrollRef" class="h-[calc(100vh-320px)] rounded-md border border-border bg-muted/30 p-3">
+      <div
+        ref="scrollRef"
+        class="h-[calc(100vh-320px)] overflow-y-auto rounded-md border border-border bg-muted/30 p-3"
+      >
         <div v-if="logsStore.logs.length === 0" class="py-8 text-center text-sm text-muted-foreground">
           暂无日志
         </div>
         <div v-else class="space-y-1 font-mono text-xs">
           <div
-            v-for="(log, index) in logsStore.logs"
-            :key="index"
+            v-for="log in logsStore.logs"
+            :key="log.seq"
             class="flex gap-2"
           >
             <span class="shrink-0 text-muted-foreground">{{ formatTime(log.timestamp) }}</span>
@@ -75,7 +81,7 @@ function formatTime(timestamp: string) {
             </span>
           </div>
         </div>
-      </ScrollArea>
+      </div>
     </CardContent>
   </Card>
 </template>
