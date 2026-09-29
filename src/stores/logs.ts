@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { ref, computed } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { LogEntry } from "@/lib/types";
 
@@ -10,13 +10,18 @@ export interface StoredLog extends LogEntry {
 export const useLogsStore = defineStore("logs", () => {
   const logs = ref<StoredLog[]>([]);
   const maxLogs = 5000;
+  const filterAccountId = ref<string | null>(null);
   let unlisten: UnlistenFn | null = null;
   let initialized = false;
   let nextSeq = 0;
   const buffer: StoredLog[] = [];
   let flushTimer: number | null = null;
 
-  // 对齐原 GUI 的 _flush_log_queue：每 120ms 批量落盘一次，避免逐条触发渲染
+  const filteredLogs = computed(() => {
+    if (!filterAccountId.value) return logs.value;
+    return logs.value.filter((l) => l.account_id === filterAccountId.value);
+  });
+
   function flush() {
     flushTimer = null;
     if (buffer.length === 0) return;
@@ -44,7 +49,10 @@ export const useLogsStore = defineStore("logs", () => {
     logs.value = [];
   }
 
-  // 监听 sidecar 转发的 log-entry 事件（幂等）
+  function setFilter(accountId: string | null) {
+    filterAccountId.value = accountId;
+  }
+
   async function initListeners() {
     if (initialized) return;
     initialized = true;
@@ -67,5 +75,5 @@ export const useLogsStore = defineStore("logs", () => {
     clear();
   }
 
-  return { logs, addLog, clear, initListeners, dispose };
+  return { logs, filteredLogs, filterAccountId, addLog, clear, setFilter, initListeners, dispose };
 });

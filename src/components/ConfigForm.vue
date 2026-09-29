@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { save, open } from "@tauri-apps/plugin-dialog";
 import { useConfigStore } from "@/stores/config";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -36,6 +37,25 @@ onMounted(async () => {
 
 async function handleSave() {
   await configStore.save();
+}
+
+async function handleExport() {
+  const filePath = await save({
+    defaultPath: "config.json",
+    filters: [{ name: "JSON", extensions: ["json"] }],
+  });
+  if (!filePath) return;
+  await invoke("export_config", { path: filePath });
+}
+
+async function handleImport() {
+  const filePath = await open({
+    multiple: false,
+    filters: [{ name: "JSON", extensions: ["json"] }],
+  });
+  if (!filePath || typeof filePath !== "string") return;
+  await invoke("import_config", { path: filePath });
+  await configStore.load();
 }
 
 function firstRoomId(): number {
@@ -132,9 +152,17 @@ async function handleFetchTaskIdsMode2() {
     <CardHeader class="pb-3">
       <div class="flex items-center justify-between">
         <CardTitle class="text-sm">挂机配置</CardTitle>
-        <Button size="sm" variant="outline" class="h-7 text-xs" @click="handleSave">
-          保存配置
-        </Button>
+        <div class="flex gap-1">
+          <Button size="sm" variant="outline" class="h-7 text-xs" @click="handleImport">
+            导入
+          </Button>
+          <Button size="sm" variant="outline" class="h-7 text-xs" @click="handleExport">
+            导出
+          </Button>
+          <Button size="sm" variant="outline" class="h-7 text-xs" @click="handleSave">
+            保存配置
+          </Button>
+        </div>
       </div>
     </CardHeader>
     <CardContent class="pt-0">

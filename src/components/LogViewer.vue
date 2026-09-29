@@ -1,17 +1,16 @@
 <script setup lang="ts">
 import { ref, watch, nextTick } from "vue";
 import { useLogsStore } from "@/stores/logs";
+import { useAccountsStore } from "@/stores/accounts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
 const logsStore = useLogsStore();
+const accountsStore = useAccountsStore();
 const scrollRef = ref<HTMLElement | null>(null);
 
-// 底部锁定（对齐原 GUI _flush_log_queue）：
-// 仅当新日志到达前视口停在底部（30px 容差）才跟随滚动；
-// 上翻查看历史时不会被新日志拽回底部。
 watch(
-  () => logsStore.logs.length,
+  () => logsStore.filteredLogs.length,
   async () => {
     const el = scrollRef.value;
     if (!el) return;
@@ -45,14 +44,30 @@ function formatTime(timestamp: string) {
     <CardHeader class="pb-3">
       <div class="flex items-center justify-between">
         <CardTitle class="text-sm">运行日志</CardTitle>
-        <Button
-          size="sm"
-          variant="ghost"
-          class="h-7 text-xs text-muted-foreground"
-          @click="logsStore.clear()"
-        >
-          清空
-        </Button>
+        <div class="flex items-center gap-2">
+          <select
+            class="h-7 rounded-md border border-border bg-background px-2 text-xs"
+            :value="logsStore.filterAccountId ?? ''"
+            @change="logsStore.setFilter(($event.target as HTMLSelectElement).value || null)"
+          >
+            <option value="">全部账号</option>
+            <option
+              v-for="acc in accountsStore.accounts"
+              :key="acc.id"
+              :value="acc.id"
+            >
+              {{ acc.remark }}
+            </option>
+          </select>
+          <Button
+            size="sm"
+            variant="ghost"
+            class="h-7 text-xs text-muted-foreground"
+            @click="logsStore.clear()"
+          >
+            清空
+          </Button>
+        </div>
       </div>
     </CardHeader>
     <CardContent class="pt-0">

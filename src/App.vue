@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
+import { getCurrentWindow, PhysicalSize, PhysicalPosition } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
 import { useAccountsStore } from "@/stores/accounts";
 import { useConfigStore } from "@/stores/config";
 import { useLogsStore } from "@/stores/logs";
@@ -17,8 +19,9 @@ const logsStore = useLogsStore();
 const darkMode = ref(false);
 const selectedAccountId = ref<string | null>(null);
 const showQrLogin = ref(false);
+const themeFollowSystem = ref(true);
+let themePollTimer: number | null = null;
 
-// 任一账号运行中 → 顶栏显示 indeterminate 进度动画（对齐原 _start/_stop_progress_animation）
 const anyRunning = computed(() =>
   accountsStore.accounts.some((a) => a.running)
 );
@@ -28,10 +31,85 @@ onMounted(async () => {
   await accountsStore.initListeners();
   await accountsStore.fetchAccounts();
   await configStore.ensureLoaded();
-  
+
   darkMode.value = window.matchMedia("(prefers-color-scheme: dark)").matches;
   updateTheme();
+  startSystemThemePolling();
+  restoreWindowGeometry();
+  registerCloseHandler();
+  startConfigSync();
 });
+
+onUnmounted(() => {
+  stopSystemThemePolling();
+  stopConfigSync();
+});
+
+let closeHandlerRegistered = false;
+let configSyncTimer: number | null = null;
+
+function registerCloseHandler() {
+  if (closeHandlerRegistered) return;
+  closeHandlerRegistered = true;
+  const win = getCurrentWindow();
+  win.onCloseRequested(async (event) => {
+    if (anyRunning.value) {
+      event.preventDefault();
+      return;
+    }
+    saveWindowGeometry();
+    invoke("shutdown").catch(() => {});
+  });
+}
+
+function startConfigSync() {
+  if (configSyncTimer !== null) return;
+  configSyncTimer = window.setInterval(() => {
+    if (!anyRunning.value) return;
+    invoke("sync_config_to_miners").catch(() => {});
+  }, 2000);
+}
+
+function stopConfigSync() {
+  if (configSyncTimer !== null) {
+    clearInterval(configSyncTimer);
+    configSyncTimer = null;
+  }
+}
+
+async function restoreWindowGeometry() {
+  try {
+    const saved = localStorage.getItem("window_geometry");
+    if (saved) {
+      const geo = JSON.parse(saved);
+      const win = getCurrentWindow();
+      if (geo.width && geo.height) {
+        await win.setSize(new PhysicalSize(geo.width, geo.height));
+      }
+      if (geo.x !== undefined && geo.y !== undefined) {
+        await win.setPosition(new PhysicalPosition(geo.x, geo.y));
+      }
+    }
+  } catch (e) {
+    console.error("恢复窗口几何失败:", e);
+  }
+}
+
+async function saveWindowGeometry() {
+  try {
+    const win = getCurrentWindow();
+    const size = await win.innerSize();
+    const pos = await win.innerPosition();
+    localStorage.setItem("window_geometry", JSON.stringify({
+      width: size.width,
+      height: size.height,
+      x: pos.x,
+      y: pos.y,
+    }));
+  } catch (e) {
+    console.error("保存窗口几何失败:", e);
+  }
+}
 
 function updateTheme() {
   if (darkMode.value) {
@@ -42,8 +120,28 @@ function updateTheme() {
 }
 
 function toggleTheme() {
+  themeFollowSystem.value = false;
   darkMode.value = !darkMode.value;
   updateTheme();
+}
+
+function startSystemThemePolling() {
+  if (themePollTimer !== null) return;
+  themePollTimer = window.setInterval(() => {
+    if (!themeFollowSystem.value) return;
+    const systemDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    if (systemDark !== darkMode.value) {
+      darkMode.value = systemDark;
+      updateTheme();
+    }
+  }, 5000);
+}
+
+function stopSystemThemePolling() {
+  if (themePollTimer !== null) {
+    clearInterval(themePollTimer);
+    themePollTimer = null;
+  }
 }
 
 function handleQrSuccess(cookie: string) {

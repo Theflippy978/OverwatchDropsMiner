@@ -50,6 +50,7 @@ const watchTimeSeconds = ref(0);
 const refreshing = ref(false);
 const claiming = ref(false);
 const actionError = ref("");
+const estimatedRemaining = ref<number | null>(null);
 
 const configStore = useConfigStore();
 // 已自动领取过的任务 ID（对齐原 _auto_claim_handled_ids：防领取后状态
@@ -73,6 +74,24 @@ const watchTimeFormatted = computed(() => {
 function percentOf(task: TaskItem) {
   if (task.target <= 0) return 0;
   return Math.min(100, Math.round((task.progress / task.target) * 100));
+}
+
+function estimateRemaining(): number | null {
+  const task = tasks.value.find((t) => t.target > 0 && t.progress < t.target);
+  if (!task || watchTimeSeconds.value <= 0) return null;
+  const rate = task.progress / watchTimeSeconds.value;
+  if (rate <= 0) return null;
+  return Math.ceil((task.target - task.progress) / rate);
+}
+
+function formatEstimatedRemaining(): string {
+  if (estimatedRemaining.value === null) return "--";
+  const hours = Math.floor(estimatedRemaining.value / 3600);
+  const minutes = Math.floor((estimatedRemaining.value % 3600) / 60);
+  const seconds = estimatedRemaining.value % 60;
+  if (hours > 0) return `${hours}小时${minutes}分`;
+  if (minutes > 0) return `${minutes}分${seconds}秒`;
+  return `${seconds}秒`;
 }
 
 function statusClass(status: string) {
@@ -144,6 +163,7 @@ async function fetchStatus() {
       { accountId: props.accountId }
     );
     watchTimeSeconds.value = status.watch_time_seconds;
+    estimatedRemaining.value = estimateRemaining();
   } catch {
     // 状态查询失败时保留上次数据
   }
@@ -253,6 +273,10 @@ onUnmounted(() => {
         <div class="flex items-center justify-between text-sm">
           <span class="text-muted-foreground">观看时间</span>
           <span class="font-mono font-medium">{{ watchTimeFormatted }}</span>
+        </div>
+        <div class="flex items-center justify-between text-sm">
+          <span class="text-muted-foreground">预计剩余</span>
+          <span class="font-mono font-medium">{{ formatEstimatedRemaining() }}</span>
         </div>
 
         <Separator />

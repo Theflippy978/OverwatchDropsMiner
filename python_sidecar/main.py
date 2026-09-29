@@ -67,6 +67,8 @@ class PythonSidecar:
         self._qr_key = ""
         # 浏览器嗅探会话守卫（Cookie 捕获 / 房间号 / 任务ID 模式2 共用，单会话）
         self._sniff_busy = False
+        self._config_file = self._get_config_file()
+        self._load_config_file()
     
     def _init_backend(self):
         """初始化现有后端模块"""
@@ -105,6 +107,55 @@ class PythonSidecar:
         except Exception as e:
             print(f"[Sidecar] 切换详细日志失败: {e}", file=sys.stderr)
     
+    def _get_config_file(self):
+        appdata = os.environ.get("APPDATA", "")
+        if appdata:
+            config_dir = Path(appdata) / "OverwatchDropsMiner"
+        else:
+            config_dir = Path.home() / "OverwatchDropsMiner"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        return config_dir / "config.json"
+
+    def _load_config_file(self):
+        try:
+            if self._config_file.exists():
+                data = json.loads(self._config_file.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    self._config_data = {
+                        "room_ids": data.get("room_ids", []),
+                        "thread_count": data.get("thread_count", 60),
+                        "reconnect_delay_seconds": data.get("reconnect_delay_seconds", 8),
+                        "task_ids": data.get("task_ids", []),
+                        "task_query_interval_seconds": data.get("task_query_interval_seconds", 30),
+                        "notify_urls": data.get("notify_urls", []),
+                        "notify_on_task_complete": data.get("notify_on_task_complete", True),
+                        "auto_claim_rewards": data.get("auto_claim_rewards", False),
+                        "verbose": data.get("verbose", False),
+                    }
+                    self._apply_verbose(self._config_data.get("verbose", False))
+                    print(f"[Sidecar] 配置已加载: {self._config_file}", file=sys.stderr)
+        except Exception as e:
+            print(f"[Sidecar] 加载配置文件失败: {e}", file=sys.stderr)
+
+    def _save_config_file(self):
+        try:
+            payload = {
+                "room_ids": self._config_data.get("room_ids", []),
+                "thread_count": self._config_data.get("thread_count", 60),
+                "reconnect_delay_seconds": self._config_data.get("reconnect_delay_seconds", 8),
+                "task_ids": self._config_data.get("task_ids", []),
+                "task_query_interval_seconds": self._config_data.get("task_query_interval_seconds", 30),
+                "notify_urls": self._config_data.get("notify_urls", []),
+                "notify_on_task_complete": self._config_data.get("notify_on_task_complete", True),
+                "auto_claim_rewards": self._config_data.get("auto_claim_rewards", False),
+                "verbose": self._config_data.get("verbose", False),
+            }
+            tmp = self._config_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self._config_file)
+        except Exception as e:
+            print(f"[Sidecar] 保存配置文件失败: {e}", file=sys.stderr)
+
     def _build_config(self, cookie: str):
         """构建 miner 配置"""
         from overwatch_drops_miner.config import MinerConfig
@@ -171,6 +222,10 @@ class PythonSidecar:
             "auto_fetch_room_id": self._auto_fetch_room_id,
             "auto_fetch_task_ids": self._auto_fetch_task_ids,
             "auto_fetch_task_ids_mode2": self._auto_fetch_task_ids_mode2,
+            "export_config": self._export_config,
+            "import_config": self._import_config,
+            "sync_config_to_miners": self._sync_config_to_miners,
+            "shutdown": self._shutdown,
         }
         
         handler = handlers.get(command)
@@ -199,17 +254,38 @@ class PythonSidecar:
         return {"accounts": accounts}
     
     async def _add_account(self, params: dict) -> dict:
-        """添加账号"""
+        """添加账号（含 Cookie 验证与用户名获取）"""
         cookie = params.get("cookie", "")
         if not cookie:
             return {"error": "Cookie 不能为空"}
         
         if not self.account_store:
             return {"error": "后端未初始化"}
-        
+
+        from overwatch_drops_miner.client import BilibiliClient
+
+        client = BilibiliClient(cookie)
+        try:
+            info = await asyncio.wait_for(client.get_self_info(), timeout=30.0)
+        except Exception as e:
+            return {"error": f"Cookie 验证失败: {e}"}
+        finally:
+            try:
+                await client.close()
+            except Exception:
+                pass
+
+        uname = str(info.get("uname", "") or "") if isinstance(info, dict) else ""
+        uid = info.get("uid") if isinstance(info, dict) else None
+        if not uid:
+            return {"error": "无法获取用户信息，Cookie 可能已失效"}
+
         account = self.account_store.add(cookie)
-        
-        return {"id": account.id, "remark": account.remark, "running": False}
+        remark = uname or account.remark or account.id[:8]
+        if uname:
+            account = self.account_store.update(account.id, remark=uname)
+
+        return {"id": account.id, "remark": remark, "running": False}
     
     async def _remove_account(self, params: dict) -> dict:
         """删除账号"""
@@ -326,10 +402,11 @@ class PythonSidecar:
         }
         # 详细日志开关保存后立即生效
         self._apply_verbose(verbose)
+        self._save_config_file()
         return {}
 
     async def _load_config(self, params: dict) -> dict:
-        """加载配置"""
+        """加载配置（含持久化文件）"""
         return {
             "cookie": "",
             "rooms_text": ",".join(str(x) for x in self._config_data.get("room_ids", [])),
@@ -342,6 +419,55 @@ class PythonSidecar:
             "verbose": self._config_data.get("verbose", False),
             "auto_claim_rewards": self._config_data.get("auto_claim_rewards", False),
         }
+
+    async def _export_config(self, params: dict) -> dict:
+        """导出配置到用户选择的 JSON 文件"""
+        import tempfile
+        payload = {
+            "room_ids": self._config_data.get("room_ids", []),
+            "thread_count": self._config_data.get("thread_count", 60),
+            "reconnect_delay_seconds": self._config_data.get("reconnect_delay_seconds", 8),
+            "task_ids": self._config_data.get("task_ids", []),
+            "task_query_interval_seconds": self._config_data.get("task_query_interval_seconds", 30),
+            "notify_urls": self._config_data.get("notify_urls", []),
+            "notify_on_task_complete": self._config_data.get("notify_on_task_complete", True),
+            "auto_claim_rewards": self._config_data.get("auto_claim_rewards", False),
+            "verbose": self._config_data.get("verbose", False),
+        }
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8")
+        try:
+            json.dump(payload, tmp, ensure_ascii=False, indent=2)
+            tmp.close()
+            return {"path": tmp.name}
+        except Exception:
+            tmp.close()
+            raise
+
+    async def _import_config(self, params: dict) -> dict:
+        """从 JSON 文件导入配置"""
+        path = params.get("path", "")
+        if not path:
+            return {"error": "未指定配置文件路径"}
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return {"error": "配置文件格式错误"}
+            self._config_data = {
+                "room_ids": data.get("room_ids", []),
+                "thread_count": data.get("thread_count", 60),
+                "reconnect_delay_seconds": data.get("reconnect_delay_seconds", 8),
+                "task_ids": data.get("task_ids", []),
+                "task_query_interval_seconds": data.get("task_query_interval_seconds", 30),
+                "notify_urls": data.get("notify_urls", []),
+                "notify_on_task_complete": data.get("notify_on_task_complete", True),
+                "auto_claim_rewards": data.get("auto_claim_rewards", False),
+                "verbose": data.get("verbose", False),
+            }
+            self._apply_verbose(self._config_data.get("verbose", False))
+            self._save_config_file()
+            return await self._load_config({})
+        except Exception as e:
+            return {"error": f"导入配置失败: {e}"}
     
     async def _qr_login(self, params: dict) -> dict:
         """生成登录二维码（复用原后端 QrLoginApi）"""
@@ -798,6 +924,42 @@ class PythonSidecar:
         except (TypeError, ValueError):
             room_id = 0
         return await self._run_browser_sniff(kind="task", room_id=room_id)
+
+    async def _sync_config_to_miners(self, params: dict) -> dict:
+        """同步当前配置到运行中的 miner"""
+        if not self.miner_manager:
+            return {}
+        running = self.miner_manager.running_miners()
+        if not running:
+            return {}
+        reconnect_delay = self._config_data.get("reconnect_delay_seconds", 8)
+        task_interval = self._config_data.get("task_query_interval_seconds", 30)
+        notify_on_task_complete = self._config_data.get("notify_on_task_complete", True)
+        task_ids = self._config_data.get("task_ids", [])
+        notify_urls = self._config_data.get("notify_urls", [])
+        for miner in running:
+            if reconnect_delay > 0:
+                miner.config.reconnect_delay_seconds = reconnect_delay
+            if task_interval > 0:
+                miner.config.task_query_interval_seconds = task_interval
+            miner.config.notify_on_task_complete = notify_on_task_complete
+            if task_ids != miner.config.task_ids:
+                miner.config.task_ids = task_ids
+            if notify_urls != miner.config.notify_urls:
+                miner.update_notifier(notify_urls)
+        return {}
+
+    async def _shutdown(self, params: dict) -> dict:
+        """应用关闭时清理浏览器资源"""
+        try:
+            from overwatch_drops_miner.gui_parts.browser_actions import BrowserActions
+            ba = BrowserActions()
+            closed = ba.shutdown(timeout=3.0)
+            if not closed:
+                print("[Sidecar] 浏览器嗅探线程未在预算时间内退出", file=sys.stderr)
+        except Exception as e:
+            print(f"[Sidecar] 关闭浏览器嗅探失败: {e}", file=sys.stderr)
+        return {}
 
     async def _send_notification(self, params: dict) -> dict:
         """发送通知"""
