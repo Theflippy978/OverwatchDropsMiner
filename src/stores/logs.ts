@@ -49,6 +49,15 @@ export const useLogsStore = defineStore("logs", () => {
     logs.value = [];
   }
 
+  function clearByAccount(accountId: string) {
+    buffer.length = 0;
+    if (flushTimer !== null) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
+    logs.value = logs.value.filter((l) => l.account_id !== accountId);
+  }
+
   function setFilter(accountId: string | null) {
     filterAccountId.value = accountId;
   }
@@ -75,5 +84,5 @@ export const useLogsStore = defineStore("logs", () => {
     clear();
   }
 
-  return { logs, filteredLogs, filterAccountId, addLog, clear, setFilter, initListeners, dispose };
+  return { logs, filteredLogs, filterAccountId, addLog, clear, clearByAccount, setFilter, initListeners, dispose };
 });

@@ -228,6 +228,8 @@ class PythonSidecar:
             "shutdown": self._shutdown,
             "check_update": self._check_update,
             "detect_browsers": self._detect_browsers,
+            "update_notify_urls": self._update_notify_urls,
+            "stop_all": self._stop_all,
         }
         
         handler = handlers.get(command)
@@ -689,15 +691,20 @@ class PythonSidecar:
         self._sniff_busy = True
         sniff_cancel = threading.Event()
         try:
-            from overwatch_drops_miner.gui_parts.browser_sniffer import start_browser_sniff
-            
+            from overwatch_drops_miner.gui_parts.browser_sniffer import start_browser_sniff, select_login_cookies
+
             self._browser_capture_result = None
             self._browser_capture_event = threading.Event()
-            
+
             def on_cookies(cookies: list[dict[str, Any]]) -> None:
                 """Cookie 捕获回调"""
-                # 构建 Cookie 字符串
-                cookie_parts = [f"{c['name']}={c['value']}" for c in cookies]
+                filtered = select_login_cookies(cookies)
+                if not filtered:
+                    self._browser_capture_result = {"error": "未获取到有效登录 Cookie，请确认已登录 B 站"}
+                    if self._browser_capture_event:
+                        self._browser_capture_event.set()
+                    return
+                cookie_parts = [f"{c['name']}={c['value']}" for c in filtered]
                 cookie_str = "; ".join(cookie_parts)
                 self._browser_capture_result = {"cookie": cookie_str}
                 if self._browser_capture_event:
@@ -968,11 +975,26 @@ class PythonSidecar:
         except Exception as e:
             return {"error": f"检测浏览器失败: {e}"}
 
+    async def _stop_all(self, params: dict) -> dict:
+        if not self.miner_manager:
+            return {"error": "后端未初始化"}
+        self.miner_manager.stop_all(force=False)
+        return {"success": True}
+
+    async def _update_notify_urls(self, params: dict) -> dict:
+        urls = params.get("urls", [])
+        if not isinstance(urls, list):
+            return {"error": "urls 必须是数组"}
+        self._config_data["notify_urls"] = [str(u).strip() for u in urls if str(u).strip()]
+        self._save_config_file()
+        return {"success": True, "urls": self._config_data["notify_urls"]}
+
     async def _check_update(self, params: dict) -> dict:
         try:
             from overwatch_drops_miner.gui_parts.update_checker import check_latest_release
+            from overwatch_drops_miner._version import APP_VERSION
             result = check_latest_release(
-                app_version="0.1.0",
+                app_version=APP_VERSION,
                 update_channel="release",
                 latest_release_api="https://api.github.com/repos/OverwatchDropsMiner/OverwatchDropsMiner/releases/latest",
                 releases_url="https://github.com/OverwatchDropsMiner/OverwatchDropsMiner/releases",

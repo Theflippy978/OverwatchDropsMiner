@@ -23,6 +23,23 @@ const showQrLogin = ref(false);
 const themeFollowSystem = ref(true);
 let themePollTimer: number | null = null;
 
+const THEME_KEY = "ui/theme";
+
+function getSavedTheme(): string | null {
+  try {
+    return localStorage.getItem(THEME_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function saveTheme(theme: string) {
+  try {
+    localStorage.setItem(THEME_KEY, theme);
+  } catch {
+  }
+}
+
 const showUpdateDialog = ref(false);
 const updateLatestVersion = ref("");
 const updateReleaseUrl = ref("");
@@ -37,7 +54,13 @@ onMounted(async () => {
   await accountsStore.fetchAccounts();
   await configStore.ensureLoaded();
 
-  darkMode.value = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const savedTheme = getSavedTheme();
+  if (savedTheme === "dark" || savedTheme === "light") {
+    darkMode.value = savedTheme === "dark";
+    themeFollowSystem.value = false;
+  } else {
+    darkMode.value = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  }
   updateTheme();
   startSystemThemePolling();
   restoreWindowGeometry();
@@ -147,6 +170,7 @@ function toggleTheme() {
   themeFollowSystem.value = false;
   darkMode.value = !darkMode.value;
   updateTheme();
+  saveTheme(darkMode.value ? "dark" : "light");
 }
 
 function startSystemThemePolling() {

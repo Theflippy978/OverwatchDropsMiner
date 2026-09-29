@@ -28,6 +28,8 @@ const renameTargetId = ref("");
 const renameValue = ref("");
 const renaming = ref(false);
 
+const showCaptureConfirm = ref(false);
+
 const pendingAction = ref("");
 
 function pendingLabel(accountId: string, idle: string) {
@@ -50,18 +52,6 @@ async function handleRenameAccount() {
     showRenameDialog.value = false;
   } finally {
     renaming.value = false;
-  }
-}
-
-async function handleBrowserCapture() {
-  capturing.value = true;
-  try {
-    const cookie = await accountsStore.browserCapture();
-    if (cookie) newCookie.value = cookie;
-  } catch {
-    // 捕获失败时保持输入框原内容
-  } finally {
-    capturing.value = false;
   }
 }
 
@@ -112,6 +102,19 @@ async function handleStop(accountId: string) {
     pendingAction.value = "";
   }
 }
+
+function handleCaptureCookie() {
+  showCaptureConfirm.value = true;
+}
+
+function confirmCaptureCookie() {
+  showCaptureConfirm.value = false;
+  accountsStore.browserCapture();
+}
+
+function cancelCaptureCookie() {
+  showCaptureConfirm.value = false;
+}
 </script>
 
 <template>
@@ -149,7 +152,7 @@ async function handleStop(accountId: string) {
                   size="sm"
                   class="mt-2 h-7 w-full text-xs"
                   :disabled="capturing"
-                  @click="handleBrowserCapture"
+                  @click="handleCaptureCookie"
                 >
                   {{ capturing ? "捕获中，请在浏览器完成登录..." : "从浏览器捕获" }}
                 </Button>
@@ -222,9 +225,16 @@ async function handleStop(accountId: string) {
               <span
                 class="h-2.5 w-2.5 rounded-full"
                 :class="account.running ? 'bg-green-500' : 'bg-muted'"
+                :title="account.running ? '运行中' : '未运行'"
               />
               <div>
-                <p class="text-sm font-medium">{{ account.remark }}</p>
+                <p
+                  class="text-sm font-medium"
+                  :class="account.running ? 'text-green-500' : 'text-foreground'"
+                  :title="account.running ? '运行中' : '未运行'"
+                >
+                  {{ account.remark }}
+                </p>
                 <p class="text-xs text-muted-foreground">{{ account.id.slice(0, 12) }}...</p>
               </div>
             </div>
@@ -272,5 +282,24 @@ async function handleStop(accountId: string) {
       </ScrollArea>
     </CardContent>
   </Card>
+
+  <Dialog v-model:open="showCaptureConfirm">
+    <DialogContent class="sm:max-w-md">
+      <DialogHeader>
+        <DialogTitle>从浏览器捕获 Cookie</DialogTitle>
+        <DialogDescription>
+          即将打开浏览器捕获 B 站 Cookie，请确保已登录 B 站。捕获过程可能需要 1-2 分钟。
+        </DialogDescription>
+      </DialogHeader>
+      <div class="flex justify-end gap-2">
+        <Button variant="outline" size="sm" @click="cancelCaptureCookie">
+          取消
+        </Button>
+        <Button size="sm" @click="confirmCaptureCookie">
+          确认捕获
+        </Button>
+      </div>
+    </DialogContent>
+  </Dialog>
 </template>
 

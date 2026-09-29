@@ -51,6 +51,8 @@ const refreshing = ref(false);
 const claiming = ref(false);
 const actionError = ref("");
 const estimatedRemaining = ref<number | null>(null);
+const refreshQueued = ref(false);
+const claimQueued = ref(false);
 
 const configStore = useConfigStore();
 // 已自动领取过的任务 ID（对齐原 _auto_claim_handled_ids：防领取后状态
@@ -101,7 +103,11 @@ function statusClass(status: string) {
 }
 
 async function handleRefresh() {
-  if (refreshing.value) return;
+  if (refreshing.value) {
+    refreshQueued.value = true;
+    statusText.value = "已有刷新进行中，已排队下一次刷新...";
+    return;
+  }
   refreshing.value = true;
   actionError.value = "";
   try {
@@ -115,6 +121,10 @@ async function handleRefresh() {
     actionError.value = `刷新任务失败: ${e}`;
   } finally {
     refreshing.value = false;
+    if (refreshQueued.value) {
+      refreshQueued.value = false;
+      void handleRefresh();
+    }
   }
 }
 
@@ -132,7 +142,10 @@ function maybeAutoClaim() {
 }
 
 async function handleClaim(automatic = false) {
-  if (claiming.value) return;
+  if (claiming.value) {
+    claimQueued.value = true;
+    return;
+  }
   claiming.value = true;
   actionError.value = "";
   try {
@@ -153,6 +166,10 @@ async function handleClaim(automatic = false) {
     actionError.value = `${automatic ? "自动领取" : "领取奖励"}失败: ${e}`;
   } finally {
     claiming.value = false;
+    if (claimQueued.value) {
+      claimQueued.value = false;
+      void handleClaim(automatic);
+    }
   }
 }
 

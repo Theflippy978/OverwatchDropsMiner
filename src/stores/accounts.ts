@@ -27,8 +27,15 @@ export const useAccountsStore = defineStore("accounts", () => {
   }
 
   async function removeAccount(accountId: string) {
+    const account = accounts.value.find((a) => a.id === accountId);
+    if (account?.running) {
+      await invoke("stop_miner", { accountId });
+    }
     await invoke("remove_account", { accountId });
     accounts.value = accounts.value.filter((a) => a.id !== accountId);
+    if (selectedAccountId.value === accountId) {
+      selectedAccountId.value = null;
+    }
   }
 
   async function renameAccount(accountId: string, remark: string): Promise<Account> {
