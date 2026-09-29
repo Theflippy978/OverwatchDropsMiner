@@ -17,6 +17,7 @@ fn main() {
             commands::get_accounts,
             commands::add_account,
             commands::remove_account,
+            commands::rename_account,
             commands::start_miner,
             commands::stop_miner,
             commands::get_account_status,

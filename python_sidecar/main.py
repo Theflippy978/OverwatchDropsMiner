@@ -40,6 +40,26 @@ class PythonSidecar:
             print(f"[Sidecar] 后端初始化失败: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc()
+        finally:
+            # 日志统一走 stderr（stdout 是 JSON IPC 通道，不能被污染）
+            self._setup_logging(False)
+
+    def _setup_logging(self, verbose: bool) -> None:
+        """初始化/重建日志输出到 stderr"""
+        try:
+            from overwatch_drops_miner.logging_utils import setup_logging
+            setup_logging(verbose=verbose, no_color=True)
+        except Exception as e:
+            print(f"[Sidecar] 初始化日志失败: {e}", file=sys.stderr)
+
+    def _apply_verbose(self, verbose: bool) -> None:
+        """详细日志开关即时生效（不重建 handler，仅切换级别与格式）"""
+        try:
+            from overwatch_drops_miner.logging_utils import apply_verbose_runtime
+            apply_verbose_runtime(verbose=verbose, no_color=True)
+            print(f"[Sidecar] verbose = {verbose}", file=sys.stderr)
+        except Exception as e:
+            print(f"[Sidecar] 切换详细日志失败: {e}", file=sys.stderr)
     
     def _build_config(self, cookie: str):
         """构建 miner 配置"""
@@ -81,6 +101,7 @@ class PythonSidecar:
             "get_accounts": self._get_accounts,
             "add_account": self._add_account,
             "remove_account": self._remove_account,
+            "rename_account": self._rename_account,
             "start_miner": self._start_miner,
             "stop_miner": self._stop_miner,
             "get_account_status": self._get_account_status,
@@ -145,7 +166,27 @@ class PythonSidecar:
             self.account_store.remove(account_id)
         
         return {}
-    
+
+    async def _rename_account(self, params: dict) -> dict:
+        """重命名账号备注"""
+        account_id = params.get("account_id", "")
+        remark = str(params.get("remark", "")).strip()
+
+        if not account_id:
+            return {"error": "账号 ID 不能为空"}
+        if not self.account_store:
+            return {"error": "后端未初始化"}
+
+        account = self.account_store.update(account_id, remark=remark)
+        if account is None:
+            return {"error": "账号不存在"}
+
+        return {
+            "id": account.id,
+            "remark": account.remark or account.id[:8],
+            "running": self.miner_manager.is_running(account.id) if self.miner_manager else False,
+        }
+
     async def _start_miner(self, params: dict) -> dict:
         """启动 miner"""
         account_id = params.get("account_id", "")
@@ -213,6 +254,7 @@ class PythonSidecar:
     async def _save_config(self, params: dict) -> dict:
         """保存配置"""
         config = params.get("config", {})
+        verbose = bool(config.get("verbose", False))
         self._config_data = {
             "room_ids": [int(x) for x in config.get("room_ids", [])],
             "thread_count": int(config.get("thread_count", 60)),
@@ -220,9 +262,14 @@ class PythonSidecar:
             "task_ids": config.get("task_ids", []),
             "task_query_interval_seconds": int(config.get("task_query_interval_seconds", 30)),
             "notify_urls": config.get("notify_urls", []),
+            "notify_on_task_complete": bool(config.get("notify_on_task_complete", True)),
+            "auto_claim_rewards": bool(config.get("auto_claim_rewards", False)),
+            "verbose": verbose,
         }
+        # 详细日志开关保存后立即生效
+        self._apply_verbose(verbose)
         return {}
-    
+
     async def _load_config(self, params: dict) -> dict:
         """加载配置"""
         return {
@@ -233,9 +280,9 @@ class PythonSidecar:
             "task_ids_text": ",".join(self._config_data.get("task_ids", [])),
             "task_query_interval_text": str(self._config_data.get("task_query_interval_seconds", 30)),
             "notify_urls_text": ",".join(self._config_data.get("notify_urls", [])),
-            "notify_on_task_complete": True,
-            "verbose": False,
-            "auto_claim_rewards": False,
+            "notify_on_task_complete": self._config_data.get("notify_on_task_complete", True),
+            "verbose": self._config_data.get("verbose", False),
+            "auto_claim_rewards": self._config_data.get("auto_claim_rewards", False),
         }
     
     async def _qr_login(self, params: dict) -> dict:

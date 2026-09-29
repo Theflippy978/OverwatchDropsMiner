@@ -6,12 +6,16 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL%20v3-blue.svg" alt="License: GPL v3"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.10%2B-blue.svg" alt="Python 3.10+"></a>
+  <a href="https://tauri.app"><img src="https://img.shields.io/badge/Tauri-2-black.svg" alt="Tauri 2"></a>
+  <a href="https://vuejs.org"><img src="https://img.shields.io/badge/Vue-3-42b883.svg" alt="Vue 3"></a>
   <a href="https://wiki.qt.io/Qt_for_Python"><img src="https://img.shields.io/badge/PySide-6.5%2B-green.svg" alt="PySide6"></a>
   <a href="https://github.com/Theflippy/OverwatchDropsMiner"><img src="https://img.shields.io/badge/Platform-Windows-lightgrey.svg" alt="Platform"></a>
 </p>
 
 > 基于 [BiliBiliDropsMiner](https://github.com/mi0e/BiliBiliDropsMiner) 二次改造  
 > 专为守望先锋直播掉宝设计的自动化挂机工具，支持多账号管理、扫码登录、自动领取奖励、实时日志监控。
+
+> **当前 `refactorUI` 分支**：界面已重构为 **Tauri 2 + Vue 3 + shadcn-vue**，Python 后端改为 sidecar 进程通过 stdin/stdout 与 Tauri 通信；`main` 分支仍为原 PySide6 版本。两版共用 `overwatch_drops_miner/` 核心包。
 
 ---
 
@@ -88,7 +92,83 @@ python build.py --clean
 
 ---
 
+## 新版开发：Tauri 2 + Vue 3（refactorUI 分支）
+
+新版界面使用 Tauri 2（Rust）+ Vue 3 + TypeScript + shadcn-vue + Tailwind CSS v4，状态管理用 Pinia；
+Python 侧业务逻辑保留为 sidecar 进程（`python_sidecar/main.py`），通过 stdin/stdout JSON 与 Tauri 通信，
+stdout 只承载 JSON 协议，日志统一输出到 stderr。
+
+### 技术栈
+
+| 层 | 技术 |
+|----|------|
+| 桌面框架 | Tauri 2 (Rust 1.98) |
+| 前端 | Vue 3 + Vite + TypeScript（`noUnusedLocals` / `noUnusedParameters` 严格检查） |
+| UI | shadcn-vue + Tailwind CSS v4（底层 reka-ui） |
+| 状态管理 | Pinia |
+| 后端 | Python 3.14 sidecar（复用 `overwatch_drops_miner/` 核心包） |
+
+### 环境准备
+
+```powershell
+cd OverwatchDropsMiner
+npm install
+```
+
+编译 Rust 需要 MSVC 环境（本机路径示例，按实际安装版本调整）：
+
+```powershell
+$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$msvcBin = "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64"
+$env:Path = "$msvcBin;$env:Path"
+$sdkPath = "C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0"
+$env:LIB = "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\lib\x64;$sdkPath\um\x64;$sdkPath\ucrt\x64"
+$env:INCLUDE = "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include;$sdkPath\ucrt;$sdkPath\um;$sdkPath\shared"
+```
+
+### 开发命令
+
+| 命令 | 说明 |
+|------|------|
+| `npm run build` | 前端类型检查 + 打包（`vue-tsc --noEmit && vite build`），提交前必须全绿 |
+| `npx vue-tsc --noEmit` | 仅类型检查（排查 TS6133 / TS2xxx） |
+| `npm run tauri dev` | 开发模式（长驻进程） |
+| `npm run tauri build` | 构建发布版 |
+| `python python_sidecar/main.py` | 单独运行 sidecar（stdin/stdout JSON 协议） |
+
+### 通信协议
+
+```text
+Tauri  ──{"command":"xxx","params":{...}}──▶  sidecar stdin
+Tauri  ◀──────{"...":...}（响应）──────────  sidecar stdout
+Tauri  ◀──{"type":"event","event":"log-entry","data":{...}}（事件推送）
+前端   ◀── Tauri event（listen 转发 sidecar 事件）
+```
+
+---
+
 ## 架构概览
+
+### 新版（refactorUI 分支：Tauri 2 + Vue 3）
+
+```text
+OverwatchDropsMiner/
+├── src-tauri/                 # Rust 后端
+│   └── src/
+│       ├── main.rs            # 入口，.setup() 注册 SidecarManager
+│       └── commands.rs        # SidecarManager + Tauri commands（进程管理/IPC 转发）
+├── src/                       # Vue 3 前端
+│   ├── components/            # 业务组件（AccountList / ConfigForm / LogViewer / ...）
+│   ├── components/ui/         # shadcn-vue 组件
+│   ├── stores/                # Pinia（accounts / config / logs）
+│   ├── lib/                   # types.ts / utils.ts
+│   └── App.vue                # 主界面
+├── python_sidecar/main.py     # Python sidecar（IPC 路由 + 事件推送）
+├── overwatch_drops_miner/     # 核心包（新旧两版共用）
+└── img/                       # 图标与截图
+```
+
+### 经典版（main 分支：PySide6）
 
 ```text
 OverwatchDropsMiner/

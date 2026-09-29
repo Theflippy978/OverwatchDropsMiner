@@ -18,6 +18,29 @@ const newCookie = ref("");
 const adding = ref(false);
 const capturing = ref(false);
 
+const showRenameDialog = ref(false);
+const renameTargetId = ref("");
+const renameValue = ref("");
+const renaming = ref(false);
+
+function openRenameDialog(accountId: string, currentRemark: string) {
+  renameTargetId.value = accountId;
+  renameValue.value = currentRemark;
+  showRenameDialog.value = true;
+}
+
+async function handleRenameAccount() {
+  const remark = renameValue.value.trim();
+  if (!remark || !renameTargetId.value) return;
+  renaming.value = true;
+  try {
+    await accountsStore.renameAccount(renameTargetId.value, remark);
+    showRenameDialog.value = false;
+  } finally {
+    renaming.value = false;
+  }
+}
+
 async function handleBrowserCapture() {
   capturing.value = true;
   try {
@@ -112,6 +135,36 @@ async function handleStop(accountId: string) {
             </div>
           </DialogContent>
         </Dialog>
+
+        <Dialog v-model:open="showRenameDialog">
+          <DialogContent class="sm:max-w-sm">
+            <DialogHeader>
+              <DialogTitle>重命名账号</DialogTitle>
+              <DialogDescription>
+                修改该账号的备注名称，便于区分多个账号
+              </DialogDescription>
+            </DialogHeader>
+            <div class="space-y-4 py-4">
+              <div class="space-y-2">
+                <label class="text-sm font-medium">备注名称</label>
+                <Input
+                  v-model="renameValue"
+                  placeholder="输入新的备注名称..."
+                  maxlength="32"
+                  @keyup.enter="handleRenameAccount"
+                />
+              </div>
+              <div class="flex justify-end gap-2">
+                <Button variant="outline" size="sm" @click="showRenameDialog = false">
+                  取消
+                </Button>
+                <Button size="sm" :disabled="renaming || !renameValue.trim()" @click="handleRenameAccount">
+                  {{ renaming ? "保存中..." : "保存" }}
+                </Button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
       </div>
     </CardHeader>
     <CardContent class="pt-0">
@@ -156,6 +209,14 @@ async function handleStop(accountId: string) {
                 @click="handleStop(account.id)"
               >
                 停止
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                class="h-7 text-xs text-muted-foreground hover:text-foreground"
+                @click="openRenameDialog(account.id, account.remark)"
+              >
+                改名
               </Button>
               <Button
                 size="sm"

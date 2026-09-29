@@ -173,6 +173,24 @@ pub async fn remove_account(account_id: String, sidecar: tauri::State<'_, Sideca
 }
 
 #[tauri::command]
+pub async fn rename_account(
+    account_id: String,
+    remark: String,
+    sidecar: tauri::State<'_, SidecarManager>,
+) -> Result<Account, String> {
+    let resp = sidecar.call("rename_account", serde_json::json!({
+        "account_id": account_id,
+        "remark": remark,
+    }))?;
+
+    Ok(Account {
+        id: resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        remark: resp.get("remark").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        running: resp.get("running").and_then(|v| v.as_bool()).unwrap_or(false),
+    })
+}
+
+#[tauri::command]
 pub async fn start_miner(account_id: String, config: MinerConfig, sidecar: tauri::State<'_, SidecarManager>) -> Result<(), String> {
     sidecar.call("start_miner", serde_json::json!({
         "account_id": account_id,

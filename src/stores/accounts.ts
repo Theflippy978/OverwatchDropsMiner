@@ -28,6 +28,13 @@ export const useAccountsStore = defineStore("accounts", () => {
     accounts.value = accounts.value.filter((a) => a.id !== accountId);
   }
 
+  async function renameAccount(accountId: string, remark: string): Promise<Account> {
+    const account = await invoke<Account>("rename_account", { accountId, remark });
+    const index = accounts.value.findIndex((a) => a.id === accountId);
+    if (index >= 0) accounts.value[index] = account;
+    return account;
+  }
+
   async function startMiner(accountId: string, config: any) {
     await invoke("start_miner", { accountId, config });
     const account = accounts.value.find((a) => a.id === accountId);
@@ -55,6 +62,7 @@ export const useAccountsStore = defineStore("accounts", () => {
     fetchAccounts,
     addAccount,
     removeAccount,
+    renameAccount,
     startMiner,
     stopMiner,
     getStatus,
