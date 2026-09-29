@@ -67,6 +67,7 @@ pub struct GuiConfigValues {
 // Python sidecar 进程管理
 pub struct SidecarManager {
     child: Arc<Mutex<Option<std::process::Child>>>,
+    app_handle: tauri::AppHandle,
 }
 
 impl SidecarManager {
@@ -132,12 +133,6 @@ impl SidecarManager {
         }
         
         Ok(response)
-    }
-}
-
-impl Default for SidecarManager {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

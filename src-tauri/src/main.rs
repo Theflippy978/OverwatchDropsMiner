@@ -8,7 +8,11 @@ use tauri::Manager;
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(commands::SidecarManager::new(app.handle().clone()))
+        .setup(|app| {
+            let app_handle = app.handle().clone();
+            app.manage(commands::SidecarManager::new(app_handle));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_accounts,
             commands::add_account,

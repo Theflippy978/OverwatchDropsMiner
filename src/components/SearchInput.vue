@@ -40,7 +40,7 @@ const searchQuery = ref("");
     </svg>
     <Input
       v-model="currentValue"
-      :placeholder="placeholder || "搜索...""
+      :placeholder="placeholder || '搜索...'"
       class="pl-9"
     />
   </div>
