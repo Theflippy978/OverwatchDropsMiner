@@ -26,6 +26,8 @@ interface TaskGroup {
 const fetchingRoom = ref(false);
 const fetchingTasks = ref(false);
 const fetchError = ref("");
+const saveNotice = ref("");
+const saveNoticeError = ref(false);
 
 const showGroupDialog = ref(false);
 const pendingGroups = ref<TaskGroup[]>([]);
@@ -47,26 +49,50 @@ onMounted(async () => {
 });
 
 async function handleSave() {
-  await configStore.save();
+  saveNotice.value = "";
+  try {
+    await configStore.save();
+    saveNotice.value = "配置已保存";
+    saveNoticeError.value = false;
+  } catch (e) {
+    saveNotice.value = `保存配置失败: ${e}`;
+    saveNoticeError.value = true;
+  }
 }
 
 async function handleExport() {
-  const filePath = await save({
-    defaultPath: "config.json",
-    filters: [{ name: "JSON", extensions: ["json"] }],
-  });
-  if (!filePath) return;
-  await invoke("export_config", { path: filePath });
+  saveNotice.value = "";
+  try {
+    const filePath = await save({
+      defaultPath: "config.json",
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (!filePath) return;
+    await invoke("export_config", { path: filePath });
+    saveNotice.value = "配置已导出";
+    saveNoticeError.value = false;
+  } catch (e) {
+    saveNotice.value = `导出配置失败: ${e}`;
+    saveNoticeError.value = true;
+  }
 }
 
 async function handleImport() {
-  const filePath = await open({
-    multiple: false,
-    filters: [{ name: "JSON", extensions: ["json"] }],
-  });
-  if (!filePath || typeof filePath !== "string") return;
-  await invoke("import_config", { path: filePath });
-  await configStore.load();
+  saveNotice.value = "";
+  try {
+    const filePath = await open({
+      multiple: false,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (!filePath || typeof filePath !== "string") return;
+    await invoke("import_config", { path: filePath });
+    await configStore.load();
+    saveNotice.value = "配置已导入";
+    saveNoticeError.value = false;
+  } catch (e) {
+    saveNotice.value = `导入配置失败: ${e}`;
+    saveNoticeError.value = true;
+  }
 }
 
 function firstRoomId(): number {
@@ -246,6 +272,11 @@ function selectBrowser(browser: string) {
   showBrowserDialog.value = false;
   executePendingAction(browser);
 }
+
+function cancelBrowserPicker() {
+  showBrowserDialog.value = false;
+  pendingAction.value = null;
+}
 </script>
 
 <template>
@@ -365,6 +396,13 @@ function selectBrowser(browser: string) {
       >
         {{ fetchError }}
       </p>
+      <p
+        v-if="saveNotice"
+        class="mt-3 break-all text-xs"
+        :class="saveNoticeError ? 'text-red-500' : 'text-green-500'"
+      >
+        {{ saveNotice }}
+      </p>
       <p class="mt-2 text-xs text-muted-foreground">
         模式1：纯 HTTP 抓取直播间页面（需先填房间号）；模式2：浏览器嗅探（自动同时获取房间号）
       </p>
@@ -437,7 +475,7 @@ function selectBrowser(browser: string) {
           </button>
         </div>
         <div class="flex justify-end gap-2">
-          <Button variant="outline" size="sm" @click="showBrowserDialog = false">
+          <Button variant="outline" size="sm" @click="cancelBrowserPicker">
             取消
           </Button>
         </div>

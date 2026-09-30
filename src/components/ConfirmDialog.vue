@@ -18,6 +18,8 @@ const props = defineProps<{
   cancelText?: string;
   variant?: "default" | "destructive";
   loading?: boolean;
+  /** 单按钮提示场景可隐藏取消按钮（例如“无法关闭”提示） */
+  showCancel?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -44,6 +46,7 @@ const confirmButtonVariant = computed(() => props.variant || "default");
       
       <DialogFooter>
         <Button
+          v-if="showCancel !== false"
           variant="outline"
           :disabled="loading"
           @click="emit('cancel')"

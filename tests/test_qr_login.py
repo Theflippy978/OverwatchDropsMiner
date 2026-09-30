@@ -10,6 +10,12 @@ import unittest.mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import httpx
+import pytest
+
+# 本文件是唯一直接依赖 Qt 的测试：缺少 PySide6 的环境整体跳过，
+# 而不是收集期 ImportError（sidecar/Tauri 运行时不带 Qt）。
+pytest.importorskip("PySide6", reason="未安装 PySide6，跳过 Qt 相关用例")
+
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QWidget

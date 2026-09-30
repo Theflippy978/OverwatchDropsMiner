@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { getCurrentWindow, PhysicalSize, PhysicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { useAccountsStore } from "@/stores/accounts";
@@ -13,6 +13,7 @@ import TaskProgress from "@/components/TaskProgress.vue";
 import NotificationSettings from "@/components/NotificationSettings.vue";
 import QrLoginDialog from "@/components/QrLoginDialog.vue";
 import UpdateDialog from "@/components/UpdateDialog.vue";
+import ConfirmDialog from "@/components/ConfirmDialog.vue";
 
 const accountsStore = useAccountsStore();
 const configStore = useConfigStore();
@@ -48,6 +49,8 @@ function detectSystemTheme(): boolean {
 const showUpdateDialog = ref(false);
 const updateLatestVersion = ref("");
 const updateReleaseUrl = ref("");
+/** 运行中尝试关闭窗口时的模态提示（替代阻塞 WebView 的原生 alert） */
+const showCloseBlocked = ref(false);
 
 const anyRunning = computed(() =>
   accountsStore.accounts.some((a) => a.running)
@@ -91,7 +94,7 @@ function registerCloseHandler() {
   win.onCloseRequested(async (event) => {
     if (anyRunning.value) {
       event.preventDefault();
-      alert("存在正在运行或正在停止的挂宝账号，请等待其完全停止后再关闭窗口。");
+      showCloseBlocked.value = true;
       return;
     }
     saveWindowGeometry();
@@ -137,6 +140,12 @@ function stopTaskRefresh() {
     taskRefreshTimer = null;
   }
 }
+
+// 「任务查询间隔」改动后立即按新周期重建定时器
+watch(
+  () => configStore.config.task_query_interval_text,
+  () => startTaskRefresh()
+);
 
 async function checkUpdate() {
   try {
@@ -317,6 +326,18 @@ function selectAccount(accountId: string) {
       v-model:open="showUpdateDialog"
       :latest-version="updateLatestVersion"
       :release-url="updateReleaseUrl"
+    />
+
+    <!-- 运行中阻止关闭的模态提示 -->
+    <ConfirmDialog
+      :open="showCloseBlocked"
+      title="暂不能关闭"
+      message="存在正在运行或正在停止的挂宝账号，请等待其完全停止后再关闭窗口。"
+      confirm-text="知道了"
+      :show-cancel="false"
+      @update:open="showCloseBlocked = $event"
+      @confirm="showCloseBlocked = false"
+      @cancel="showCloseBlocked = false"
     />
   </div>
 </template>

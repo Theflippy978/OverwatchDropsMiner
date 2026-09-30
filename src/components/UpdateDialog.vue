@@ -20,10 +20,15 @@ const props = defineProps<{
 
 const downloading = ref(false);
 
-function handleDownload() {
+async function handleDownload() {
   downloading.value = true;
-  openUrl(props.releaseUrl);
-  downloading.value = false;
+  try {
+    await openUrl(props.releaseUrl);
+  } catch (e) {
+    alert(`打开下载页面失败: ${e}`);
+  } finally {
+    downloading.value = false;
+  }
 }
 </script>
 

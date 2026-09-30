@@ -50,10 +50,14 @@ export const useLogsStore = defineStore("logs", () => {
   }
 
   function clearByAccount(accountId: string) {
-    buffer.length = 0;
-    if (flushTimer !== null) {
-      clearTimeout(flushTimer);
-      flushTimer = null;
+    // 只清该账号：缓冲区里其它账号的日志要保留，不能被连带丢弃
+    if (buffer.length > 0) {
+      const kept = buffer.filter((l) => l.account_id !== accountId);
+      buffer.length = 0;
+      buffer.push(...kept);
+      if (kept.length > 0 && flushTimer === null) {
+        flushTimer = window.setTimeout(flush, 120);
+      }
     }
     logs.value = logs.value.filter((l) => l.account_id !== accountId);
   }

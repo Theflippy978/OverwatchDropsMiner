@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QSettings
-
 CONFIG_DIR_ENV_VAR = "OW_CONFIG_DIR"
 APP_DATA_DIR_NAME = "OverwatchDropsMiner"
 QSETTINGS_FILE_NAME = "gui.ini"
@@ -33,7 +31,18 @@ def get_accounts_path() -> Path:
 def create_qsettings(
     organization: str, application: str
 ) -> QSettings:
-    """Registry-backed settings by default; ini file under OW_CONFIG_DIR when isolated."""
+    """Registry-backed settings by default; ini file under OW_CONFIG_DIR when isolated.
+
+    PySide6 只在这里导入：sidecar / Tauri 运行时不需要 Qt，只有旧 Qt GUI
+    与 Qt 测试会走到这个函数。
+    """
+    try:
+        from PySide6.QtCore import QSettings
+    except ImportError as exc:  # pragma: no cover - 仅在缺少 Qt 的环境触发
+        raise RuntimeError(
+            "读取/写入 GUI 配置需要 PySide6，请先安装：pip install \"PySide6>=6.5,<7\""
+        ) from exc
+
     if is_isolated():
         config_dir = get_config_dir()
         config_dir.mkdir(parents=True, exist_ok=True)

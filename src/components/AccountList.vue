@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import ConfirmDialog from "@/components/ConfirmDialog.vue";
 
 const accountsStore = useAccountsStore();
 
@@ -30,6 +31,11 @@ const renaming = ref(false);
 
 const showCaptureConfirm = ref(false);
 
+const showRemoveConfirm = ref(false);
+const removeTargetId = ref("");
+const removeTargetRemark = ref("");
+const removing = ref(false);
+
 const pendingAction = ref("");
 
 function pendingLabel(accountId: string, idle: string) {
@@ -50,6 +56,8 @@ async function handleRenameAccount() {
   try {
     await accountsStore.renameAccount(renameTargetId.value, remark);
     showRenameDialog.value = false;
+  } catch (e) {
+    alert(`重命名失败: ${e}`);
   } finally {
     renaming.value = false;
   }
@@ -59,20 +67,41 @@ async function handleAddAccount() {
   if (!newCookie.value.trim()) return;
   adding.value = true;
   try {
-    await accountsStore.addAccount(newCookie.value.trim());
+    const account = await accountsStore.addAccount(newCookie.value.trim());
     newCookie.value = "";
     showAddDialog.value = false;
+    if (account) emit("select", account.id);
+  } catch (e) {
+    alert(`添加账号失败: ${e}`);
   } finally {
     adding.value = false;
   }
 }
 
-async function handleRemoveAccount(accountId: string) {
+function handleRemoveAccount(accountId: string) {
   const account = accountsStore.accounts.find((a) => a.id === accountId);
-  const remark = account?.remark || accountId.slice(0, 8);
-  if (confirm(`确定要删除账号「${remark}」吗？`)) {
-    await accountsStore.removeAccount(accountId);
+  removeTargetId.value = accountId;
+  removeTargetRemark.value = account?.remark || accountId.slice(0, 8);
+  showRemoveConfirm.value = true;
+}
+
+async function confirmRemoveAccount() {
+  if (!removeTargetId.value) return;
+  removing.value = true;
+  try {
+    await accountsStore.removeAccount(removeTargetId.value);
+    showRemoveConfirm.value = false;
+  } catch (e) {
+    alert(`删除账号失败: ${e}`);
+  } finally {
+    removing.value = false;
+    removeTargetId.value = "";
   }
+}
+
+function cancelRemoveAccount() {
+  showRemoveConfirm.value = false;
+  removeTargetId.value = "";
 }
 
 async function handleStart(accountId: string) {
@@ -94,6 +123,8 @@ async function handleStop(accountId: string) {
   pendingAction.value = `${accountId}:stop`;
   try {
     await accountsStore.stopMiner(accountId);
+  } catch (e) {
+    alert(`停止失败: ${e}`);
   } finally {
     pendingAction.value = "";
   }
@@ -109,7 +140,8 @@ async function confirmCaptureCookie() {
   try {
     const cookie = await accountsStore.browserCapture();
     if (cookie) {
-      await accountsStore.addAccount(cookie);
+      const account = await accountsStore.addAccount(cookie);
+      if (account) emit("select", account.id);
     }
   } catch (e) {
     alert(`捕获 Cookie 失败: ${e}`);
@@ -325,5 +357,18 @@ function cancelCaptureCookie() {
       </div>
     </DialogContent>
   </Dialog>
+
+  <!-- 删除账号确认（替代原生 confirm，避免阻塞 WebView） -->
+  <ConfirmDialog
+    :open="showRemoveConfirm"
+    title="删除账号"
+    :message="`确定要删除账号「${removeTargetRemark}」吗？该操作不可撤销。`"
+    confirm-text="删除"
+    variant="destructive"
+    :loading="removing"
+    @update:open="showRemoveConfirm = $event"
+    @confirm="confirmRemoveAccount"
+    @cancel="cancelRemoveAccount"
+  />
 </template>
 

@@ -6,6 +6,7 @@ import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { useTasksStore } from "@/stores/tasks";
+import { useConfigStore } from "@/stores/config";
 
 interface Reward {
   name: string;
@@ -28,6 +29,7 @@ const props = defineProps<{
 }>();
 
 const tasksStore = useTasksStore();
+const configStore = useConfigStore();
 const accountTasks = computed(() => tasksStore.getAccountTasks(props.accountId));
 
 const tasks = computed(() => accountTasks.value.tasks);
@@ -101,13 +103,19 @@ async function fetchStatus() {
     );
     watchTimeSeconds.value = status.watch_time_seconds;
     statusLine.value = status.status_line;
-    if (status.progress) {
-      progressPercent.value = status.progress.percent;
-    }
+    // 无进度数据时清零，避免停止后残留上一次的百分比
+    progressPercent.value = status.progress ? status.progress.percent : 0;
     estimatedRemaining.value = estimateRemaining();
   } catch {
     // 状态查询失败时保留上次数据
   }
+}
+
+/** 状态轮询周期：跟随「任务查询间隔」配置（10s~3600s） */
+function statusIntervalMs(): number {
+  const parsed = parseInt(configStore.config.task_query_interval_text, 10);
+  const seconds = isNaN(parsed) ? 30 : Math.max(10, Math.min(3600, parsed));
+  return seconds * 1000;
 }
 
 function startStatusTimer() {
@@ -115,7 +123,7 @@ function startStatusTimer() {
   void fetchStatus();
   statusTimer = window.setInterval(() => {
     void fetchStatus();
-  }, 10000);
+  }, statusIntervalMs());
 }
 
 function stopStatusTimer() {
@@ -136,7 +144,23 @@ watch(
 watch(
   () => props.running,
   (running) => {
-    if (running) startStatusTimer();
+    if (running) {
+      startStatusTimer();
+    } else {
+      // 停止后不再轮询，并清空观看态，避免残留上一次的进度
+      stopStatusTimer();
+      statusLine.value = "";
+      progressPercent.value = 0;
+      estimatedRemaining.value = null;
+    }
+  }
+);
+
+// 「任务查询间隔」改动后立即按新周期轮询
+watch(
+  () => configStore.config.task_query_interval_text,
+  () => {
+    if (props.running) startStatusTimer();
   }
 );
 

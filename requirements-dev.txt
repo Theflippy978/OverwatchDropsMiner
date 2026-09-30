@@ -1,0 +1,9 @@
+# 开发/测试依赖（CI 与 tests/run_tests.ps1 使用）
+-r requirements.txt
+
+pytest>=8,<9
+pytest-asyncio>=0.23,<2
+
+# 旧 Qt GUI 与 tests/test_qr_login.py 需要；sidecar/Tauri 运行时不需要。
+# 缺少 PySide6 时该测试文件整体 skip（见 tests/test_qr_login.py 的 importorskip）。
+PySide6>=6.5,<7

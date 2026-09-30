@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::sync::Mutex;
-use std::sync::Arc;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 use tauri::Emitter;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -150,17 +154,27 @@ pub struct GuiConfigValues {
 }
 
 // Python sidecar 进程管理
-// stdin/reader 必须跨 call 复用：每次新建 BufReader 会把预读缓冲里的
-// 后续行（响应或事件）一并丢弃，导致命令响应错位。
+// 并发模型（S4）：
+//   * 写 stdin 只在极短的锁内完成，锁不跨命令等待，命令之间不再互相阻塞；
+//   * 每个请求带自增 id，独立 reader 线程按 id 把响应投递给对应等待者；
+//   * 事件行（无 id 的 {"type":"event"}）由 reader 线程直接转发给前端；
+//   * 命令等待有 300s 上限（浏览器嗅探 120s / 领奖 180s 需要较长的窗口），
+//     超时后从挂起表移除，不会污染后续请求。
+const CALL_TIMEOUT: Duration = Duration::from_secs(300);
+
+type PendingMap = Arc<Mutex<HashMap<u64, Sender<Result<serde_json::Value, String>>>>>;
+
 struct SidecarProcess {
     #[allow(dead_code)]
     process: Child,
     stdin: ChildStdin,
-    reader: BufReader<ChildStdout>,
 }
 
 pub struct SidecarManager {
     child: Arc<Mutex<Option<SidecarProcess>>>,
+    pending: PendingMap,
+    next_id: Arc<AtomicU64>,
+    alive: Arc<AtomicBool>,
     app_handle: tauri::AppHandle,
 }
 
@@ -168,25 +182,28 @@ impl SidecarManager {
     pub fn new(app_handle: tauri::AppHandle) -> Self {
         SidecarManager {
             child: Arc::new(Mutex::new(None)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            next_id: Arc::new(AtomicU64::new(0)),
+            alive: Arc::new(AtomicBool::new(false)),
             app_handle,
         }
     }
-    
+
     pub fn start(&self) -> Result<(), String> {
         let mut child = self.child.lock().unwrap();
         if child.is_some() {
             return Ok(()); // 已经在运行
         }
-        
+
         // 修正路径：Tauri 的 current_dir() 是 src-tauri，需要回到项目根目录
         let sidecar_path = std::env::current_dir()
             .map_err(|e| e.to_string())?
             .parent()
             .ok_or("无法获取项目根目录")?
             .join("python_sidecar");
-        
+
         let python_exe = std::env::var("PYTHON_EXE").unwrap_or_else(|_| "python".to_string());
-        
+
         let mut process = Command::new(&python_exe)
             .arg(sidecar_path.join("main.py"))
             .stdin(Stdio::piped())
@@ -194,69 +211,157 @@ impl SidecarManager {
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| format!("启动 Python sidecar 失败: {}", e))?;
-        
+
         let stdin = process.stdin.take().ok_or("无法获取 sidecar stdin")?;
         let stdout = process.stdout.take().ok_or("无法获取 sidecar stdout")?;
-        
-        *child = Some(SidecarProcess {
-            process,
-            stdin,
-            reader: BufReader::new(stdout),
+
+        *child = Some(SidecarProcess { process, stdin });
+
+        // reader 线程独占 stdout，进程退出后唤醒所有等待者
+        self.alive.store(true, Ordering::SeqCst);
+        let pending = Arc::clone(&self.pending);
+        let alive = Arc::clone(&self.alive);
+        let app_handle = self.app_handle.clone();
+        thread::spawn(move || {
+            reader_loop(BufReader::new(stdout), pending, alive, app_handle);
         });
+
         Ok(())
     }
-    
+
+    /// 丢弃已退出的 sidecar，让下一次 call() 重新拉起
+    fn reset_process(&self) {
+        let mut guard = self.child.lock().unwrap();
+        if let Some(mut proc) = guard.take() {
+            let _ = proc.process.kill();
+            let _ = proc.process.wait();
+        }
+    }
+
     pub fn call(&self, command: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
         self.start()?;
-        
-        let mut guard = self.child.lock().unwrap();
-        let proc = guard.as_mut().ok_or("Sidecar 未运行")?;
-        
+
+        // 上一轮进程已退出：清掉残留并重启
+        if !self.alive.load(Ordering::SeqCst) {
+            self.reset_process();
+            self.start()?;
+        }
+
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = mpsc::channel();
+        self.pending.lock().unwrap().insert(id, tx);
+
         let request = serde_json::json!({
+            "id": id,
             "command": command,
             "params": params,
         });
-        
-        writeln!(proc.stdin, "{}", request)
-            .map_err(|e| format!("写入 sidecar 失败: {}", e))?;
-        
-        // 循环读取：跳过事件行（转发到前端），只把真正的响应返回给命令调用方
-        loop {
-            let mut line = String::new();
-            let read = proc
-                .reader
-                .read_line(&mut line)
-                .map_err(|e| format!("读取 sidecar 失败: {}", e))?;
-            if read == 0 {
-                return Err("sidecar 进程已退出".to_string());
+
+        // 只在写这一行时持锁，写完立即释放
+        let write_result = {
+            let mut guard = self.child.lock().unwrap();
+            match guard.as_mut() {
+                Some(proc) => writeln!(proc.stdin, "{}", request)
+                    .and_then(|_| proc.stdin.flush())
+                    .map_err(|e| format!("写入 sidecar 失败: {}", e)),
+                None => Err("Sidecar 未运行".to_string()),
             }
-            
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            
-            let value: serde_json::Value = serde_json::from_str(trimmed)
-                .map_err(|e| format!("解析 sidecar 响应失败: {}", e))?;
-            
-            if value.get("type").and_then(|v| v.as_str()) == Some("event") {
-                let event_name = value
-                    .get("event")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("sidecar-event");
-                let data = value.get("data").cloned().unwrap_or(serde_json::Value::Null);
-                if let Err(e) = self.app_handle.emit(event_name, &data) {
-                    eprintln!("转发 sidecar 事件失败: {}", e);
-                }
-                continue;
-            }
-            
-            if let Some(error) = value.get("error") {
-                return Err(error.as_str().unwrap_or("未知错误").to_string());
-            }
-            
-            return Ok(value);
+        };
+
+        if let Err(e) = write_result {
+            self.pending.lock().unwrap().remove(&id);
+            self.reset_process();
+            return Err(e);
         }
+
+        match rx.recv_timeout(CALL_TIMEOUT) {
+            Ok(result) => result,
+            Err(RecvTimeoutError::Timeout) => {
+                self.pending.lock().unwrap().remove(&id);
+                Err(format!(
+                    "sidecar 命令 {} 超时（{}s 未响应）",
+                    command,
+                    CALL_TIMEOUT.as_secs()
+                ))
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                self.pending.lock().unwrap().remove(&id);
+                Err("sidecar 进程已退出".to_string())
+            }
+        }
+    }
+}
+
+/// 独占 stdout 的读线程：事件转发前端，响应按 id 派发
+fn reader_loop(
+    reader: BufReader<ChildStdout>,
+    pending: PendingMap,
+    alive: Arc<AtomicBool>,
+    app_handle: tauri::AppHandle,
+) {
+    for line in reader.lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(e) => {
+                eprintln!("读取 sidecar 失败: {}", e);
+                break;
+            }
+        };
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let value: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(value) => value,
+            Err(e) => {
+                eprintln!("解析 sidecar 响应失败: {}（原始行: {}）", e, trimmed);
+                continue;
+            }
+        };
+
+        // 事件行没有 id，直接转发
+        if value.get("type").and_then(|v| v.as_str()) == Some("event") {
+            let event_name = value
+                .get("event")
+                .and_then(|v| v.as_str())
+                .unwrap_or("sidecar-event");
+            let data = value.get("data").cloned().unwrap_or(serde_json::Value::Null);
+            if let Err(e) = app_handle.emit(event_name, &data) {
+                eprintln!("转发 sidecar 事件失败: {}", e);
+            }
+            continue;
+        }
+
+        // 先把 id 取成 u64（Copy），再决定把 value 当成功值还是错误值
+        let id = value.get("id").and_then(|v| v.as_u64());
+
+        let result = match value.get("error") {
+            Some(error) if !error.is_null() => {
+                Err(error.as_str().unwrap_or("未知错误").to_string())
+            }
+            _ => Ok(value),
+        };
+
+        match id {
+            Some(id) => {
+                let waiter = pending.lock().unwrap().remove(&id);
+                match waiter {
+                    Some(tx) => {
+                        let _ = tx.send(result);
+                    }
+                    None => eprintln!("收到未知 id 的 sidecar 响应: {}", id),
+                }
+            }
+            None => eprintln!("缺少 id 的 sidecar 响应: {}", trimmed),
+        }
+    }
+
+    alive.store(false, Ordering::SeqCst);
+    let mut map = pending.lock().unwrap();
+    for (_, tx) in map.drain() {
+        let _ = tx.send(Err("sidecar 进程已退出".to_string()));
     }
 }
 
@@ -332,6 +437,9 @@ pub async fn get_account_status(account_id: String, sidecar: tauri::State<'_, Si
     let resp = sidecar.call("get_account_status", serde_json::json!({ "account_id": account_id }))?;
 
     let progress = resp.get("progress").and_then(|v| {
+        if v.is_null() {
+            return None;
+        }
         Some(ProgressValues {
             cur: v.get("cur").and_then(|x| x.as_f64()).unwrap_or(0.0),
             limit: v.get("limit").and_then(|x| x.as_f64()).unwrap_or(0.0),
@@ -339,12 +447,21 @@ pub async fn get_account_status(account_id: String, sidecar: tauri::State<'_, Si
         })
     });
 
+    // 任务级对象由 refresh_tasks 提供；sidecar 在这里预留 task_progress 键
+    let task_progress = resp
+        .get("task_progress")
+        .cloned()
+        .filter(|v| !v.is_null())
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| format!("解析任务进度失败: {}", e))?;
+
     Ok(AccountStatus {
         account_id: resp.get("account_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         running: resp.get("running").and_then(|v| v.as_bool()).unwrap_or(false),
         watch_time_seconds: resp.get("watch_time_seconds").and_then(|v| v.as_u64()).unwrap_or(0),
         status_line: resp.get("status_line").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        task_progress: None,
+        task_progress,
         progress,
     })
 }

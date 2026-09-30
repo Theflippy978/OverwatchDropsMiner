@@ -34,7 +34,18 @@ export interface AccountStatus {
   account_id: string;
   running: boolean;
   watch_time_seconds: number;
+  /** 后端格式化的状态行（与原 Qt 项目一致） */
+  status_line: string;
+  /** B 站掉宝进度数值（后端 progress 键） */
+  progress: ProgressValues | null;
+  /** 任务级进度对象（当前后端无数据，保留字段兼容） */
   task_progress: TaskProgress | null;
+}
+
+export interface ProgressValues {
+  cur: number;
+  limit: number;
+  percent: number;
 }
 
 export interface TaskProgress {

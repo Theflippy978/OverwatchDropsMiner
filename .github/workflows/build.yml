@@ -2,13 +2,16 @@ name: Build & Release
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, refactorUI]
     paths:
       - '.github/workflows/build.yml'
       - 'requirements.txt'
+      - 'requirements-dev.txt'
       - 'build.py'
       - 'main.py'
       - 'overwatch_drops_miner/**'
+      - 'python_sidecar/**'
+      - 'tests/**'
       - 'img/app.ico'
   workflow_dispatch:
     inputs:
@@ -105,6 +108,10 @@ jobs:
 
   build-windows:
     name: Windows GUI (PyInstaller onefile)
+    # 推送事件只跑上面的测试门禁；打包/发布仅在人工 workflow_dispatch 时执行。
+    # 注意：下面的 build.py / main.py 属于旧 PySide6 GUI，已不在本分支仓库中，
+    # 打包流程迁移属于「打包优化」后续轮次（本轮不动打包逻辑）。
+    if: github.event_name == 'workflow_dispatch'
     needs: [prepare, test]
     runs-on: windows-latest
     steps:

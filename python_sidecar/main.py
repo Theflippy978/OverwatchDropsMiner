@@ -17,6 +17,20 @@ project_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(project_root))
 
 
+def _clamp_int(value: Any, default: int, min_val: int, max_val: int) -> int:
+    """把文本框里的数值钳制到合法区间；非法/空值回落到默认值"""
+    try:
+        return max(min_val, min(max_val, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_task_ids_text(value: Any) -> str:
+    """任务 ID 文本去重 + 稳定排序（用于判断“输入是否真的变了”）"""
+    parts = [p.strip() for p in str(value).split(",") if p.strip()]
+    return ",".join(sorted(dict.fromkeys(parts)))
+
+
 class FrontendLogHandler(logging.Handler):
     """把后端日志转发为 stdout 上的 log-entry 事件（前端 LogViewer 显示）"""
 
@@ -59,6 +73,15 @@ class PythonSidecar:
         self._event_callbacks = []
         # stdout 是 JSON 协议通道：日志线程与响应线程并发写入必须串行化
         self._stdout_lock = threading.Lock()
+        # S4：命令协程之间、以及与轮询线程之间共享以下状态，逐个加锁
+        #   _config_lock     _config_data（RLock：保存路径里会嵌套取锁）
+        #   _qr_lock         扫码会话 _qr_api/_qr_key
+        #   _sniff_lock      浏览器嗅探单会话守卫与线程引用
+        #   _progress_lock   _progress_values 进度值缓存
+        self._config_lock = threading.RLock()
+        self._qr_lock = threading.Lock()
+        self._sniff_lock = threading.Lock()
+        self._progress_lock = threading.Lock()
         self._init_backend()
         self._browser_capture_result: dict | None = None
         self._browser_capture_event: threading.Event | None = None
@@ -143,18 +166,20 @@ class PythonSidecar:
                     if not notify_urls and data.get("notify_urls_text"):
                         from overwatch_drops_miner.utils import parse_url_list
                         notify_urls = parse_url_list(str(data.get("notify_urls_text", "")))
-                    self._config_data = {
-                        "room_ids": room_ids,
-                        "thread_count": data.get("thread_count", 60),
-                        "reconnect_delay_seconds": data.get("reconnect_delay_seconds", 8),
-                        "task_ids": task_ids,
-                        "task_query_interval_seconds": data.get("task_query_interval_seconds", 30),
-                        "notify_urls": notify_urls,
-                        "notify_on_task_complete": data.get("notify_on_task_complete", True),
-                        "auto_claim_rewards": data.get("auto_claim_rewards", False),
-                        "verbose": data.get("verbose", False),
-                    }
-                    self._apply_verbose(self._config_data.get("verbose", False))
+                    with self._config_lock:
+                        self._config_data = {
+                            "room_ids": room_ids,
+                            "thread_count": data.get("thread_count", 60),
+                            "reconnect_delay_seconds": data.get("reconnect_delay_seconds", 8),
+                            "task_ids": task_ids,
+                            "task_query_interval_seconds": data.get("task_query_interval_seconds", 30),
+                            "notify_urls": notify_urls,
+                            "notify_on_task_complete": data.get("notify_on_task_complete", True),
+                            "auto_claim_rewards": data.get("auto_claim_rewards", False),
+                            "verbose": data.get("verbose", False),
+                        }
+                        verbose = bool(self._config_data.get("verbose", False))
+                    self._apply_verbose(verbose)
                     print(f"[Sidecar] 配置已加载: {self._config_file}", file=sys.stderr)
         except Exception as e:
             print(f"[Sidecar] 加载配置文件失败: {e}", file=sys.stderr)
@@ -163,20 +188,22 @@ class PythonSidecar:
         try:
             from overwatch_drops_miner.gui_parts.config_io import build_config_payload
             from overwatch_drops_miner.config import MinerConfig
+            with self._config_lock:
+                data = dict(self._config_data)
             config = MinerConfig(
                 cookie="",
-                room_ids=self._config_data.get("room_ids", []),
-                thread_count=self._config_data.get("thread_count", 60),
-                reconnect_delay_seconds=self._config_data.get("reconnect_delay_seconds", 8),
+                room_ids=data.get("room_ids", []),
+                thread_count=data.get("thread_count", 60),
+                reconnect_delay_seconds=data.get("reconnect_delay_seconds", 8),
                 task_ids=[],  # task_ids 不落盘（决策 3）
-                task_query_interval_seconds=self._config_data.get("task_query_interval_seconds", 30),
-                notify_urls=self._config_data.get("notify_urls", []),
-                notify_on_task_complete=self._config_data.get("notify_on_task_complete", True),
+                task_query_interval_seconds=data.get("task_query_interval_seconds", 30),
+                notify_urls=data.get("notify_urls", []),
+                notify_on_task_complete=data.get("notify_on_task_complete", True),
             )
             payload = build_config_payload(
                 config,
-                verbose=self._config_data.get("verbose", False),
-                auto_claim_rewards=self._config_data.get("auto_claim_rewards", False),
+                verbose=data.get("verbose", False),
+                auto_claim_rewards=data.get("auto_claim_rewards", False),
             )
             from overwatch_drops_miner.gui_parts.config_io import save_config_data
             save_config_data(self._config_file, payload)
@@ -187,13 +214,14 @@ class PythonSidecar:
         """构建 miner 配置"""
         from overwatch_drops_miner.config import MinerConfig
 
-        room_ids = self._config_data.get("room_ids", [])
-        thread_count = self._config_data.get("thread_count", 60)
-        reconnect_delay = self._config_data.get("reconnect_delay_seconds", 8)
-        task_ids = self._config_data.get("task_ids", [])
-        task_interval = self._config_data.get("task_query_interval_seconds", 30)
-        notify_urls = self._config_data.get("notify_urls", [])
-        notify_on_task_complete = self._config_data.get("notify_on_task_complete", True)
+        with self._config_lock:
+            room_ids = self._config_data.get("room_ids", [])
+            thread_count = self._config_data.get("thread_count", 60)
+            reconnect_delay = self._config_data.get("reconnect_delay_seconds", 8)
+            task_ids = self._config_data.get("task_ids", [])
+            task_interval = self._config_data.get("task_query_interval_seconds", 30)
+            notify_urls = self._config_data.get("notify_urls", [])
+            notify_on_task_complete = self._config_data.get("notify_on_task_complete", True)
 
         return MinerConfig(
             cookie=cookie,
@@ -333,7 +361,8 @@ class PythonSidecar:
             self.account_store.remove(account_id)
 
         # 清理进度值缓存
-        self._progress_values.pop(account_id, None)
+        with self._progress_lock:
+            self._progress_values.pop(account_id, None)
 
         return {}
 
@@ -419,8 +448,9 @@ class PythonSidecar:
         if tracker:
             watch_time = int(tracker.elapsed_seconds())
 
-        # 从进度值缓存取 B 站进度
-        progress_values = self._progress_values.get(account_id, (0.0, 0.0))
+        # 从进度值缓存取 B 站进度（写者是刷新命令协程，读者是状态查询协程）
+        with self._progress_lock:
+            progress_values = self._progress_values.get(account_id, (0.0, 0.0))
         cur_value, limit_value = progress_values
         has_bili_data = bool(limit_value) or bool(cur_value)
 
@@ -442,7 +472,10 @@ class PythonSidecar:
             "running": running,
             "watch_time_seconds": watch_time,
             "status_line": status_line,
-            "task_progress": progress,
+            # progress：B 站进度数值（前端进度条用）
+            # task_progress：任务级进度对象，当前无数据，保留字段兼容旧契约
+            "progress": progress,
+            "task_progress": None,
         }
     
     async def _save_config(self, params: dict) -> dict:
@@ -459,36 +492,31 @@ class PythonSidecar:
         except ValueError as e:
             return {"error": str(e)}
 
-        # 解析任务 ID 文本
-        task_ids_text = str(config.get("task_ids_text", "")).strip()
+        # 解析任务 ID 文本（去重 + 稳定排序，避免仅顺序不同的输入被当成变更）
+        task_ids_text = _normalize_task_ids_text(config.get("task_ids_text", ""))
         task_ids = parse_task_ids(task_ids_text) if task_ids_text else []
 
         # 解析通知 URL 文本
         notify_urls_text = str(config.get("notify_urls_text", "")).strip()
         notify_urls = parse_url_list(notify_urls_text) if notify_urls_text else []
 
-        # 数值字段解析与钳制
-        def parse_int(value, default, min_val, max_val):
-            try:
-                return max(min_val, min(max_val, int(value)))
-            except (TypeError, ValueError):
-                return default
+        # 数值字段解析与钳制（越界/非法输入一律回落到默认值）
+        thread_count = _clamp_int(config.get("thread_count_text", "60"), 60, 1, 128)
+        reconnect_delay = _clamp_int(config.get("reconnect_delay_text", "8"), 8, 1, 3600)
+        task_interval = _clamp_int(config.get("task_query_interval_text", "30"), 30, 10, 3600)
 
-        thread_count = parse_int(config.get("thread_count_text", "60"), 60, 1, 128)
-        reconnect_delay = parse_int(config.get("reconnect_delay_text", "8"), 8, 1, 3600)
-        task_interval = parse_int(config.get("task_query_interval_text", "30"), 30, 10, 3600)
-
-        self._config_data = {
-            "room_ids": room_ids,
-            "thread_count": thread_count,
-            "reconnect_delay_seconds": reconnect_delay,
-            "task_ids": task_ids,
-            "task_query_interval_seconds": task_interval,
-            "notify_urls": notify_urls,
-            "notify_on_task_complete": bool(config.get("notify_on_task_complete", True)),
-            "auto_claim_rewards": bool(config.get("auto_claim_rewards", False)),
-            "verbose": verbose,
-        }
+        with self._config_lock:
+            self._config_data = {
+                "room_ids": room_ids,
+                "thread_count": thread_count,
+                "reconnect_delay_seconds": reconnect_delay,
+                "task_ids": task_ids,
+                "task_query_interval_seconds": task_interval,
+                "notify_urls": notify_urls,
+                "notify_on_task_complete": bool(config.get("notify_on_task_complete", True)),
+                "auto_claim_rewards": bool(config.get("auto_claim_rewards", False)),
+                "verbose": verbose,
+            }
         # 详细日志开关保存后立即生效
         self._apply_verbose(verbose)
         self._save_config_file()
@@ -496,17 +524,19 @@ class PythonSidecar:
 
     async def _load_config(self, params: dict) -> dict:
         """加载配置（含持久化文件）"""
+        with self._config_lock:
+            data = dict(self._config_data)
         return {
             "cookie": "",
-            "rooms_text": ",".join(str(x) for x in self._config_data.get("room_ids", [])),
-            "thread_count_text": str(self._config_data.get("thread_count", 60)),
-            "reconnect_delay_text": str(self._config_data.get("reconnect_delay_seconds", 8)),
-            "task_ids_text": ",".join(self._config_data.get("task_ids", [])),
-            "task_query_interval_text": str(self._config_data.get("task_query_interval_seconds", 30)),
-            "notify_urls_text": ",".join(self._config_data.get("notify_urls", [])),
-            "notify_on_task_complete": self._config_data.get("notify_on_task_complete", True),
-            "verbose": self._config_data.get("verbose", False),
-            "auto_claim_rewards": self._config_data.get("auto_claim_rewards", False),
+            "rooms_text": ",".join(str(x) for x in data.get("room_ids", [])),
+            "thread_count_text": str(data.get("thread_count", 60)),
+            "reconnect_delay_text": str(data.get("reconnect_delay_seconds", 8)),
+            "task_ids_text": ",".join(data.get("task_ids", [])),
+            "task_query_interval_text": str(data.get("task_query_interval_seconds", 30)),
+            "notify_urls_text": ",".join(data.get("notify_urls", [])),
+            "notify_on_task_complete": data.get("notify_on_task_complete", True),
+            "verbose": data.get("verbose", False),
+            "auto_claim_rewards": data.get("auto_claim_rewards", False),
         }
 
     async def _export_config(self, params: dict) -> dict:
@@ -517,20 +547,22 @@ class PythonSidecar:
         try:
             from overwatch_drops_miner.gui_parts.config_io import build_config_payload
             from overwatch_drops_miner.config import MinerConfig
+            with self._config_lock:
+                data = dict(self._config_data)
             config = MinerConfig(
                 cookie="",
-                room_ids=self._config_data.get("room_ids", []),
-                thread_count=self._config_data.get("thread_count", 60),
-                reconnect_delay_seconds=self._config_data.get("reconnect_delay_seconds", 8),
-                task_ids=self._config_data.get("task_ids", []),  # 导出文件含 task_ids
-                task_query_interval_seconds=self._config_data.get("task_query_interval_seconds", 30),
-                notify_urls=self._config_data.get("notify_urls", []),
-                notify_on_task_complete=self._config_data.get("notify_on_task_complete", True),
+                room_ids=data.get("room_ids", []),
+                thread_count=data.get("thread_count", 60),
+                reconnect_delay_seconds=data.get("reconnect_delay_seconds", 8),
+                task_ids=data.get("task_ids", []),  # 导出文件含 task_ids
+                task_query_interval_seconds=data.get("task_query_interval_seconds", 30),
+                notify_urls=data.get("notify_urls", []),
+                notify_on_task_complete=data.get("notify_on_task_complete", True),
             )
             payload = build_config_payload(
                 config,
-                verbose=self._config_data.get("verbose", False),
-                auto_claim_rewards=self._config_data.get("auto_claim_rewards", False),
+                verbose=data.get("verbose", False),
+                auto_claim_rewards=data.get("auto_claim_rewards", False),
             )
             from overwatch_drops_miner.gui_parts.config_io import save_config_data
             save_config_data(path, payload)
@@ -552,18 +584,21 @@ class PythonSidecar:
             room_ids = parse_room_ids(values.rooms_text) if values.rooms_text else []
             task_ids = parse_task_ids(values.task_ids_text) if values.task_ids_text else []
             notify_urls = parse_url_list(values.notify_urls_text) if values.notify_urls_text else []
-            self._config_data = {
-                "room_ids": room_ids,
-                "thread_count": int(values.thread_count_text or 60),
-                "reconnect_delay_seconds": int(values.reconnect_delay_text or 8),
-                "task_ids": task_ids,
-                "task_query_interval_seconds": int(values.task_query_interval_text or 30),
-                "notify_urls": notify_urls,
-                "notify_on_task_complete": values.notify_on_task_complete,
-                "auto_claim_rewards": values.auto_claim_rewards,
-                "verbose": values.verbose,
-            }
-            self._apply_verbose(self._config_data.get("verbose", False))
+            with self._config_lock:
+                self._config_data = {
+                    "room_ids": room_ids,
+                    # 导入文件里的数值同样钳制，避免越界值直接进 miner
+                    "thread_count": _clamp_int(values.thread_count_text, 60, 1, 128),
+                    "reconnect_delay_seconds": _clamp_int(values.reconnect_delay_text, 8, 1, 3600),
+                    "task_ids": task_ids,
+                    "task_query_interval_seconds": _clamp_int(values.task_query_interval_text, 30, 10, 3600),
+                    "notify_urls": notify_urls,
+                    "notify_on_task_complete": bool(values.notify_on_task_complete),
+                    "auto_claim_rewards": bool(values.auto_claim_rewards),
+                    "verbose": bool(values.verbose),
+                }
+                verbose = bool(self._config_data.get("verbose", False))
+            self._apply_verbose(verbose)
             self._save_config_file()
             return await self._load_config({})
         except Exception as e:
@@ -582,8 +617,9 @@ class PythonSidecar:
                 api.close()
                 raise
 
-            self._qr_api = api
-            self._qr_key = challenge.key
+            with self._qr_lock:
+                self._qr_api = api
+                self._qr_key = challenge.key
             return {
                 "qr_url": challenge.url,
                 "qr_key": challenge.key,
@@ -597,8 +633,9 @@ class PythonSidecar:
         """轮询扫码状态：unscanned / scanned / expired / success"""
         from overwatch_drops_miner.client_parts.qr_login import QrLoginStatus
 
-        api = self._qr_api
-        key = str(params.get("qr_key", "") or self._qr_key)
+        with self._qr_lock:
+            api = self._qr_api
+            key = str(params.get("qr_key", "") or self._qr_key)
         if api is None or not key:
             return {"error": "二维码会话不存在，请重新生成"}
 
@@ -625,9 +662,10 @@ class PythonSidecar:
         return {}
 
     def _qr_close(self) -> None:
-        api = self._qr_api
-        self._qr_api = None
-        self._qr_key = ""
+        with self._qr_lock:
+            api = self._qr_api
+            self._qr_api = None
+            self._qr_key = ""
         if api is not None:
             try:
                 api.close()
@@ -670,7 +708,8 @@ class PythonSidecar:
         if not cookie:
             return None, "该账号缺少 Cookie，请重新登录"
 
-        task_ids = [str(t).strip() for t in self._config_data.get("task_ids", []) if str(t).strip()]
+        with self._config_lock:
+            task_ids = [str(t).strip() for t in self._config_data.get("task_ids", []) if str(t).strip()]
         if not task_ids:
             return None, "未填写任务 ID，请先在配置中填写"
         return (cookie, task_ids), None
@@ -702,7 +741,8 @@ class PythonSidecar:
                 best = max(progresses, key=lambda t: float(getattr(t, "limit_value", 0)))
                 cur = float(getattr(best, "cur_value", 0) or 0)
                 limit = float(getattr(best, "limit_value", 0) or 0)
-                self._progress_values[str(params.get("account_id", ""))] = (cur, limit)
+                with self._progress_lock:
+                    self._progress_values[str(params.get("account_id", ""))] = (cur, limit)
             except (TypeError, ValueError):
                 pass
 
@@ -814,15 +854,39 @@ class PythonSidecar:
             "check_points": check_points,
         }
 
+    def _acquire_sniff(self) -> bool:
+        """占用浏览器嗅探单会话名额（并发命令下保证同一时刻只有一个嗅探）"""
+        with self._sniff_lock:
+            if self._sniff_busy:
+                return False
+            self._sniff_busy = True
+            return True
+
+    def _release_sniff(self) -> None:
+        """释放嗅探名额并清空会话引用"""
+        with self._sniff_lock:
+            self._sniff_busy = False
+            self._sniff_cancel_event = None
+            self._sniff_thread_ref = None
+
+    def _register_sniff(self, cancel_event: threading.Event) -> None:
+        """登记新的嗅探会话（取消事件）"""
+        with self._sniff_lock:
+            self._sniff_cancel_event = cancel_event
+            self._sniff_thread_ref = None
+
+    def _register_sniff_thread(self, thread: threading.Thread) -> None:
+        """登记嗅探工作线程（供 shutdown 时 join）"""
+        with self._sniff_lock:
+            self._sniff_thread_ref = thread
+
     async def _browser_capture(self, params: dict) -> dict:
         """浏览器捕获 - 使用 Selenium + 扩展捕获 B 站 Cookie"""
-        if self._sniff_busy:
+        if not self._acquire_sniff():
             return {"error": "已有一个浏览器自动获取任务在进行中，请稍候"}
-        self._sniff_busy = True
         sniff_cancel = threading.Event()
         # 登记嗅探会话引用（供 shutdown 时 join）
-        self._sniff_cancel_event = sniff_cancel
-        self._sniff_thread_ref = None
+        self._register_sniff(sniff_cancel)
         try:
             from overwatch_drops_miner.gui_parts.browser_sniffer import start_browser_sniff, select_login_cookies
 
@@ -865,7 +929,7 @@ class PythonSidecar:
                     cancel_event=sniff_cancel,
                 )
             )
-            self._sniff_thread_ref = sniff_thread
+            self._register_sniff_thread(sniff_thread)
 
             # 等待捕获完成或超时（120秒）
             if self._browser_capture_event:
@@ -887,9 +951,7 @@ class PythonSidecar:
             return {"error": str(e)}
         finally:
             sniff_cancel.set()
-            self._sniff_busy = False
-            self._sniff_cancel_event = None
-            self._sniff_thread_ref = None
+            self._release_sniff()
     
     @staticmethod
     def _normalize_task_groups(groups: Any) -> list[dict[str, Any]]:
@@ -939,13 +1001,11 @@ class PythonSidecar:
 
     async def _run_browser_sniff(self, *, kind: str, room_id: int, browser: str | None = None) -> dict:
         """浏览器嗅探会话（kind: room=房间号 / task=任务ID模式2），单会话，120s 超时"""
-        if self._sniff_busy:
+        if not self._acquire_sniff():
             return {"error": "已有一个浏览器自动获取任务在进行中，请稍候"}
-        self._sniff_busy = True
         cancel_event = threading.Event()
         # 登记嗅探会话引用（供 shutdown 时 join）
-        self._sniff_cancel_event = cancel_event
-        self._sniff_thread_ref = None
+        self._register_sniff(cancel_event)
         result_box: dict[str, Any] = {}
         done = threading.Event()
 
@@ -1043,7 +1103,7 @@ class PythonSidecar:
                     **sniff_kwargs,
                 ),
             )
-            self._sniff_thread_ref = sniff_thread
+            self._register_sniff_thread(sniff_thread)
 
             try:
                 await asyncio.wait_for(
@@ -1061,9 +1121,7 @@ class PythonSidecar:
             return {"error": str(e)}
         finally:
             cancel_event.set()
-            self._sniff_busy = False
-            self._sniff_cancel_event = None
-            self._sniff_thread_ref = None
+            self._release_sniff()
 
     async def _auto_fetch_room_id(self, params: dict) -> dict:
         """自动获取房间号（浏览器嗅探：打开目标直播间捕获 URL）"""
@@ -1086,11 +1144,12 @@ class PythonSidecar:
         running = self.miner_manager.running_miners()
         if not running:
             return {}
-        reconnect_delay = self._config_data.get("reconnect_delay_seconds", 8)
-        task_interval = self._config_data.get("task_query_interval_seconds", 30)
-        notify_on_task_complete = self._config_data.get("notify_on_task_complete", True)
-        task_ids = self._config_data.get("task_ids", [])
-        notify_urls = self._config_data.get("notify_urls", [])
+        with self._config_lock:
+            reconnect_delay = self._config_data.get("reconnect_delay_seconds", 8)
+            task_interval = self._config_data.get("task_query_interval_seconds", 30)
+            notify_on_task_complete = self._config_data.get("notify_on_task_complete", True)
+            task_ids = list(self._config_data.get("task_ids", []))
+            notify_urls = list(self._config_data.get("notify_urls", []))
         for miner in running:
             if reconnect_delay > 0:
                 miner.config.reconnect_delay_seconds = reconnect_delay
@@ -1169,9 +1228,11 @@ class PythonSidecar:
         urls = params.get("urls", [])
         if not isinstance(urls, list):
             return {"error": "urls 必须是数组"}
-        self._config_data["notify_urls"] = [str(u).strip() for u in urls if str(u).strip()]
+        cleaned = [str(u).strip() for u in urls if str(u).strip()]
+        with self._config_lock:
+            self._config_data["notify_urls"] = cleaned
         self._save_config_file()
-        return {"success": True, "urls": self._config_data["notify_urls"]}
+        return {"success": True, "urls": cleaned}
 
     async def _check_update(self, params: dict) -> dict:
         try:
@@ -1204,10 +1265,12 @@ class PythonSidecar:
         closed = True
         # 取消扫码会话
         self._qr_close()
-        # 停止嗅探线程
-        if self._sniff_cancel_event is not None:
-            self._sniff_cancel_event.set()
+        # 停止嗅探线程（先在锁内取引用，再在锁外等待，避免与嗅探线程释放路径互锁）
+        with self._sniff_lock:
+            cancel_event = self._sniff_cancel_event
             thread = self._sniff_thread_ref
+        if cancel_event is not None:
+            cancel_event.set()
             if thread is not None and thread.is_alive():
                 thread.join(timeout=3.0)
                 if thread.is_alive():
@@ -1222,7 +1285,10 @@ class PythonSidecar:
             
             title = params.get("title", "通知")
             body = params.get("body", "")
-            notify_urls = params.get("notify_urls", self._config_data.get("notify_urls", []))
+            notify_urls = params.get("notify_urls")
+            if notify_urls is None:
+                with self._config_lock:
+                    notify_urls = list(self._config_data.get("notify_urls", []))
             
             if not notify_urls:
                 return {"error": "未配置通知 URL"}
@@ -1243,7 +1309,13 @@ class PythonSidecar:
 
 
 async def main():
-    """Sidecar 主循环 - 通过 stdin/stdout 与 Tauri 通信"""
+    """Sidecar 主循环 - 通过 stdin/stdout 与 Tauri 通信
+
+    IPC 并发（S4）：慢命令（浏览器嗅探 120s、领奖 180s）不再阻塞其它命令。
+    - stdin 交给独立线程阻塞读取，再用 call_soon_threadsafe 投递回事件循环；
+    - 每行请求 create_task 执行，响应回带请求里的 id，供 Rust 侧路由；
+    - 仍然只有一个事件循环，扫码会话的 httpx 客户端不会被跨 loop 使用。
+    """
     # 修复 stderr/stdout 中文乱码（stdout 承载 JSON 协议，必须 UTF-8）
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8")
@@ -1261,22 +1333,78 @@ async def main():
     )
     poll_thread.start()
 
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
+    await serve_requests(sidecar)
 
+
+async def serve_requests(sidecar: PythonSidecar) -> None:
+    """读取 stdin、并发执行命令、按 id 回写响应（S4）。
+
+    - stdin 交给独立线程阻塞读取，再用 call_soon_threadsafe 投递回事件循环；
+    - 每行请求 create_task 执行，响应回带请求里的 id，供 Rust 侧路由；
+    - 始终只有一个事件循环，扫码会话的 httpx 客户端不会被跨 loop 使用。
+    """
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+
+    async def run_request(request: dict) -> None:
+        """执行一条命令并写出响应（带上请求 id）"""
         try:
-            request = json.loads(line)
-            command = request.get("command")
-            params = request.get("params", {})
-            response = await sidecar.handle_command(command, params)
-        except json.JSONDecodeError:
-            response = {"error": "无效的 JSON"}
+            response = await sidecar.handle_command(
+                request.get("command"), request.get("params", {})
+            )
         except Exception as e:
             response = {"error": str(e)}
-
+        # 回带请求 id，便于 Rust 侧把响应路由到等待中的调用
+        if "id" in request:
+            response = {**response, "id": request["id"]}
         sidecar._write_line(json.dumps(response, ensure_ascii=False))
+
+    tasks: set[asyncio.Task] = set()
+
+    def _spawn(request: dict) -> None:
+        """启动一条命令任务（保存引用，避免被垃圾回收提前取消）"""
+        task = asyncio.create_task(run_request(request))
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    def submit(line: str) -> None:
+        """（事件循环线程内）解析一行请求并立即起一个并发任务"""
+        line = line.strip()
+        if not line:
+            return
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError:
+            sidecar._write_line(json.dumps({"error": "无效的 JSON"}, ensure_ascii=False))
+            return
+        if not isinstance(request, dict):
+            sidecar._write_line(json.dumps({"error": "无效的请求格式"}, ensure_ascii=False))
+            return
+        _spawn(request)
+
+    def reader() -> None:
+        """stdin 读取线程：读到一行就投递回事件循环"""
+        try:
+            for raw in sys.stdin:
+                loop.call_soon_threadsafe(submit, raw)
+        except Exception as e:
+            print(f"[Sidecar] stdin 读取线程异常: {e}", file=sys.stderr)
+        finally:
+            # stdin 关闭（Rust 侧退出）→ 结束主循环
+            loop.call_soon_threadsafe(stop_event.set)
+
+    threading.Thread(target=reader, daemon=True, name="stdin-reader").start()
+    await stop_event.wait()
+
+    # stdin 关闭后给进行中的命令一点时间写出响应，避免响应被截断
+    pending = list(tasks)
+    if pending:
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*pending, return_exceptions=True), timeout=5.0
+            )
+        except asyncio.TimeoutError:
+            print("[Sidecar] stdin 已关闭，仍有命令未完成，直接退出", file=sys.stderr)
 
 
 if __name__ == "__main__":
