@@ -24,6 +24,7 @@ src-tauri/target/
 # 不加入 git
 docs/
 plan.md
+.recycle/
 
 # VS
 .vs/

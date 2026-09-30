@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useAccountsStore } from "@/stores/accounts";
 import { useConfigStore } from "@/stores/config";
 import { useLogsStore } from "@/stores/logs";
+import { useTasksStore } from "@/stores/tasks";
 import AccountList from "@/components/AccountList.vue";
 import ConfigForm from "@/components/ConfigForm.vue";
 import LogViewer from "@/components/LogViewer.vue";
@@ -70,12 +71,14 @@ onMounted(async () => {
   restoreWindowGeometry();
   registerCloseHandler();
   startConfigSync();
+  startTaskRefresh();
   setTimeout(() => checkUpdate(), 3000);
 });
 
 onUnmounted(() => {
   stopSystemThemePolling();
   stopConfigSync();
+  stopTaskRefresh();
 });
 
 let closeHandlerRegistered = false;
@@ -88,10 +91,15 @@ function registerCloseHandler() {
   win.onCloseRequested(async (event) => {
     if (anyRunning.value) {
       event.preventDefault();
+      alert("存在正在运行或正在停止的挂宝账号，请等待其完全停止后再关闭窗口。");
       return;
     }
     saveWindowGeometry();
-    invoke("shutdown").catch(() => {});
+    try {
+      await invoke("shutdown");
+    } catch {
+      // shutdown 失败不阻塞关闭
+    }
   });
 }
 
@@ -107,6 +115,26 @@ function stopConfigSync() {
   if (configSyncTimer !== null) {
     clearInterval(configSyncTimer);
     configSyncTimer = null;
+  }
+}
+
+let taskRefreshTimer: number | null = null;
+
+function startTaskRefresh() {
+  stopTaskRefresh();
+  const interval = Math.max(10, Math.min(3600, parseInt(configStore.config.task_query_interval_text, 10) || 30));
+  taskRefreshTimer = window.setInterval(() => {
+    const runningAccounts = accountsStore.accounts.filter((a) => a.running);
+    for (const account of runningAccounts) {
+      void useTasksStore().refreshTasks(account.id, false);
+    }
+  }, interval * 1000);
+}
+
+function stopTaskRefresh() {
+  if (taskRefreshTimer !== null) {
+    clearInterval(taskRefreshTimer);
+    taskRefreshTimer = null;
   }
 }
 
@@ -196,8 +224,15 @@ function stopSystemThemePolling() {
   }
 }
 
-function handleQrSuccess(cookie: string) {
-  accountsStore.addAccount(cookie);
+async function handleQrSuccess(cookie: string) {
+  try {
+    const account = await accountsStore.addAccount(cookie);
+    if (account) {
+      selectedAccountId.value = account.id;
+    }
+  } catch (e) {
+    alert(`添加账号失败: ${e}`);
+  }
 }
 
 function selectAccount(accountId: string) {

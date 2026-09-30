@@ -2,4 +2,6 @@
 httpx>=0.27,<1
 qrcode>=7.4,<9
 selenium>=4.20,<5
+# PySide6 仅在 paths.get_config_dir 内延迟导入（贴近 sidecar 不带 Qt 的长期目标）
+# PySide6>=6.5,<7
 

@@ -68,7 +68,9 @@ async function handleAddAccount() {
 }
 
 async function handleRemoveAccount(accountId: string) {
-  if (confirm("确定要删除该账号吗？")) {
+  const account = accountsStore.accounts.find((a) => a.id === accountId);
+  const remark = account?.remark || accountId.slice(0, 8);
+  if (confirm(`确定要删除账号「${remark}」吗？`)) {
     await accountsStore.removeAccount(accountId);
   }
 }
@@ -77,17 +79,11 @@ async function handleStart(accountId: string) {
   if (pendingAction.value) return;
   pendingAction.value = `${accountId}:start`;
   try {
-    const config = {
-      room_ids: [],
-      thread_count: 60,
-      reconnect_delay_seconds: 8,
-      task_ids: [],
-      task_query_interval_seconds: 30,
-      notify_urls: [],
-    };
-    await accountsStore.startMiner(accountId, config);
+    await accountsStore.startMiner(accountId);
     // 对齐原 _finish_account_started：启动后自动选中该账号
     emit("select", accountId);
+  } catch (e) {
+    alert(`启动失败: ${e}`);
   } finally {
     pendingAction.value = "";
   }
@@ -107,9 +103,19 @@ function handleCaptureCookie() {
   showCaptureConfirm.value = true;
 }
 
-function confirmCaptureCookie() {
+async function confirmCaptureCookie() {
   showCaptureConfirm.value = false;
-  accountsStore.browserCapture();
+  capturing.value = true;
+  try {
+    const cookie = await accountsStore.browserCapture();
+    if (cookie) {
+      await accountsStore.addAccount(cookie);
+    }
+  } catch (e) {
+    alert(`捕获 Cookie 失败: ${e}`);
+  } finally {
+    capturing.value = false;
+  }
 }
 
 function cancelCaptureCookie() {

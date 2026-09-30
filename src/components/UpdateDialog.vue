@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Dialog,
   DialogContent,
@@ -21,7 +22,7 @@ const downloading = ref(false);
 
 function handleDownload() {
   downloading.value = true;
-  window.open(props.releaseUrl, "_blank");
+  openUrl(props.releaseUrl);
   downloading.value = false;
 }
 </script>

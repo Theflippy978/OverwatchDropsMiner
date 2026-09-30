@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { useConfigStore } from "@/stores/config";
+import { useTasksStore } from "@/stores/tasks";
 
 interface Reward {
   name: string;
@@ -22,47 +22,26 @@ interface TaskItem {
   rewards: Reward[];
 }
 
-interface RefreshTasksResult {
-  tasks: TaskItem[];
-  text: string;
-}
-
-interface ClaimRewardsResult {
-  success: boolean;
-  results: Array<{
-    task_id: string;
-    reward_name: string;
-    success: boolean;
-    skipped: boolean;
-    message: string;
-  }>;
-  text: string;
-}
-
 const props = defineProps<{
   accountId: string;
   running: boolean;
 }>();
 
-const tasks = ref<TaskItem[]>([]);
-const statusText = ref("");
-const watchTimeSeconds = ref(0);
-const refreshing = ref(false);
-const claiming = ref(false);
-const actionError = ref("");
-const estimatedRemaining = ref<number | null>(null);
-const refreshQueued = ref(false);
-const claimQueued = ref(false);
+const tasksStore = useTasksStore();
+const accountTasks = computed(() => tasksStore.getAccountTasks(props.accountId));
 
-const configStore = useConfigStore();
-// 已自动领取过的任务 ID（对齐原 _auto_claim_handled_ids：防领取后状态
-// 未及时刷新造成的重复触发；成功/已领取的记录，失败的下次重试）
-const autoClaimHandled = new Set<string>();
+const tasks = computed(() => accountTasks.value.tasks);
+const statusText = computed(() => accountTasks.value.text);
+const actionError = computed(() => accountTasks.value.error);
+const refreshing = computed(() => accountTasks.value.refreshing);
+const claiming = computed(() => accountTasks.value.claiming);
+
+const watchTimeSeconds = ref(0);
+const estimatedRemaining = ref<number | null>(null);
+const statusLine = ref("");
+const progressPercent = ref(0);
 
 let statusTimer: number | null = null;
-let autoRefreshTimer: number | null = null;
-
-const AUTO_REFRESH_INTERVAL = 30_000;
 
 const hasTasks = computed(() => tasks.value.length > 0);
 
@@ -103,83 +82,28 @@ function statusClass(status: string) {
 }
 
 async function handleRefresh() {
-  if (refreshing.value) {
-    refreshQueued.value = true;
-    statusText.value = "已有刷新进行中，已排队下一次刷新...";
-    return;
-  }
-  refreshing.value = true;
-  actionError.value = "";
-  try {
-    const result = await invoke<RefreshTasksResult>("refresh_tasks", {
-      accountId: props.accountId,
-    });
-    tasks.value = result.tasks;
-    statusText.value = result.text;
-    maybeAutoClaim();
-  } catch (e) {
-    actionError.value = `刷新任务失败: ${e}`;
-  } finally {
-    refreshing.value = false;
-    if (refreshQueued.value) {
-      refreshQueued.value = false;
-      void handleRefresh();
-    }
-  }
+  await tasksStore.refreshTasks(props.accountId);
 }
 
-// 对齐原 task_controller.refresh 的自动领取触发：开关开启时，
-// 刷新后存在"已完成且未处理"的任务即自动领取
-function maybeAutoClaim() {
-  if (!configStore.config.auto_claim_rewards) return;
-  if (claiming.value) return;
-  const pendingClaim = tasks.value.some(
-    (t) => t.status === "已完成" && !autoClaimHandled.has(t.task_id.trim())
-  );
-  if (!pendingClaim) return;
-  statusText.value = "检测到任务完成，正在自动领取奖励...";
-  void handleClaim(true);
-}
-
-async function handleClaim(automatic = false) {
-  if (claiming.value) {
-    claimQueued.value = true;
-    return;
-  }
-  claiming.value = true;
-  actionError.value = "";
-  try {
-    const result = await invoke<ClaimRewardsResult>("claim_rewards", {
-      accountId: props.accountId,
-    });
-    for (const item of result.results) {
-      if ((item.success || item.skipped) && item.task_id.trim()) {
-        autoClaimHandled.add(item.task_id.trim());
-      }
-    }
-    statusText.value =
-      (automatic ? "自动领取\n" : "") + result.text;
-    if (result.results.length > 0) {
-      await handleRefresh();
-    }
-  } catch (e) {
-    actionError.value = `${automatic ? "自动领取" : "领取奖励"}失败: ${e}`;
-  } finally {
-    claiming.value = false;
-    if (claimQueued.value) {
-      claimQueued.value = false;
-      void handleClaim(automatic);
-    }
-  }
+async function handleClaim() {
+  await tasksStore.claimRewards(props.accountId, false);
 }
 
 async function fetchStatus() {
   try {
-    const status = await invoke<{ watch_time_seconds: number }>(
+    const status = await invoke<{
+      watch_time_seconds: number;
+      status_line: string;
+      progress: { cur: number; limit: number; percent: number } | null;
+    }>(
       "get_account_status",
       { accountId: props.accountId }
     );
     watchTimeSeconds.value = status.watch_time_seconds;
+    statusLine.value = status.status_line;
+    if (status.progress) {
+      progressPercent.value = status.progress.percent;
+    }
     estimatedRemaining.value = estimateRemaining();
   } catch {
     // 状态查询失败时保留上次数据
@@ -201,33 +125,10 @@ function stopStatusTimer() {
   }
 }
 
-// 对齐原 GUI _schedule_task_refresh：账号运行中每 30s 自动刷新任务进度，
-// 无运行账号则不重排定时器。
-function syncAutoRefresh() {
-  stopAutoRefresh();
-  if (props.running && props.accountId) {
-    autoRefreshTimer = window.setInterval(() => {
-      void handleRefresh();
-    }, AUTO_REFRESH_INTERVAL);
-  }
-}
-
-function stopAutoRefresh() {
-  if (autoRefreshTimer) {
-    clearInterval(autoRefreshTimer);
-    autoRefreshTimer = null;
-  }
-}
-
 watch(
   () => props.accountId,
   () => {
-    tasks.value = [];
-    statusText.value = "";
-    actionError.value = "";
-    autoClaimHandled.clear();
     startStatusTimer();
-    syncAutoRefresh();
     void handleRefresh();
   }
 );
@@ -236,19 +137,16 @@ watch(
   () => props.running,
   (running) => {
     if (running) startStatusTimer();
-    syncAutoRefresh();
   }
 );
 
 onMounted(() => {
   startStatusTimer();
-  syncAutoRefresh();
   void handleRefresh();
 });
 
 onUnmounted(() => {
   stopStatusTimer();
-  stopAutoRefresh();
 });
 </script>
 
@@ -286,6 +184,11 @@ onUnmounted(() => {
     </CardHeader>
     <CardContent class="pt-0">
       <div class="space-y-4">
+        <!-- 状态行（后端格式化） -->
+        <div v-if="statusLine" class="rounded-md bg-muted/50 p-2 text-xs font-mono">
+          {{ statusLine }}
+        </div>
+
         <!-- 观看时间 -->
         <div class="flex items-center justify-between text-sm">
           <span class="text-muted-foreground">观看时间</span>
@@ -294,6 +197,15 @@ onUnmounted(() => {
         <div class="flex items-center justify-between text-sm">
           <span class="text-muted-foreground">预计剩余</span>
           <span class="font-mono font-medium">{{ formatEstimatedRemaining() }}</span>
+        </div>
+
+        <!-- 掉宝进度百分比 -->
+        <div v-if="progressPercent > 0" class="space-y-1">
+          <div class="flex items-center justify-between text-xs text-muted-foreground">
+            <span>掉宝进度</span>
+            <span>{{ progressPercent }}%</span>
+          </div>
+          <Progress :value="progressPercent" class="h-2" />
         </div>
 
         <Separator />

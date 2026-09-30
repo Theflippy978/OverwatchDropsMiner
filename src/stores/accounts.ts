@@ -3,6 +3,7 @@ import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { Account, AccountStatus } from "@/lib/types";
+import { useLogsStore } from "@/stores/logs";
 
 export const useAccountsStore = defineStore("accounts", () => {
   const accounts = ref<Account[]>([]);
@@ -36,6 +37,7 @@ export const useAccountsStore = defineStore("accounts", () => {
     if (selectedAccountId.value === accountId) {
       selectedAccountId.value = null;
     }
+    useLogsStore().clearByAccount(accountId);
   }
 
   async function renameAccount(accountId: string, remark: string): Promise<Account> {
@@ -45,8 +47,8 @@ export const useAccountsStore = defineStore("accounts", () => {
     return account;
   }
 
-  async function startMiner(accountId: string, config: any) {
-    await invoke("start_miner", { accountId, config });
+  async function startMiner(accountId: string) {
+    await invoke("start_miner", { accountId });
     const account = accounts.value.find((a) => a.id === accountId);
     if (account) account.running = true;
   }
@@ -61,8 +63,8 @@ export const useAccountsStore = defineStore("accounts", () => {
     return await invoke<AccountStatus>("get_account_status", { accountId });
   }
 
-  async function browserCapture(): Promise<string> {
-    return await invoke<string>("browser_capture");
+  async function browserCapture(browser?: string): Promise<string> {
+    return await invoke<string>("browser_capture", { browser });
   }
 
   // 监听 sidecar 转发的账号状态事件（幂等）

@@ -8,6 +8,7 @@ use tauri::Manager;
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
             app.manage(commands::SidecarManager::new(app_handle));
@@ -33,6 +34,14 @@ fn main() {
             commands::auto_fetch_room_id,
             commands::auto_fetch_task_ids,
             commands::auto_fetch_task_ids_mode2,
+            commands::export_config,
+            commands::import_config,
+            commands::sync_config_to_miners,
+            commands::shutdown,
+            commands::check_update,
+            commands::detect_browsers,
+            commands::update_notify_urls,
+            commands::stop_all,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

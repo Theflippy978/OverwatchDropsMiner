@@ -38,6 +38,15 @@ function getLevelColor(level: string) {
 function formatTime(timestamp: string) {
   return new Date(timestamp).toLocaleTimeString("zh-CN");
 }
+
+function handleClear() {
+  const filterId = logsStore.filterAccountId;
+  if (filterId) {
+    logsStore.clearByAccount(filterId);
+  } else {
+    logsStore.clear();
+  }
+}
 </script>
 
 <template>
@@ -72,7 +81,7 @@ function formatTime(timestamp: string) {
             size="sm"
             variant="ghost"
             class="h-7 text-xs text-muted-foreground"
-            @click="logsStore.clear()"
+            @click="handleClear"
           >
             清空
           </Button>
@@ -85,12 +94,12 @@ function formatTime(timestamp: string) {
         class="overflow-y-auto rounded-md border border-border bg-muted/30 p-3 transition-all duration-300"
         :class="collapsed ? 'max-h-0' : 'h-[calc(100vh-320px)]'"
       >
-        <div v-if="logsStore.logs.length === 0" class="py-8 text-center text-sm text-muted-foreground">
+        <div v-if="logsStore.filteredLogs.length === 0" class="py-8 text-center text-sm text-muted-foreground">
           暂无日志
         </div>
         <div v-else class="space-y-1 font-mono text-xs">
           <div
-            v-for="log in logsStore.logs"
+            v-for="log in logsStore.filteredLogs"
             :key="log.seq"
             class="flex gap-2"
           >

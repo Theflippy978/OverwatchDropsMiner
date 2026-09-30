@@ -3,6 +3,12 @@ import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { GuiConfigValues } from "@/lib/types";
 
+function clampInt(value: string, defaultVal: number, min: number, max: number): string {
+  const n = parseInt(value, 10);
+  if (isNaN(n)) return String(defaultVal);
+  return String(Math.max(min, Math.min(max, n)));
+}
+
 export const useConfigStore = defineStore("config", () => {
   const config = ref<GuiConfigValues>({
     cookie: "",
@@ -36,7 +42,13 @@ export const useConfigStore = defineStore("config", () => {
   }
 
   async function save() {
+    // 数值字段统一钳制
+    config.value.thread_count_text = clampInt(config.value.thread_count_text, 60, 1, 128);
+    config.value.reconnect_delay_text = clampInt(config.value.reconnect_delay_text, 8, 1, 3600);
+    config.value.task_query_interval_text = clampInt(config.value.task_query_interval_text, 30, 10, 3600);
     await invoke("save_config", { config: config.value });
+    // 回读确认
+    await load();
   }
 
   return { config, loading, load, ensureLoaded, save };
