@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
-import { getCurrentWindow, PhysicalSize, PhysicalPosition } from "@tauri-apps/api/window";
+import { getCurrentWindow, primaryMonitor, PhysicalSize, PhysicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { useAccountsStore } from "@/stores/accounts";
 import { useConfigStore } from "@/stores/config";
@@ -82,6 +82,8 @@ onUnmounted(() => {
   stopSystemThemePolling();
   stopConfigSync();
   stopTaskRefresh();
+  accountsStore.dispose();
+  logsStore.dispose();
 });
 
 let closeHandlerRegistered = false;
@@ -97,12 +99,26 @@ function registerCloseHandler() {
       showCloseBlocked.value = true;
       return;
     }
+    try {
+      await configStore.save();
+    } catch (e) {
+      console.error("保存会话配置失败", e);
+    }
     saveWindowGeometry();
     try {
-      await invoke("shutdown");
+      await invoke("qr_cancel");
     } catch {
-      // shutdown 失败不阻塞关闭
+      // 无会话时后端应幂等
     }
+    let closed = true;
+    try {
+      const r = await invoke<{ closed: boolean }>("shutdown");
+      closed = r?.closed !== false;
+    } catch {}
+    if (!closed) {
+      alert("浏览器嗅探线程未在预算时间内退出，浏览器/驱动进程可能残留，请手动检查任务管理器。");
+    }
+    await win.destroy();
   });
 }
 
@@ -169,11 +185,36 @@ async function restoreWindowGeometry() {
     if (saved) {
       const geo = JSON.parse(saved);
       const win = getCurrentWindow();
-      if (geo.width && geo.height) {
-        await win.setSize(new PhysicalSize(geo.width, geo.height));
+      const primary = await primaryMonitor();
+
+      let { width, height, x, y } = geo;
+      let adjusted = false;
+
+      if (primary) {
+        const pPos = primary.position;
+        const pSize = primary.size;
+        const overlapX = Math.max(0, Math.min(x + width, pPos.x + pSize.width) - Math.max(x, pPos.x));
+        const overlapY = Math.max(0, Math.min(y + height, pPos.y + pSize.height) - Math.max(y, pPos.y));
+
+        if (overlapX < 100 || overlapY < 50) {
+          x = pPos.x + (pSize.width - width) / 2;
+          y = pPos.y + (pSize.height - height) / 2;
+          adjusted = true;
+        }
+
+        width = Math.min(width, pSize.width);
+        height = Math.min(height, pSize.height);
       }
-      if (geo.x !== undefined && geo.y !== undefined) {
-        await win.setPosition(new PhysicalPosition(geo.x, geo.y));
+
+      if (width && height) {
+        await win.setSize(new PhysicalSize(width, height));
+      }
+      if (x !== undefined && y !== undefined) {
+        await win.setPosition(new PhysicalPosition(x, y));
+      }
+
+      if (adjusted) {
+        localStorage.setItem("window_geometry", JSON.stringify({ width, height, x, y }));
       }
     }
     const win = getCurrentWindow();

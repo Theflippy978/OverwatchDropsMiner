@@ -40,12 +40,25 @@ export interface AccountStatus {
   progress: ProgressValues | null;
   /** 任务级进度对象（当前后端无数据，保留字段兼容） */
   task_progress: TaskProgress | null;
+  /** Cookie 失效自动停止（true 时表示因登录失效而停止） */
+  login_invalidated?: boolean;
 }
 
 export interface ProgressValues {
   cur: number;
   limit: number;
   percent: number;
+}
+
+export interface CheckPoint {
+  sid: string;
+  alias: string;
+  status: number;
+  is_completed: boolean;
+  cur_value: number;
+  limit_value: number;
+  award_name: string;
+  award_count: number;
 }
 
 export interface TaskProgress {
@@ -55,6 +68,7 @@ export interface TaskProgress {
   target: number;
   status: string;
   rewards: Reward[];
+  check_points?: CheckPoint[];
 }
 
 export interface Reward {

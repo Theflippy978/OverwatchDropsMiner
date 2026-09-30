@@ -137,11 +137,8 @@ class PythonSidecar:
             print(f"[Sidecar] 切换详细日志失败: {e}", file=sys.stderr)
     
     def _get_config_file(self):
-        appdata = os.environ.get("APPDATA", "")
-        if appdata:
-            config_dir = Path(appdata) / "OverwatchDropsMiner"
-        else:
-            config_dir = Path.home() / "OverwatchDropsMiner"
+        from overwatch_drops_miner.paths import get_config_dir
+        config_dir = get_config_dir()
         config_dir.mkdir(parents=True, exist_ok=True)
         return config_dir / "config.json"
 
@@ -285,8 +282,6 @@ class PythonSidecar:
             "shutdown": self._shutdown,
             "check_update": self._check_update,
             "detect_browsers": self._detect_browsers,
-            "update_notify_urls": self._update_notify_urls,
-            "stop_all": self._stop_all,
         }
         
         handler = handlers.get(command)
@@ -410,6 +405,32 @@ class PythonSidecar:
         except ValueError as e:
             return {"error": str(e)}
 
+        # 启动前登录探测（最多 2 次，间隔 1 秒）
+        from overwatch_drops_miner.client import BilibiliClient
+        login_ok = False
+        last_error = ""
+        for attempt in range(2):
+            try:
+                client = BilibiliClient(account.cookie())
+                try:
+                    info = await asyncio.wait_for(client.get_self_info(), timeout=10.0)
+                finally:
+                    await client.close()
+                uid = info.get("uid") if isinstance(info, dict) else None
+                if uid is None:
+                    last_error = "Cookie 已失效，无法启动"
+                    continue
+                uname = str(info.get("uname", "") or "") if isinstance(info, dict) else ""
+                print(f"[Sidecar] 登录成功: {uname} (UID: {uid})", file=sys.stderr)
+                login_ok = True
+                break
+            except Exception as e:
+                last_error = str(e)
+                if attempt == 0:
+                    await asyncio.sleep(1.0)
+        if not login_ok:
+            return {"error": f"启动登录检测失败，请检查网络后重试：{last_error}"}
+
         success = self.miner_manager.start(account)
         if not success:
             # 启动失败通常是因为上次会话的线程残留，先尝试轮询回收一次
@@ -467,6 +488,13 @@ class PythonSidecar:
             percent = max(0, min(100, int(cur_value / limit_value * 100)))
             progress = {"cur": cur_value, "limit": limit_value, "percent": percent}
 
+        login_invalidated = False
+        if self.miner_manager:
+            with self.miner_manager._lock:
+                session = self.miner_manager._sessions.get(account_id)
+                if session and session.controller.miner:
+                    login_invalidated = session.controller.miner.login_invalidated
+
         return {
             "account_id": account_id,
             "running": running,
@@ -476,6 +504,7 @@ class PythonSidecar:
             # task_progress：任务级进度对象，当前无数据，保留字段兼容旧契约
             "progress": progress,
             "task_progress": None,
+            "login_invalidated": login_invalidated,
         }
     
     async def _save_config(self, params: dict) -> dict:
@@ -501,7 +530,7 @@ class PythonSidecar:
         notify_urls = parse_url_list(notify_urls_text) if notify_urls_text else []
 
         # 数值字段解析与钳制（越界/非法输入一律回落到默认值）
-        thread_count = _clamp_int(config.get("thread_count_text", "60"), 60, 1, 128)
+        thread_count = _clamp_int(config.get("thread_count_text", "60"), 60, 1, 256)
         reconnect_delay = _clamp_int(config.get("reconnect_delay_text", "8"), 8, 1, 3600)
         task_interval = _clamp_int(config.get("task_query_interval_text", "30"), 30, 10, 3600)
 
@@ -588,7 +617,7 @@ class PythonSidecar:
                 self._config_data = {
                     "room_ids": room_ids,
                     # 导入文件里的数值同样钳制，避免越界值直接进 miner
-                    "thread_count": _clamp_int(values.thread_count_text, 60, 1, 128),
+                    "thread_count": _clamp_int(values.thread_count_text, 60, 1, 256),
                     "reconnect_delay_seconds": _clamp_int(values.reconnect_delay_text, 8, 1, 3600),
                     "task_ids": task_ids,
                     "task_query_interval_seconds": _clamp_int(values.task_query_interval_text, 30, 10, 3600),
@@ -1217,22 +1246,6 @@ class PythonSidecar:
                 print(f"[Sidecar] 账号轮询异常: {e}", file=sys.stderr)
 
             time.sleep(0.2)
-
-    async def _stop_all(self, params: dict) -> dict:
-        if not self.miner_manager:
-            return {"error": "后端未初始化"}
-        self.miner_manager.stop_all(force=False)
-        return {"success": True}
-
-    async def _update_notify_urls(self, params: dict) -> dict:
-        urls = params.get("urls", [])
-        if not isinstance(urls, list):
-            return {"error": "urls 必须是数组"}
-        cleaned = [str(u).strip() for u in urls if str(u).strip()]
-        with self._config_lock:
-            self._config_data["notify_urls"] = cleaned
-        self._save_config_file()
-        return {"success": True, "urls": cleaned}
 
     async def _check_update(self, params: dict) -> dict:
         try:

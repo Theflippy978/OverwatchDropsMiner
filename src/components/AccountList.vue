@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import ConfirmDialog from "@/components/ConfirmDialog.vue";
 
 const accountsStore = useAccountsStore();
@@ -161,31 +162,18 @@ function cancelCaptureCookie() {
         <div class="flex items-center justify-between">
           <CardTitle class="text-sm">账号列表</CardTitle>
           <div class="flex items-center gap-2">
-            <div class="group relative">
-              <Button size="sm" class="h-7 text-xs">
-                + 添加账号
-              </Button>
-              <div class="pointer-events-none absolute right-0 top-full z-50 mt-1 w-40 rounded-md border border-border bg-popover p-1 text-xs text-popover-foreground opacity-0 shadow-md transition-opacity group-hover:opacity-100">
-                <button
-                  class="block w-full rounded px-2 py-1.5 text-left hover:bg-accent"
-                  @click="emit('qr-login')"
-                >
-                  扫码登录
-                </button>
-                <button
-                  class="block w-full rounded px-2 py-1.5 text-left hover:bg-accent"
-                  @click="showAddDialog = true"
-                >
-                  手动粘贴 Cookie
-                </button>
-                <button
-                  class="block w-full rounded px-2 py-1.5 text-left hover:bg-accent"
-                  @click="handleCaptureCookie"
-                >
-                  浏览器自动捕获
-                </button>
-              </div>
-            </div>
+            <DropdownMenu>
+              <DropdownMenuTrigger as-child>
+                <Button size="sm" class="h-7 text-xs">
+                  + 添加账号
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" class="w-40">
+                <DropdownMenuItem @select="emit('qr-login')">扫码登录</DropdownMenuItem>
+                <DropdownMenuItem @select="showAddDialog = true">手动粘贴 Cookie</DropdownMenuItem>
+                <DropdownMenuItem @select="handleCaptureCookie">浏览器自动捕获</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
 

@@ -12,6 +12,22 @@ fn main() {
         .setup(|app| {
             let app_handle = app.handle().clone();
             app.manage(commands::SidecarManager::new(app_handle));
+            #[cfg(windows)]
+            {
+                unsafe {
+                    let _ = windows::Win32::System::Com::CoInitializeEx(
+                        None,
+                        windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+                    );
+                    let app_user_model_id: Vec<u16> = "OverwatchDropsMiner.GUI.1"
+                        .encode_utf16()
+                        .chain(std::iter::once(0))
+                        .collect();
+                    let _ = windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(
+                        windows::core::PCWSTR(app_user_model_id.as_ptr()),
+                    );
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -40,8 +56,6 @@ fn main() {
             commands::shutdown,
             commands::check_update,
             commands::detect_browsers,
-            commands::update_notify_urls,
-            commands::stop_all,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

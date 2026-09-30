@@ -13,6 +13,8 @@ const configStore = useConfigStore();
 const loading = ref(false);
 const testing = ref(false);
 const testResult = ref("");
+const saveNotice = ref("");
+const saveNoticeError = ref(false);
 
 onMounted(async () => {
   loading.value = true;
@@ -27,10 +29,28 @@ onMounted(async () => {
 // 房间号/线程数等配置（与 ConfigForm 数据源分裂）
 async function handleSave() {
   loading.value = true;
+  saveNotice.value = "";
   try {
     await configStore.save();
+    saveNotice.value = "配置已保存";
+    saveNoticeError.value = false;
+  } catch (e) {
+    saveNotice.value = `保存配置失败: ${e}`;
+    saveNoticeError.value = true;
   } finally {
     loading.value = false;
+  }
+}
+
+async function handleVerboseToggle() {
+  saveNotice.value = "";
+  try {
+    await configStore.save();
+    saveNotice.value = "配置已保存";
+    saveNoticeError.value = false;
+  } catch (e) {
+    saveNotice.value = `保存配置失败: ${e}`;
+    saveNoticeError.value = true;
   }
 }
 
@@ -56,9 +76,18 @@ async function handleTest() {
     <CardHeader class="pb-3">
       <div class="flex items-center justify-between">
         <CardTitle class="text-sm">通知设置</CardTitle>
-        <Button size="sm" variant="outline" class="h-7 text-xs" :disabled="loading" @click="handleSave">
-          保存
-        </Button>
+        <div class="flex items-center gap-2">
+          <Button size="sm" variant="outline" class="h-7 text-xs" :disabled="loading" @click="handleSave">
+            保存
+          </Button>
+          <span
+            v-if="saveNotice"
+            class="text-xs"
+            :class="saveNoticeError ? 'text-destructive' : 'text-muted-foreground'"
+          >
+            {{ saveNotice }}
+          </span>
+        </div>
       </div>
     </CardHeader>
     <CardContent class="pt-0">
@@ -92,7 +121,7 @@ async function handleTest() {
               <Label class="text-xs">任务完成通知</Label>
               <p class="text-xs text-muted-foreground">任务完成时发送通知</p>
             </div>
-            <Switch v-model:checked="configStore.config.notify_on_task_complete" />
+            <Switch v-model="configStore.config.notify_on_task_complete" />
           </div>
 
           <div class="flex items-center justify-between">
@@ -100,7 +129,7 @@ async function handleTest() {
               <Label class="text-xs">自动领取奖励</Label>
               <p class="text-xs text-muted-foreground">任务完成后自动领取奖励</p>
             </div>
-            <Switch v-model:checked="configStore.config.auto_claim_rewards" />
+            <Switch v-model="configStore.config.auto_claim_rewards" />
           </div>
 
           <div class="flex items-center justify-between">
@@ -109,8 +138,8 @@ async function handleTest() {
               <p class="text-xs text-muted-foreground">输出更详细的运行日志</p>
             </div>
             <Switch
-              v-model:checked="configStore.config.verbose"
-              @update:checked="configStore.save()"
+              v-model="configStore.config.verbose"
+              @update:model-value="handleVerboseToggle"
             />
           </div>
         </div>

@@ -28,6 +28,7 @@ const fetchingTasks = ref(false);
 const fetchError = ref("");
 const saveNotice = ref("");
 const saveNoticeError = ref(false);
+const loading = ref(false);
 
 const showGroupDialog = ref(false);
 const pendingGroups = ref<TaskGroup[]>([]);
@@ -49,6 +50,7 @@ onMounted(async () => {
 });
 
 async function handleSave() {
+  loading.value = true;
   saveNotice.value = "";
   try {
     await configStore.save();
@@ -57,6 +59,8 @@ async function handleSave() {
   } catch (e) {
     saveNotice.value = `保存配置失败: ${e}`;
     saveNoticeError.value = true;
+  } finally {
+    loading.value = false;
   }
 }
 
@@ -131,7 +135,10 @@ function confirmGroupSelection() {
 }
 
 async function handleFetchRoom() {
-  if (fetchingRoom.value) return;
+  if (fetchingRoom.value || fetchingTasks.value) {
+    fetchError.value = "已有一个浏览器自动获取任务在进行中，请先完成或关闭主窗口重试。";
+    return;
+  }
   showConfirmAction(
     "自动获取房间号",
     "即将打开浏览器自动获取房间号，请在 2 分钟内进入目标直播间。",
@@ -143,7 +150,10 @@ async function handleFetchRoom() {
 }
 
 async function handleFetchTaskIdsMode1() {
-  if (fetchingTasks.value) return;
+  if (fetchingTasks.value || fetchingRoom.value) {
+    fetchError.value = "已有一个浏览器自动获取任务在进行中，请先完成或关闭主窗口重试。";
+    return;
+  }
   const roomId = firstRoomId();
   if (!roomId) {
     fetchError.value = "请先填写房间号，或改用模式2自动获取";
@@ -160,7 +170,10 @@ async function handleFetchTaskIdsMode1() {
 }
 
 async function handleFetchTaskIdsMode2() {
-  if (fetchingTasks.value) return;
+  if (fetchingTasks.value || fetchingRoom.value) {
+    fetchError.value = "已有一个浏览器自动获取任务在进行中，请先完成或关闭主窗口重试。";
+    return;
+  }
   showConfirmAction(
     "自动获取任务ID（模式2）",
     "即将打开浏览器自动获取任务ID，请打开有当前任务的直播间并等待页面加载完成。",
@@ -291,7 +304,7 @@ function cancelBrowserPicker() {
           <Button size="sm" variant="outline" class="h-7 text-xs" @click="handleExport">
             导出
           </Button>
-          <Button size="sm" variant="outline" class="h-7 text-xs" @click="handleSave">
+          <Button size="sm" variant="outline" class="h-7 text-xs" :disabled="loading" @click="handleSave">
             保存配置
           </Button>
         </div>
@@ -305,7 +318,7 @@ function cancelBrowserPicker() {
             <Input
               id="rooms"
               v-model="configStore.config.rooms_text"
-              placeholder="多个用逗号分隔"
+              placeholder="例如 23612045，多个用逗号分隔"
               class="h-8 min-w-0 flex-1 text-xs"
             />
             <Button
@@ -320,13 +333,13 @@ function cancelBrowserPicker() {
           </div>
         </div>
         <div class="space-y-2">
-          <Label for="threads" class="text-xs">线程数 (60-128)</Label>
+          <Label for="threads" class="text-xs">线程数 (1-256)</Label>
           <Input
             id="threads"
             v-model="configStore.config.thread_count_text"
             type="number"
             min="1"
-            max="128"
+            max="256"
             class="h-8 text-xs"
           />
         </div>

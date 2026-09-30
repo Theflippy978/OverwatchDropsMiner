@@ -1,7 +1,7 @@
 {
   "name": "overwatchdropsminer",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,15 +10,13 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@lucide/vue": "^1.48.0",
     "@tauri-apps/api": "^2.12.0",
     "@tauri-apps/plugin-dialog": "^2.8.0",
     "@tauri-apps/plugin-opener": "^2",
     "@vueuse/core": "^15.0.0",
     "pinia": "^4.0.3",
     "reka-ui": "^2.10.5",
-    "vue": "^3.5.13",
-    "vue-router": "^5.3.1"
+    "vue": "^3.5.13"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

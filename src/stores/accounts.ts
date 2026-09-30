@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { Account, AccountStatus } from "@/lib/types";
 import { useLogsStore } from "@/stores/logs";
+import { useTasksStore } from "@/stores/tasks";
 
 export const useAccountsStore = defineStore("accounts", () => {
   const accounts = ref<Account[]>([]);
@@ -38,6 +39,7 @@ export const useAccountsStore = defineStore("accounts", () => {
       selectedAccountId.value = null;
     }
     useLogsStore().clearByAccount(accountId);
+    useTasksStore().clearAccountTasks(accountId);
   }
 
   async function renameAccount(accountId: string, remark: string): Promise<Account> {

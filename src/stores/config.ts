@@ -21,7 +21,7 @@ function normalizeTaskIds(value: string): string {
 export const useConfigStore = defineStore("config", () => {
   const config = ref<GuiConfigValues>({
     cookie: "",
-    rooms_text: "",
+    rooms_text: "23612045",
     thread_count_text: "60",
     reconnect_delay_text: "8",
     task_ids_text: "",
@@ -50,13 +50,42 @@ export const useConfigStore = defineStore("config", () => {
     if (!loaded) await load();
   }
 
+  function validateConfig(): string | null {
+    const rooms = config.value.rooms_text.split(",").map((r) => r.trim()).filter((r) => r.length > 0);
+    if (rooms.length === 0) {
+      return "房间号不能为空";
+    }
+    for (const room of rooms) {
+      if (!/^\d+$/.test(room)) {
+        return `房间号格式错误: ${room}`;
+      }
+      if (parseInt(room, 10) <= 0) {
+        return `房间号必须大于 0: ${room}`;
+      }
+    }
+    const threads = parseInt(config.value.thread_count_text, 10);
+     if (isNaN(threads) || threads < 1 || threads > 256) {
+       return "线程数必须在 1-256 之间";
+     }
+     const totalConnections = rooms.length * threads;
+     if (totalConnections > 256) {
+       return `总连接数（房间数 × 线程数）不能超过 256，当前: ${totalConnections}`;
+     }
+    return null;
+  }
+
   async function save() {
     // 数值字段统一钳制
-    config.value.thread_count_text = clampInt(config.value.thread_count_text, 60, 1, 128);
+    config.value.thread_count_text = clampInt(config.value.thread_count_text, 60, 1, 256);
     config.value.reconnect_delay_text = clampInt(config.value.reconnect_delay_text, 8, 1, 3600);
     config.value.task_query_interval_text = clampInt(config.value.task_query_interval_text, 30, 10, 3600);
     // 任务 ID 文本去重 + 排序，避免仅顺序不同的输入被判为变更
     config.value.task_ids_text = normalizeTaskIds(config.value.task_ids_text);
+    // 配置验证
+    const error = validateConfig();
+    if (error) {
+      throw new Error(error);
+    }
     try {
       await invoke("save_config", { config: config.value });
     } catch (e) {

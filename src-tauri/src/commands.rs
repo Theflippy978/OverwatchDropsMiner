@@ -24,6 +24,8 @@ pub struct AccountStatus {
     pub status_line: String,
     pub task_progress: Option<TaskProgress>,
     pub progress: Option<ProgressValues>,
+    #[serde(default)]
+    pub login_invalidated: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -463,6 +465,7 @@ pub async fn get_account_status(account_id: String, sidecar: tauri::State<'_, Si
         status_line: resp.get("status_line").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         task_progress,
         progress,
+        login_invalidated: resp.get("login_invalidated").and_then(|v| v.as_bool()).unwrap_or(false),
     })
 }
 
@@ -710,26 +713,6 @@ pub async fn detect_browsers(sidecar: tauri::State<'_, SidecarManager>) -> Resul
             .unwrap_or_default(),
     })
 }
-
-#[tauri::command]
-pub async fn update_notify_urls(
-    urls: Vec<String>,
-    sidecar: tauri::State<'_, SidecarManager>,
-) -> Result<Vec<String>, String> {
-    let resp = sidecar.call("update_notify_urls", serde_json::json!({ "urls": urls }))?;
-    Ok(resp.get("urls")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-        .unwrap_or_default())
-}
-
-#[tauri::command]
-pub async fn stop_all(sidecar: tauri::State<'_, SidecarManager>) -> Result<(), String> {
-    sidecar.call("stop_all", serde_json::json!({}))?;
-    Ok(())
-}
-
-
 
 
 
