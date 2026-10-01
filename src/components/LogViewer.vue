@@ -50,7 +50,9 @@ function handleClear() {
 </script>
 
 <template>
-  <Card class="h-full">
+  <!-- 不要加 h-full：本卡在右列（grid stretch 容器）内，height:100% 会按行高
+       从自身位置向下冲出 main，造成页面底部大片空白 -->
+  <Card>
     <CardHeader class="pb-3">
       <div class="flex items-center justify-between">
         <CardTitle class="text-sm">运行日志</CardTitle>

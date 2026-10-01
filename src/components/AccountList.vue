@@ -157,7 +157,8 @@ function cancelCaptureCookie() {
 </script>
 
 <template>
-  <Card class="h-full">
+  <!-- 不加 h-full：grid 拉伸会把卡片撑到右列行高，账号少时卡片下半截全是空盒 -->
+  <Card>
     <CardHeader class="pb-3">
         <div class="flex items-center justify-between">
           <CardTitle class="text-sm">账号列表</CardTitle>

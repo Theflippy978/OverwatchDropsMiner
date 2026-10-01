@@ -230,11 +230,20 @@ def start_browser_sniff(
             sniff_success = False
             html_attempts = 0
             last_cookie_count = 0
-            for _ in range(120):
+            for attempt in range(120):
                 # 每次迭代边界响应取消请求，置位则静默退出（finally 会关闭浏览器）
                 if cancel_event.is_set():
                     logger.info("嗅探操作已取消，正在退出")
                     break
+                # 每 5 秒探测浏览器会话：用户手动关闭浏览器时立即失败退出，
+                # 避免空转占住并发名额直到 120s 超时（后续自动获取全部被拒）
+                if attempt % 5 == 0:
+                    try:
+                        _ = driver.current_url
+                    except Exception:
+                        logger.info("浏览器窗口已关闭，停止嗅探")
+                        on_error("浏览器已关闭", "检测到浏览器被手动关闭，请重新发起获取")
+                        break
                 if need_cookie and not cookie_done and cookie_captured:
                     current_cookies = cookie_captured[-1]
                     filtered_cookies = select_login_cookies(current_cookies)

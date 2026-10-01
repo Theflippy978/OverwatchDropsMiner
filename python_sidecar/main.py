@@ -69,7 +69,17 @@ class PythonSidecar:
     def __init__(self):
         self.account_store = None
         self.miner_manager = None
-        self._config_data = {}
+        self._config_data = {
+            "room_ids": [23612045],
+            "thread_count": 60,
+            "reconnect_delay_seconds": 8,
+            "task_ids": [],
+            "task_query_interval_seconds": 30,
+            "notify_urls": [],
+            "notify_on_task_complete": True,
+            "auto_claim_rewards": False,
+            "verbose": False,
+        }
         self._event_callbacks = []
         # stdout 是 JSON 协议通道：日志线程与响应线程并发写入必须串行化
         self._stdout_lock = threading.Lock()
@@ -192,7 +202,7 @@ class PythonSidecar:
                 room_ids=data.get("room_ids", []),
                 thread_count=data.get("thread_count", 60),
                 reconnect_delay_seconds=data.get("reconnect_delay_seconds", 8),
-                task_ids=[],  # task_ids 不落盘（决策 3）
+                task_ids=[],  # task_ids 不落盘（每天不同，重启后需重新获取）
                 task_query_interval_seconds=data.get("task_query_interval_seconds", 30),
                 notify_urls=data.get("notify_urls", []),
                 notify_on_task_complete=data.get("notify_on_task_complete", True),
@@ -490,10 +500,7 @@ class PythonSidecar:
 
         login_invalidated = False
         if self.miner_manager:
-            with self.miner_manager._lock:
-                session = self.miner_manager._sessions.get(account_id)
-                if session and session.controller.miner:
-                    login_invalidated = session.controller.miner.login_invalidated
+            login_invalidated = self.miner_manager.is_login_invalidated(account_id)
 
         return {
             "account_id": account_id,
@@ -963,7 +970,7 @@ class PythonSidecar:
             # 等待捕获完成或超时（120秒）
             if self._browser_capture_event:
                 await asyncio.wait_for(
-                    asyncio.wrap_future(asyncio.to_thread(self._browser_capture_event.wait)),
+                    asyncio.to_thread(self._browser_capture_event.wait),
                     timeout=120.0
                 )
 
@@ -1136,7 +1143,7 @@ class PythonSidecar:
 
             try:
                 await asyncio.wait_for(
-                    asyncio.wrap_future(asyncio.to_thread(done.wait)),
+                    asyncio.to_thread(done.wait),
                     timeout=120.0,
                 )
             except asyncio.TimeoutError:
@@ -1208,10 +1215,10 @@ class PythonSidecar:
         except Exception as e:
             return {"error": f"检测浏览器失败: {e}"}
 
-    def _account_poll_loop(self) -> None:
+    def _account_poll_loop(self, stop_event: threading.Event) -> None:
         """账号轮询线程（200ms）：回收死线程、发送状态变化事件"""
         import time
-        while True:
+        while not stop_event.is_set():
             try:
                 if not self.miner_manager or not self.account_store:
                     time.sleep(0.2)
@@ -1339,8 +1346,10 @@ async def main():
     print("[Sidecar] 启动成功，等待 Tauri 连接...", file=sys.stderr)
 
     # 启动账号轮询线程（200ms，仅存在会话时运行）
+    poll_stop = threading.Event()
     poll_thread = threading.Thread(
         target=sidecar._account_poll_loop,
+        args=(poll_stop,),
         daemon=True,
         name="account-poll",
     )
@@ -1380,6 +1389,12 @@ async def serve_requests(sidecar: PythonSidecar) -> None:
         tasks.add(task)
         task.add_done_callback(tasks.discard)
 
+    def _cleanup_tasks() -> None:
+        """清理已完成的任务引用，防止集合无限增长"""
+        done = [t for t in tasks if t.done()]
+        for t in done:
+            tasks.discard(t)
+
     def submit(line: str) -> None:
         """（事件循环线程内）解析一行请求并立即起一个并发任务"""
         line = line.strip()
@@ -1394,6 +1409,7 @@ async def serve_requests(sidecar: PythonSidecar) -> None:
             sidecar._write_line(json.dumps({"error": "无效的请求格式"}, ensure_ascii=False))
             return
         _spawn(request)
+        _cleanup_tasks()
 
     def reader() -> None:
         """stdin 读取线程：读到一行就投递回事件循环"""

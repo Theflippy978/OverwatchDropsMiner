@@ -6,7 +6,7 @@ mod commands;
 use tauri::Manager;
 
 fn main() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -57,8 +57,16 @@ fn main() {
             commands::check_update,
             commands::detect_browsers,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        // 兜底：ExitRequested 时强制回收 sidecar。
+        // 覆盖前端超时直接 destroy、关闭流程中断等未走到 shutdown 命令的路径。
+        if let tauri::RunEvent::ExitRequested { .. } = event {
+            if let Some(manager) = app_handle.try_state::<commands::SidecarManager>() {
+                manager.force_kill();
+            }
+        }
+    });
 }
-
-

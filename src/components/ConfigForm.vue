@@ -2,6 +2,7 @@
 import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { save, open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useConfigStore } from "@/stores/config";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -140,11 +141,11 @@ async function handleFetchRoom() {
     return;
   }
   showConfirmAction(
-    "自动获取房间号",
-    "即将打开浏览器自动获取房间号，请在 2 分钟内进入目标直播间。",
+    "获取房间号",
+    "即将打开 B 站主页，请进入目标直播间后手动复制房间号。",
     async () => {
       pendingAction.value = "room";
-      await showBrowserPicker();
+      await openUrl("https://space.bilibili.com/365902357");
     }
   );
 }

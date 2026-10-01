@@ -52,6 +52,13 @@ class AccountMinerManager:
             session = self._sessions.get(account_id)
         return session.tracker if session else None
 
+    def is_login_invalidated(self, account_id: str) -> bool:
+        with self._lock:
+            session = self._sessions.get(account_id)
+            if session and session.controller.miner:
+                return session.controller.miner.login_invalidated
+        return False
+
     def start(self, account: Account, *, logger: logging.Logger | None = None) -> bool:
         log = logger or LOGGER
         cookie = account.cookie()

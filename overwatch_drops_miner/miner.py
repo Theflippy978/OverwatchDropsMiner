@@ -243,7 +243,11 @@ class BilibiliWatchTimeMiner:
                     break
                 if time.monotonic() >= next_login_check:
                     try:
-                        checked_uid, _ = asyncio.run(self._probe_login())
+                        loop = asyncio.new_event_loop()
+                        try:
+                            checked_uid, _ = loop.run_until_complete(self._probe_login())
+                        finally:
+                            loop.close()
                     except Exception as exc:
                         LOGGER.warning("登录状态复检失败，将稍后重试: %s", exc)
                     else:

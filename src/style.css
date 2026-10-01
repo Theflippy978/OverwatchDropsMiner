@@ -28,7 +28,9 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
-@theme .dark {
+/* 暗色令牌：必须是普通 .dark 规则（写在 @theme 内会被 Tailwind v4 忽略，
+   导致主题切换零视觉效果）。html.dark 上重定义变量即可覆盖 :root 主题层。 */
+.dark {
   --color-background: oklch(0.145 0 0);
   --color-foreground: oklch(0.985 0 0);
   --color-card: oklch(0.205 0 0);

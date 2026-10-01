@@ -89,36 +89,64 @@ onUnmounted(() => {
 let closeHandlerRegistered = false;
 let configSyncTimer: number | null = null;
 
+/** 关闭路径专用：带超时的 invoke，超时/失败一律返回 null，绝不阻塞窗口销毁 */
+function invokeBounded<T>(command: string, timeoutMs: number): Promise<T | null> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (value: T | null) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = window.setTimeout(() => finish(null), timeoutMs);
+    invoke<T>(command).then(finish, () => finish(null));
+  });
+}
+
 function registerCloseHandler() {
   if (closeHandlerRegistered) return;
   closeHandlerRegistered = true;
   const win = getCurrentWindow();
   win.onCloseRequested(async (event) => {
+    // 统一由本流程控制关闭：先阻止默认行为，最后一定 destroy
+    event.preventDefault();
     if (anyRunning.value) {
-      event.preventDefault();
+      // 旧版行为（main_window.py:980-992）：有运行中/停止中账号 → 警告并阻止
       showCloseBlocked.value = true;
       return;
     }
     try {
-      await configStore.save();
+      await Promise.race([
+        configStore.save(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("保存超时")), 5000)),
+      ]);
     } catch (e) {
       console.error("保存会话配置失败", e);
     }
-    saveWindowGeometry();
     try {
-      await invoke("qr_cancel");
-    } catch {
-      // 无会话时后端应幂等
+      await saveWindowGeometry();
+    } catch (e) {
+      console.error("保存窗口几何失败", e);
     }
-    let closed = true;
+    await invokeBounded("qr_cancel", 1000);
+    const r = await invokeBounded<{ closed: boolean }>("shutdown", 6000);
+    if (r && r.closed === false) {
+      // 旧版行为（main_window.py:1011-1015）：仅告警仍继续关闭，不阻塞
+      console.warn("浏览器嗅探线程未在预算时间内退出，浏览器/驱动进程可能残留，请手动检查任务管理器。");
+      logsStore.addLog({
+        timestamp: new Date().toISOString(),
+        account_id: null,
+        level: "warning",
+        message: "关闭时浏览器嗅探线程未在预算时间内退出，进程可能残留，请检查任务管理器",
+      });
+    }
     try {
-      const r = await invoke<{ closed: boolean }>("shutdown");
-      closed = r?.closed !== false;
-    } catch {}
-    if (!closed) {
-      alert("浏览器嗅探线程未在预算时间内退出，浏览器/驱动进程可能残留，请手动检查任务管理器。");
+      await win.destroy();
+    } catch (e) {
+      console.error("销毁窗口失败，重试一次", e);
+      await win.destroy().catch(() => {});
     }
-    await win.destroy();
   });
 }
 
@@ -253,6 +281,7 @@ function toggleTheme() {
   darkMode.value = !darkMode.value;
   updateTheme();
   saveTheme(darkMode.value ? "dark" : "light");
+  stopSystemThemePolling();
 }
 
 function startSystemThemePolling() {
@@ -291,7 +320,7 @@ function selectAccount(accountId: string) {
 </script>
 
 <template>
-  <div class="min-h-screen bg-background text-foreground">
+  <div class="bg-background text-foreground">
     <!-- 顶栏 -->
     <header class="sticky top-0 z-10 border-b border-border bg-card/95 backdrop-blur">
       <div class="container mx-auto flex h-14 items-center justify-between px-4">

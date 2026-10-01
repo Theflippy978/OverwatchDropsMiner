@@ -270,6 +270,10 @@ class MultiPlatformNotifier:
                         )
                 if added_any:
                     apprise_app = app
+            except ImportError:
+                LOGGER.warning(
+                    "apprise 未安装，以下通知渠道将被跳过。安装方法: pip install apprise"
+                )
             except Exception as exc:
                 LOGGER.warning("apprise 通知组件初始化失败: %s", exc)
 

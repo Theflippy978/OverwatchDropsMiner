@@ -104,6 +104,7 @@ class BilibiliClient:
 
         self._http = httpx.AsyncClient(
             timeout=20.0,
+            limits=httpx.Limits(max_connections=256, max_keepalive_connections=64),
             headers=build_default_headers(self.user_agent, self.cookie_header),
         )
 

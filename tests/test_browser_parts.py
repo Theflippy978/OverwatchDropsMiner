@@ -192,6 +192,8 @@ class BrowserActionsTest(unittest.TestCase):
                 self.webextension = Mock()
                 self.quit = Mock()
                 self.get = Mock()
+                # 嗅探循环每 5 秒读取该属性探测浏览器会话是否存活
+                self.current_url = "https://www.bilibili.com/"
                 type(self).instances.append(self)
 
         class _FakeEdge(_FakeChrome):

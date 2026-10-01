@@ -150,7 +150,7 @@ def build_main_window_layout(
 
     threads_spin = PlusMinusSpinBox()
     threads_spin.setRange(1, MAX_THREAD_COUNT)
-    threads_spin.setValue(1)
+    threads_spin.setValue(60)
     threads_spin.setToolTip(THREADS_TOOLTIP)
     threads_spin.setAlignment(Qt.AlignLeft)
     reconnect_spin = PlusMinusSpinBox()

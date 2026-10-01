@@ -9,6 +9,17 @@ use std::thread;
 use std::time::Duration;
 use tauri::Emitter;
 
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+#[cfg(windows)]
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Account {
     pub id: String,
@@ -178,6 +189,11 @@ pub struct SidecarManager {
     next_id: Arc<AtomicU64>,
     alive: Arc<AtomicBool>,
     app_handle: tauri::AppHandle,
+    /// KILL_ON_JOB_CLOSE 的 Job Object 句柄（存 isize：HANDLE 是裸指针
+    /// newtype 不满足 Send/Sync，SidecarManager 需要）。主进程无论以何种
+    /// 方式退出（正常关闭 / 任务管理器强杀 / 崩溃），该句柄被内核回收时
+    /// Job 内的 sidecar 进程会被操作系统自动终止，杜绝残留。
+    kill_job: Mutex<Option<isize>>,
 }
 
 impl SidecarManager {
@@ -188,7 +204,73 @@ impl SidecarManager {
             next_id: Arc::new(AtomicU64::new(0)),
             alive: Arc::new(AtomicBool::new(false)),
             app_handle,
+            kill_job: Mutex::new(Self::create_kill_job()),
         }
+    }
+
+    /// 创建 KILL_ON_JOB_CLOSE 的 Job Object；失败返回 None（降级，不影响启动）
+    #[cfg(windows)]
+    fn create_kill_job() -> Option<isize> {
+        unsafe {
+            let job = CreateJobObjectW(None, None).ok()?;
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const _,
+                std::mem::size_of_val(&info) as u32,
+            )
+            .is_err()
+            {
+                let _ = CloseHandle(job);
+                return None;
+            }
+            Some(job.0 as isize)
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn create_kill_job() -> Option<isize> {
+        None
+    }
+
+    /// 把刚 spawn 的 sidecar 挂进 Job；失败仅记日志（保留启动能力，双保险中的一环）
+    #[cfg(windows)]
+    fn assign_child_to_kill_job(&self, raw_handle: std::os::windows::raw::HANDLE) {
+        let guard = self.kill_job.lock().unwrap();
+        let Some(job) = *guard else { return };
+        unsafe {
+            let job = HANDLE(job as *mut std::ffi::c_void);
+            if let Err(e) = AssignProcessToJobObject(job, HANDLE(raw_handle)) {
+                eprintln!("[Sidecar] sidecar 挂接 Job Object 失败: {:?}", e);
+            }
+        }
+    }
+
+    /// 定位 PyInstaller 打包的 sidecar EXE：先查 Tauri 资源目录（MSI 安装版），
+    /// 再查主 EXE 同目录（便携/开发产物）
+    fn locate_sidecar_exe(&self) -> Result<std::path::PathBuf, String> {
+        use tauri::Manager;
+        let resource_dir = self
+            .app_handle
+            .path()
+            .resource_dir()
+            .map_err(|e| format!("获取资源目录失败: {}", e))?;
+        let sidecar_exe = resource_dir.join("python_sidecar.exe");
+        if sidecar_exe.exists() {
+            return Ok(sidecar_exe);
+        }
+        let exe_dir = std::env::current_exe()
+            .map_err(|e| e.to_string())?
+            .parent()
+            .ok_or("无法获取 EXE 目录")?
+            .to_path_buf();
+        let sidecar_exe = exe_dir.join("python_sidecar.exe");
+        if sidecar_exe.exists() {
+            return Ok(sidecar_exe);
+        }
+        Err("找不到 python_sidecar.exe".to_string())
     }
 
     pub fn start(&self) -> Result<(), String> {
@@ -197,22 +279,45 @@ impl SidecarManager {
             return Ok(()); // 已经在运行
         }
 
-        // 修正路径：Tauri 的 current_dir() 是 src-tauri，需要回到项目根目录
-        let sidecar_path = std::env::current_dir()
-            .map_err(|e| e.to_string())?
-            .parent()
-            .ok_or("无法获取项目根目录")?
-            .join("python_sidecar");
+        #[cfg(windows)]
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-        let python_exe = std::env::var("PYTHON_EXE").unwrap_or_else(|_| "python".to_string());
+        let mut command = match self.locate_sidecar_exe() {
+            Ok(sidecar_exe) => {
+                let cmd = Command::new(&sidecar_exe);
+                cmd
+            }
+            Err(_) => {
+                // 开发回退：直接用 Python 跑 sidecar 源码
+                // 修正路径：Tauri 的 current_dir() 是 src-tauri，需要回到项目根目录
+                let sidecar_path = std::env::current_dir()
+                    .map_err(|e| e.to_string())?
+                    .parent()
+                    .ok_or("无法获取项目根目录")?
+                    .join("python_sidecar");
+                let python_exe = std::env::var("PYTHON_EXE").unwrap_or_else(|_| "python".to_string());
+                let mut cmd = Command::new(&python_exe);
+                cmd.arg(sidecar_path.join("main.py"));
+                cmd
+            }
+        };
 
-        let mut process = Command::new(&python_exe)
-            .arg(sidecar_path.join("main.py"))
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut process = command
             .spawn()
             .map_err(|e| format!("启动 Python sidecar 失败: {}", e))?;
+
+        // 挂进 KILL_ON_JOB_CLOSE 的 Job：主进程被任何方式杀死时内核自动回收 sidecar
+        #[cfg(windows)]
+        self.assign_child_to_kill_job(process.as_raw_handle());
 
         let stdin = process.stdin.take().ok_or("无法获取 sidecar stdin")?;
         let stdout = process.stdout.take().ok_or("无法获取 sidecar stdout")?;
@@ -238,6 +343,28 @@ impl SidecarManager {
             let _ = proc.process.kill();
             let _ = proc.process.wait();
         }
+    }
+
+    /// 幂等强杀：无论 sidecar 是否处于优雅退出流程，确保进程被回收。
+    /// Rust `Child` drop 不会杀子进程，stdin EOF 也可能被继承句柄打断，
+    /// 因此关闭链路不可依赖“自动退出”，必须显式 kill。
+    pub fn force_kill(&self) {
+        self.reset_process();
+        self.alive.store(false, Ordering::SeqCst);
+    }
+
+    /// 关闭 sidecar：先通知 Python 侧清理（`_shutdown` 只清理不退出进程），
+    /// 随后强制回收进程。sidecar 未拉起时不启动新进程。
+    pub fn shutdown_sidecar(&self) -> Result<(), String> {
+        {
+            let guard = self.child.lock().unwrap();
+            if guard.is_none() && !self.alive.load(Ordering::SeqCst) {
+                return Ok(()); // 未拉起，避免 shutdown 反而创建进程
+            }
+        }
+        let _ = self.call("shutdown", serde_json::json!({}));
+        self.force_kill();
+        Ok(())
     }
 
     pub fn call(&self, command: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
@@ -294,22 +421,26 @@ impl SidecarManager {
     }
 }
 
-/// 独占 stdout 的读线程：事件转发前端，响应按 id 派发
+/// 独占 stdout 的读线程：事件转发前端，响应按 id 派发。
+/// 用 `read_until` + `from_utf8_lossy`：无效 UTF-8 只污染单行，不会中断整个通信链路。
 fn reader_loop(
-    reader: BufReader<ChildStdout>,
+    mut reader: BufReader<ChildStdout>,
     pending: PendingMap,
     alive: Arc<AtomicBool>,
     app_handle: tauri::AppHandle,
 ) {
-    for line in reader.lines() {
-        let line = match line {
-            Ok(line) => line,
+    loop {
+        let mut buf: Vec<u8> = Vec::new();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break, // EOF：进程退出
+            Ok(_) => {}
             Err(e) => {
                 eprintln!("读取 sidecar 失败: {}", e);
                 break;
             }
-        };
+        }
 
+        let line = String::from_utf8_lossy(&buf);
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -659,10 +790,8 @@ pub async fn sync_config_to_miners(
 
 #[tauri::command]
 pub async fn shutdown(sidecar: tauri::State<'_, SidecarManager>) -> Result<ShutdownResult, String> {
-    let resp = sidecar.call("shutdown", serde_json::json!({}))?;
-    Ok(ShutdownResult {
-        closed: resp.get("closed").and_then(|v| v.as_bool()).unwrap_or(false),
-    })
+    sidecar.shutdown_sidecar()?;
+    Ok(ShutdownResult { closed: true })
 }
 
 #[derive(Debug, Serialize, Deserialize)]
