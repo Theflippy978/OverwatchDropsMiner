@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from overwatch_drops_miner.utils import (
+from python_sidecar.backend.utils import (
     extract_bili_live_task_groups,
     join_cookie,
     parse_cookie,
@@ -90,6 +90,48 @@ class ExtractBiliLiveTaskGroupsTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_extracts_flat_tasklist_when_no_tab_structure(self) -> None:
+        # 页面改版后任务列表不再是 EvaTabs/EvaTabs.Panel 嵌套，而是单个扁平的
+        # EraTasklistPc。没有它时自动获取任务 ID 恒失败（实测 2026-10-03，
+        # 真实页面确有 EraTasklistPc 但 EvaTabs 计数为 0）。
+        layer_tree = [
+            _component("EvaPage", {}, [
+                _component("EraTasklistPc", {
+                    "style": {},
+                    "tasklist": [{"taskId": "flat-a"}, {"taskId": "flat-b"}],
+                }),
+            ]),
+        ]
+        page_data = {"layerTree": layer_tree}
+        html = f"<script>window.__BILIACT_EVAPAGEDATA__ = {json.dumps(page_data)};</script>"
+
+        self.assertEqual(
+            extract_bili_live_task_groups(html),
+            [{"label": "直播间任务", "task_ids": ["flat-a", "flat-b"], "active": True}],
+        )
+
+    def test_flat_tasklist_deduplicates_across_components(self) -> None:
+        # 同一任务出现在多个组件里时只应出现一次
+        layer_tree = [
+            _component("EraTasklistPc", _task_group("dup")),
+            _component("EraTasklistPc", _task_group("dup")),
+            _component("EraTasklistPc", _task_group("other")),
+        ]
+        page_data = {"layerTree": layer_tree}
+        html = f"<script>window.__BILIACT_EVAPAGEDATA__ = {json.dumps(page_data)};</script>"
+
+        self.assertEqual(
+            extract_bili_live_task_groups(html),
+            [{"label": "直播间任务", "task_ids": ["dup", "other"], "active": True}],
+        )
+
+    def test_flat_tasklist_absent_returns_empty(self) -> None:
+        # 无活动房间：没有 EraTasklistPc，应返回空而不是报错或造出空分组
+        page_data = {"layerTree": [_component("EvaPage", {})]}
+        html = f"<script>window.__BILIACT_EVAPAGEDATA__ = {json.dumps(page_data)};</script>"
+
+        self.assertEqual(extract_bili_live_task_groups(html), [])
 
     def test_returns_empty_for_missing_or_invalid_page_data(self) -> None:
         invalid_pages = [

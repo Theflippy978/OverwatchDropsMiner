@@ -6,21 +6,42 @@ detect_browsers / sync_config_to_miners / shutdown / check_update /
 update_notify_urls / stop_all。这类偏差在运行期表现为「前端调用合法、
 sidecar 却没有对应实现」或反之，静态断言可以第一时间拦住。
 
+2026-10-02：Tauri 命令注册已从 main.rs 迁到 lib.rs（遵循 Tauri 2 惯例
+「lib 提供 run()、bin 只做入口」；原状态下 lib.rs 只有 7 行残缺副本，
+缺 mod commands / invoke_handler / dialog 插件注册，移动端入口下
+25 个命令全不存在，而 capabilities 仍授予 dialog:default）。因此这里
+两个文件都要扫。
+
 不依赖 PySide6、网络、临时目录。
 """
 import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MAIN_RS = REPO_ROOT / "src-tauri" / "src" / "main.rs"
+# 命令注册可能位于 lib.rs（Tauri 2 惯例）或 main.rs（历史写法），都要扫
+RUST_ENTRY_FILES = [
+    REPO_ROOT / "src-tauri" / "src" / "lib.rs",
+    REPO_ROOT / "src-tauri" / "src" / "main.rs",
+]
 SIDECAR_MAIN = REPO_ROOT / "python_sidecar" / "main.py"
 
 
 def rust_registered_commands() -> set[str]:
-    text = MAIN_RS.read_text(encoding="utf-8")
-    match = re.search(r"generate_handler!\s*\[(.*?)\]", text, re.S)
-    assert match, "src-tauri/src/main.rs 里找不到 tauri::generate_handler! 列表"
-    return set(re.findall(r"commands::([a-z0-9_]+)", match.group(1)))
+    commands: set[str] = set()
+    found_any = False
+    for path in RUST_ENTRY_FILES:
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        match = re.search(r"generate_handler!\s*\[(.*?)\]", text, re.S)
+        if not match:
+            continue
+        found_any = True
+        commands |= set(re.findall(r"commands::([a-z0-9_]+)", match.group(1)))
+    assert found_any, (
+        "src-tauri/src/lib.rs 与 main.rs 里都找不到 tauri::generate_handler! 列表"
+    )
+    return commands
 
 
 def sidecar_handled_commands() -> set[str]:

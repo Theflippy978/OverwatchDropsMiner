@@ -4,22 +4,22 @@ import logging
 import unittest
 from unittest.mock import AsyncMock, call, patch
 
-from overwatch_drops_miner.client_parts.core import BilibiliClient
-from overwatch_drops_miner.client_parts.http import (
+from python_sidecar.backend.client_parts.core import BilibiliClient
+from python_sidecar.backend.client_parts.http import (
     signed_get_json,
     signed_post_form_json,
 )
-from overwatch_drops_miner.client_parts.models import (
+from python_sidecar.backend.client_parts.models import (
     MissionRewardClaimResult,
     MissionRewardInfo,
     TaskCheckpointProgress,
     TaskProgress,
 )
-from overwatch_drops_miner.client_parts.rewards import (
+from python_sidecar.backend.client_parts.rewards import (
     REWARD_CLAIM_INTERVAL_SECONDS,
     parse_mission_reward_info,
 )
-from overwatch_drops_miner.client_parts.tasks import (
+from python_sidecar.backend.client_parts.tasks import (
     parse_task_progress_payload,
     resolve_reward_task_ids,
 )
@@ -160,7 +160,7 @@ class RewardClaimFlowTest(unittest.IsolatedAsyncioTestCase):
         client = _FakeClaimClient([_progress("parent", "child-a", "child-b")])
 
         with patch(
-            "overwatch_drops_miner.client_parts.core.asyncio.sleep",
+            "python_sidecar.backend.client_parts.core.asyncio.sleep",
             new_callable=AsyncMock,
         ) as sleep_mock:
             results = await BilibiliClient.receive_all_mission_rewards(
@@ -181,7 +181,7 @@ class RewardClaimFlowTest(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertLogs(
-            "overwatch_drops_miner.client_parts.core",
+            "python_sidecar.backend.client_parts.core",
             level="WARNING",
         ) as captured:
             results = await BilibiliClient.receive_all_mission_rewards(
@@ -316,10 +316,10 @@ class MissionRetryLogTest(unittest.IsolatedAsyncioTestCase):
         client = _RateLimitedMissionClient()
 
         with patch(
-            "overwatch_drops_miner.client_parts.core.asyncio.sleep",
+            "python_sidecar.backend.client_parts.core.asyncio.sleep",
             new_callable=AsyncMock,
         ) as sleep_mock, self.assertLogs(
-            "overwatch_drops_miner.client_parts.core",
+            "python_sidecar.backend.client_parts.core",
             level="INFO",
         ) as captured:
             with self.assertRaisesRegex(ValueError, "请求过于频繁"):

@@ -12,6 +12,7 @@
 不依赖 PySide6、网络与临时目录。
 """
 import asyncio
+import importlib
 import io
 import json
 import sys
@@ -39,6 +40,12 @@ class FakeSidecar:
     def _write_line(self, text: str) -> None:
         with self._lock:
             self.lines.append(text)
+
+    # 与 PythonSidecar._dumps 保持同一序列化契约（2026-10-02）：
+    # run_request 改用它并带异常兜底后，fake 必须提供同名方法，
+    # 否则会走进兜底分支并把正常响应替换成「响应序列化/写出失败」。
+    def _dumps(self, payload) -> str:
+        return json.dumps(payload, ensure_ascii=False, allow_nan=False)
 
     async def handle_command(self, command, params):
         self.started.append(command)
@@ -154,7 +161,10 @@ def test_clamp_int(value, expected):
         ("b, a ,a", "a,b"),
         (" 1 ", "1"),
         ("", ""),
-        (None, "None"),
+        # 2026-10-02 更正：原期望 "None" 是在保护错误行为 ——
+        # str(None) == "None" 会生成一个名为 "None" 的任务 ID。
+        # 函数本身缺 None 防护，已改为返回空串。
+        (None, ""),
     ],
 )
 def test_normalize_task_ids_text(value, expected):
@@ -192,3 +202,151 @@ def test_sniff_guard_release_clears_session_refs():
     assert sidecar._sniff_busy is False
     assert sidecar._sniff_cancel_event is None
     assert sidecar._sniff_thread_ref is None
+
+
+# --- _drive_sniff_session：Cookie 捕获 / 房间号 / 任务ID 三种模式共用的骨架 ---
+# 这些断言覆盖重构前两份抄写不一致的行为，现在骨架只剩一份。
+
+
+@pytest.fixture
+def fake_sniffer(monkeypatch):
+    """替换 start_browser_sniff，返回记录到的调用参数与可控的 done 信号。
+
+    真实实现要拉起 Selenium（5-15s）且依赖本机装了 Chrome，测试里不可行。
+    """
+    calls: list[dict] = []
+
+    def _install(behaviour):
+        def _fake_start(**kwargs):
+            calls.append(kwargs)
+            return behaviour(kwargs)
+
+        module = importlib.import_module(
+            "python_sidecar.backend.browser.browser_sniffer"
+        )
+        monkeypatch.setattr(module, "start_browser_sniff", _fake_start)
+        return calls
+
+    return _install
+
+
+def test_drive_sniff_returns_none_when_result_ready(fake_sniffer):
+    """回调 set 了 done → 骨架返回 None，由调用方读自己的结果容器"""
+    sidecar = _bare_sidecar()
+    done = threading.Event()
+
+    def _behaviour(kwargs):
+        # 模拟嗅探线程回调：写结果并唤醒 waiter
+        kwargs["on_result"]({"room_id": 123})
+        done.set()
+        return threading.current_thread()
+
+    fake_sniffer(_behaviour)
+
+    async def _run():
+        return await sidecar._drive_sniff_session(
+            action="浏览器嗅探",
+            start_kwargs={"on_result": lambda payload: None},
+            done=done,
+            timeout_error="超时了",
+        )
+
+    assert asyncio.run(_run()) is None
+
+
+def test_drive_sniff_returns_error_dict_on_timeout(fake_sniffer):
+    """嗅探线程什么都不做 → 超时 → 返回调用方给定的 timeout_error"""
+    sidecar = _bare_sidecar()
+    done = threading.Event()  # 永不被 set
+
+    def _behaviour(kwargs):
+        return threading.current_thread()
+
+    fake_sniffer(_behaviour)
+
+    async def _run():
+        return await sidecar._drive_sniff_session(
+            action="浏览器嗅探",
+            start_kwargs={},
+            done=done,
+            timeout_error="浏览器操作超时（2 分钟）",
+            timeout_seconds=0.05,
+        )
+
+    result = asyncio.run(_run())
+    assert result == {"error": "浏览器操作超时（2 分钟）"}
+
+
+def test_drive_sniff_rejects_concurrent_session(fake_sniffer):
+    """守卫被占用时直接拒绝，不起浏览器"""
+    sidecar = _bare_sidecar()
+    sidecar._sniff_busy = True  # 模拟另一条嗅探命令正在跑
+    calls = fake_sniffer(lambda kwargs: threading.current_thread())
+    done = threading.Event()
+
+    async def _run():
+        return await sidecar._drive_sniff_session(
+            action="浏览器嗅探",
+            start_kwargs={},
+            done=done,
+            timeout_error="超时了",
+        )
+
+    result = asyncio.run(_run())
+    assert "error" in result
+    assert calls == []  # 关键：没有真的去起浏览器
+
+
+def test_drive_sniff_releases_guard_and_cancels_in_finally(fake_sniffer):
+    """无论成功、超时还是异常，finally 都必须释放守卫并唤醒 waiter"""
+    sidecar = _bare_sidecar()
+    done = threading.Event()
+    seen: dict = {}
+
+    def _behaviour(kwargs):
+        seen["cancel"] = kwargs["cancel_event"]
+        return threading.current_thread()
+
+    fake_sniffer(_behaviour)
+
+    async def _run():
+        return await sidecar._drive_sniff_session(
+            action="浏览器嗅探",
+            start_kwargs={},
+            done=done,
+            timeout_error="超时了",
+            timeout_seconds=0.05,
+        )
+
+    asyncio.run(_run())
+    # 守卫已释放（不再 busy）
+    assert sidecar._sniff_busy is False
+    assert sidecar._sniff_cancel_event is None
+    # cancel_event 必须被 set —— 否则嗅探线程的 driver.quit() 永远不执行
+    assert seen["cancel"].is_set()
+    # done 必须被 set —— 否则 to_thread(done.wait) 的工作线程永久阻塞、拖死退出
+    assert done.is_set()
+
+
+def test_drive_sniff_releases_guard_when_start_raises(fake_sniffer):
+    """start_browser_sniff 抛异常时守卫不能泄漏（否则后续命令永远被拒）"""
+    sidecar = _bare_sidecar()
+    done = threading.Event()
+
+    def _behaviour(kwargs):
+        raise RuntimeError("驱动崩了")
+
+    fake_sniffer(_behaviour)
+
+    async def _run():
+        return await sidecar._drive_sniff_session(
+            action="浏览器捕获",
+            start_kwargs={},
+            done=done,
+            timeout_error="超时了",
+        )
+
+    result = asyncio.run(_run())
+    assert "error" in result
+    assert sidecar._sniff_busy is False
+    assert done.is_set()

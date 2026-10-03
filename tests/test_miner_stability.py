@@ -4,8 +4,8 @@ import asyncio
 import unittest
 from unittest.mock import patch
 
-from overwatch_drops_miner.config import MinerConfig
-from overwatch_drops_miner.miner import BilibiliWatchTimeMiner, SessionPlan
+from python_sidecar.backend.config import MinerConfig
+from python_sidecar.backend.miner import BilibiliWatchTimeMiner, SessionPlan
 
 
 def config(room_ids: list[int] | None = None, thread_count: int = 1) -> MinerConfig:
@@ -53,7 +53,7 @@ class MinerStabilityTest(unittest.TestCase):
         miner = BilibiliWatchTimeMiner(config())
 
         with patch(
-            "overwatch_drops_miner.miner.BilibiliClient", FakeFailingClient
+            "python_sidecar.backend.miner.BilibiliClient", FakeFailingClient
         ):
             # 直接调用 _thread_entry 层面：连接内异常应被吞掉并正常返回，
             # 绝不能把全局 stop_event 置位拖垮其他房间/连接。
@@ -79,8 +79,8 @@ class MinerStabilityTest(unittest.TestCase):
         miner._uid = None
 
         with patch(
-            "overwatch_drops_miner.miner.BilibiliClient", FakeNoneUidClient
-        ), patch("overwatch_drops_miner.miner.X25KnWorker", RecordingWorker):
+            "python_sidecar.backend.miner.BilibiliClient", FakeNoneUidClient
+        ), patch("python_sidecar.backend.miner.X25KnWorker", RecordingWorker):
             miner._thread_entry(SessionPlan(1, 1), 1)
 
         # uid 为 None 时该连接直接退出，绝不以 uid=0 创建 worker。

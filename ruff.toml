@@ -1,0 +1,38 @@
+# ruff 配置（2026-10-02 新增）
+#
+# 此前全仓库零 lint 配置，唯一静态门禁是前端的 vue-tsc。它结构上抓不到
+# Python 侧问题 —— 本文件首次启用时立刻抓出两个真 bug：
+#   * python_sidecar/main.py 有 8 处 `logger.xxx()`，但模块并无同名全局
+#     （原先只有函数内的局部 logger），全部位于 except 分支 → 异常处理
+#     路径自身会抛 NameError；
+#   * 同文件 handle_command 的 except 分支引用了不存在的 `request`
+#     （形参名是 command）—— 只在 handler 抛异常时可达，故零测试覆盖。
+
+target-version = "py312"
+line-length = 100
+# 与仓库实际布局一致：src 侧根目录是两个 Python 包 + sidecar + tests
+exclude = [
+    ".recycle",
+    ".ptmp",
+    "build",
+    "dist",
+    "node_modules",
+    "src-tauri",
+]
+
+[lint]
+# 首轮只开「确定性最高」的规则集，避免一次性引入数百条风格告警而无法落地。
+# 分级说明：
+#   F    pyflakes：未定义名（F821）、未用导入、f-string 缺占位符等 —— 必须为 0
+#   E9   运行时错误：语法/缩进错误 —— 必须为 0
+# 其余（E/W 风格、I 排序、B bugbear、UP 升级、SIM 简化）待后续逐档放开，
+# 每放开一档都先跑一遍确认存量可控。
+select = ["F", "E9"]
+# 未来放开风格类规则时用 ignore 精确豁免，而不是整条 select 排除
+ignore = []
+
+[lint.per-file-ignores]
+# 测试文件里大量使用 unittest 与 mock 注入，F401 常为「为副作用而导入」
+"tests/*" = ["F401"]
+# sidecar 的 IPC 契约要求响应 dict 保持字面量形态，格式化类工具勿动
+# （当前未启用 formatter，此处仅作说明占位）

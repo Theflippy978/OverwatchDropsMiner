@@ -2,13 +2,13 @@
 import { ref, watch, nextTick } from "vue";
 import { useLogsStore } from "@/stores/logs";
 import { useAccountsStore } from "@/stores/accounts";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
 const logsStore = useLogsStore();
 const accountsStore = useAccountsStore();
 const scrollRef = ref<HTMLElement | null>(null);
-const collapsed = ref(false);
+const collapsed = ref(true);
 
 watch(
   () => logsStore.filteredLogs.length,
@@ -23,11 +23,13 @@ watch(
 );
 
 function getLevelColor(level: string) {
+  // 用语义令牌而非 Tailwind 默认调色板：默认色在浅色主题下白底对比度
+  // 只有 1.9~3.8:1，全部不达 WCAG AA（4.5:1），且不随 .dark 变化。
   switch (level) {
     case "error":
-      return "text-red-500";
+      return "text-signal-danger";
     case "warning":
-      return "text-yellow-500";
+      return "text-signal-warning";
     case "debug":
       return "text-muted-foreground";
     default:
@@ -50,15 +52,25 @@ function handleClear() {
 </script>
 
 <template>
-  <!-- 不要加 h-full：本卡在右列（grid stretch 容器）内，height:100% 会按行高
-       从自身位置向下冲出 main，造成页面底部大片空白 -->
-  <Card>
-    <CardHeader class="pb-3">
-      <div class="flex items-center justify-between">
-        <CardTitle class="text-sm">运行日志</CardTitle>
+  <!-- 卡片内边距对齐旧版 main_layout.py:268 的 setContentsMargins(18, 8, 18, 14)；
+       不要加 h-full：本卡在右列滚动容器内，height:100% 会向下冲出 main 造成底部空白 -->
+  <Card class="card-hover">
+    <CardHeader class="px-[18px] pb-2 pt-2">
+      <div class="flex items-center justify-between gap-2">
+        <!-- 标题即折叠开关（对齐旧版左上角折叠按钮） -->
+        <button
+          :aria-expanded="!collapsed"
+          aria-controls="log-panel"
+          class="text-left text-[11pt] font-bold text-foreground transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          @click="collapsed = !collapsed"
+        >
+          {{ collapsed ? "展开运行日志" : "收起运行日志" }}
+        </button>
         <div class="flex items-center gap-2">
           <select
-            class="h-7 rounded-md border border-border bg-background px-2 text-xs"
+            id="log-account-filter"
+            aria-label="按账号过滤日志"
+            class="h-7 rounded-md border border-input bg-background px-2 text-xs"
             :value="logsStore.filterAccountId ?? ''"
             @change="logsStore.setFilter(($event.target as HTMLSelectElement).value || null)"
           >
@@ -74,15 +86,7 @@ function handleClear() {
           <Button
             size="sm"
             variant="ghost"
-            class="h-7 text-xs text-muted-foreground"
-            @click="collapsed = !collapsed"
-          >
-            {{ collapsed ? "展开" : "折叠" }}
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            class="h-7 text-xs text-muted-foreground"
+            class="h-7 rounded-md px-3 text-xs text-muted-foreground"
             @click="handleClear"
           >
             清空
@@ -90,11 +94,23 @@ function handleClear() {
         </div>
       </div>
     </CardHeader>
-    <CardContent class="pt-0">
+    <CardContent class="px-[18px] pb-3.5 pt-0">
+      <!-- 展开高度对齐旧版 log_text（main_layout.py:286-287）：min-height 140 + 固定可视高度。
+           边框/底色/内边距只放在展开态：border-box 下 height:0 仍会被 padding 撑到
+           padding 之和（实测 12px），折叠时必须连 padding 一起清零。
+           折叠用 hidden（display:none）而非 opacity-0：后者只影响视觉，DOM 里
+           最多 5000 条日志仍在无障碍树中，折叠后读屏会继续逐条朗读。
+
+           高度用 min(220px, 30vh) 而非固定 220px：日志卡在右列 flex 流里与
+           TaskProgress 争抢空间，固定高度在小窗口下会把挂宝进度压到 min-h 之下，
+           连带把「自动领取 / 领取奖励 / 手动刷新」那一行挤出去。vh 下限保证
+           窗口再小也留得住上方卡片。 -->
       <div
+        v-show="!collapsed"
+        id="log-panel"
         ref="scrollRef"
-        class="overflow-y-auto rounded-md border border-border bg-muted/30 p-3 transition-all duration-300"
-        :class="collapsed ? 'max-h-0' : 'h-[calc(100vh-320px)]'"
+        class="log-panel overflow-y-auto rounded-md border border-input bg-input/40 p-1.5"
+        :class="collapsed ? 'h-0 min-h-0' : 'h-[min(220px,30vh)] min-h-[120px]'"
       >
         <div v-if="logsStore.filteredLogs.length === 0" class="py-8 text-center text-sm text-muted-foreground">
           暂无日志
@@ -108,7 +124,7 @@ function handleClear() {
             <span class="shrink-0 text-muted-foreground">{{ formatTime(log.timestamp) }}</span>
             <span
               v-if="log.account_id"
-              class="shrink-0 text-blue-500"
+              class="shrink-0 text-signal-info"
             >
               [{{ log.account_id.slice(0, 6) }}]
             </span>

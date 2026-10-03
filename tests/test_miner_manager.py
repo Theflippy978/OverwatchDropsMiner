@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from overwatch_drops_miner.gui_parts.worker_controller import WorkerController
-from overwatch_drops_miner.miner_manager import AccountMinerManager, _AccountSession
+from python_sidecar.backend.browser.worker_controller import WorkerController
+from python_sidecar.backend.miner_manager import AccountMinerManager, _AccountSession
 
 
 class FakeStopMiner:

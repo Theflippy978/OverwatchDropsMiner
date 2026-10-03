@@ -2,33 +2,7 @@ import { defineStore } from "pinia";
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useConfigStore } from "@/stores/config";
-
-interface Reward {
-  name: string;
-  icon: string;
-  count: number;
-}
-
-interface CheckPoint {
-  sid: string;
-  alias: string;
-  status: number;
-  is_completed: boolean;
-  cur_value: number;
-  limit_value: number;
-  award_name: string;
-  award_count: number;
-}
-
-interface TaskItem {
-  task_id: string;
-  title: string;
-  progress: number;
-  target: number;
-  status: string;
-  rewards: Reward[];
-  check_points: CheckPoint[];
-}
+import type { TaskItem } from "@/lib/types";
 
 interface AccountTasks {
   tasks: TaskItem[];
@@ -42,6 +16,8 @@ interface AccountTasks {
   pendingIds: Set<string>;
   refreshing: boolean;
   refreshQueued: boolean;
+  /** 排队的那次刷新是否来自手动点击（累积意图，防自动刷新吞掉手动刷新） */
+  queuedManual: boolean;
   claiming: boolean;
   claimQueued: boolean;
 }
@@ -87,34 +63,56 @@ function collectClaimUnits(tasks: TaskItem[]): ClaimUnit[] {
 export const useTasksStore = defineStore("tasks", () => {
   const configStore = useConfigStore();
   const accountTasksMap = ref<Record<string, AccountTasks>>({});
+  /** 已删除账号的 id：防止删除后在途的 refreshTasks/claimRewards 回来时
+      通过 getAccountTasks 为已删除账号重建条目（既无人驱动刷新也无人再删，
+      每次删账号累加一份泄漏） */
+  const deletedIds = new Set<string>();
+
+  function createAccountTasks(): AccountTasks {
+    return {
+      tasks: [],
+      text: "",
+      error: "",
+      cur: 0,
+      limit: 0,
+      handledIds: new Set(),
+      pendingIds: new Set(),
+      refreshing: false,
+      refreshQueued: false,
+      queuedManual: false,
+      claiming: false,
+      claimQueued: false,
+    };
+  }
 
   function getAccountTasks(accountId: string): AccountTasks {
     if (!accountTasksMap.value[accountId]) {
       accountTasksMap.value = {
         ...accountTasksMap.value,
-        [accountId]: {
-          tasks: [],
-          text: "",
-          error: "",
-          cur: 0,
-          limit: 0,
-          handledIds: new Set(),
-          pendingIds: new Set(),
-          refreshing: false,
-          refreshQueued: false,
-          claiming: false,
-          claimQueued: false,
-        },
+        [accountId]: createAccountTasks(),
       };
     }
     return accountTasksMap.value[accountId];
   }
 
+  /** 纯读取：不在渲染期写响应式状态。
+      computed getter 里调用 getAccountTasks 会在求值过程中整体替换
+      accountTasksMap.value，把自己重新置脏，并连带失效其它订阅该 map 的
+      渲染 effect（"Maximum recursive updates exceeded" 前兆）。 */
+  function peekAccountTasks(accountId: string): AccountTasks | undefined {
+    return accountTasksMap.value[accountId];
+  }
+
   async function refreshTasks(accountId: string, manual = true) {
+    if (deletedIds.has(accountId)) return;
     const accountTasks = getAccountTasks(accountId);
     if (accountTasks.refreshing) {
+      // 排队时累积「手动」意图：refreshQueued 只是布尔，若自动刷新在途
+      // 而用户点了手动刷新，重跑会退化成 manual=false，
+      // 「已有刷新进行中」提示永不出现，UI 表现为点了没反应。
       accountTasks.refreshQueued = true;
       if (manual) {
+        accountTasks.queuedManual = true;
         accountTasks.text = "已有刷新进行中，已排队下一次刷新...";
       }
       return;
@@ -128,7 +126,13 @@ export const useTasksStore = defineStore("tasks", () => {
       );
       accountTasks.tasks = result.tasks;
       accountTasks.text = result.text;
-      if (result.tasks.length > 0) {
+      // 账号在请求在途期间被删除：丢弃结果，不要重建条目
+      if (deletedIds.has(accountId)) return;
+      if (result.tasks.length === 0) {
+        // 空列表时清零，避免出现「任务列表空 + 进度条显示上次进度」的矛盾态
+        accountTasks.cur = 0;
+        accountTasks.limit = 0;
+      } else {
         const best = result.tasks.reduce((a, b) => (a.target > b.target ? a : b));
         accountTasks.cur = best.progress;
         accountTasks.limit = best.target;
@@ -138,11 +142,18 @@ export const useTasksStore = defineStore("tasks", () => {
       const units = collectClaimUnits(result.tasks ?? []);
       const incomplete = new Set<string>();
       const completed = new Set<string>();
+      const claimed = new Set<string>();
       for (const unit of units) {
-        if (unit.claimed) continue;
-        if (unit.completed) completed.add(unit.id);
+        // 同一 sid 可能出现在多个任务里（其一已完成、其一已领取）。
+        // 三档互斥：claimed 最高优先，其次 completed，最后 incomplete。
+        // 若同一 id 同时进 completed 与 incomplete，
+        // 后续用 incomplete 剔除 handledIds 会把已领过的奖励重新变成可领。
+        if (unit.claimed) claimed.add(unit.id);
+        else if (unit.completed) completed.add(unit.id);
         else incomplete.add(unit.id);
       }
+      // 已领取同样应退出「完成待领取」集合，避免 pending 永久占位
+      for (const id of claimed) completed.delete(id);
       accountTasks.handledIds = new Set(
         [...accountTasks.handledIds].filter((id) => !incomplete.has(id))
       );
@@ -158,7 +169,9 @@ export const useTasksStore = defineStore("tasks", () => {
       accountTasks.refreshing = false;
       if (accountTasks.refreshQueued) {
         accountTasks.refreshQueued = false;
-        void refreshTasks(accountId, manual);
+        const rerunManual = accountTasks.queuedManual;
+        accountTasks.queuedManual = false;
+        void refreshTasks(accountId, rerunManual);
       }
     }
   }
@@ -168,8 +181,13 @@ export const useTasksStore = defineStore("tasks", () => {
     const accountTasks = getAccountTasks(accountId);
     if (accountTasks.claiming) return;
 
+    // 关键：必须同时排除 claimed。
+    // 后端 models.py:48 的 is_completed 把 status===6（已领取）也算作完成，
+    // 所以已领取的奖励同时满足 claimed 与 completed；若只过滤 completed，
+    // 冷启动时 handledIds 为空，会对全部历史已领奖励下发一次无效 claim。
+    // 上游原项目 classify_auto_claim_task_ids 用 status==6 优先归入 claimed，正是为此。
     const toClaim = collectClaimUnits(accountTasks.tasks ?? [])
-      .filter((unit) => unit.completed)
+      .filter((unit) => unit.completed && !unit.claimed)
       .map((unit) => unit.id)
       .filter(
         (id) => !accountTasks.handledIds.has(id) && !accountTasks.pendingIds.has(id)
@@ -183,6 +201,7 @@ export const useTasksStore = defineStore("tasks", () => {
   }
 
   async function claimRewards(accountId: string, automatic = false) {
+    if (deletedIds.has(accountId)) return;
     const accountTasks = getAccountTasks(accountId);
     if (accountTasks.claiming) {
       accountTasks.claimQueued = true;
@@ -220,6 +239,10 @@ export const useTasksStore = defineStore("tasks", () => {
         [...accountTasks.pendingIds].filter((id) => !requested.has(id))
       );
       accountTasks.text = (automatic ? "自动领取\n" : "") + result.text;
+      // 先解除 claiming 再做嵌套刷新：否则 refreshTasks 内部的
+      // maybeAutoClaim 会被「本轮正在领取」挡住，本轮新完成的任务
+      // 要多等一个轮询周期（最短 10s）才被领取。
+      accountTasks.claiming = false;
       if (result.results.length > 0) {
         await refreshTasks(accountId, false);
       }
@@ -239,14 +262,24 @@ export const useTasksStore = defineStore("tasks", () => {
   }
 
   function clearAccountTasks(accountId: string) {
-    delete accountTasksMap.value[accountId];
+    deletedIds.add(accountId);
+    const next = { ...accountTasksMap.value };
+    delete next[accountId];
+    accountTasksMap.value = next;
+  }
+
+  /** 账号重新被添加时清掉删除标记（同一 id 再次出现是合法复用） */
+  function reviveAccountTasks(accountId: string) {
+    deletedIds.delete(accountId);
   }
 
   return {
     accountTasksMap,
     getAccountTasks,
+    peekAccountTasks,
     refreshTasks,
     claimRewards,
     clearAccountTasks,
+    reviveAccountTasks,
   };
 });

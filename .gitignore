@@ -1,29 +1,55 @@
 # Python
 __pycache__/
 *.pyc
+# PyInstaller 中间产物与 Vite 构建产物（约 225MB + 0.7MB）
 build/
 dist/
 *.spec.venv/
 *.har
+# 2026-10-02 精确化：原先是全局 *.exe，过于宽和 —— 会连将来需要入库的
+# 合法 exe（CI 夹具、驱动替身、MSI 工具）一起忽略。改为只忽略产物目录。
 *.exe
+!/src-tauri/binaries/.gitkeep
+# 配置目录由 OW_CONFIG_DIR / %APPDATA% 决定，可能出现在任意工作目录，
+# 只忽略根目录那一处不够
 config.json
+**/config.json
 AGENTS.md
 .DS_Store
-.pytest_cache/
 debug.log
+
+# 测试与 lint 工具缓存
+.pytest_cache/
+.ruff_cache/
 
 # Node.js
 node_modules/
 dist/
+# 双锁文件：已统一 pnpm（tauri.conf.json 的 beforeXxx 也改成 pnpm），
+# package-lock.json 已删除，避免解析出两套依赖树
 
 # Rust / Tauri
 target/
 src-tauri/target/
+# tauri build 自动生成的 schema（5232 行），可由 build.rs 重新产出
+src-tauri/gen/schemas/
 
 # 不加入 git
+# docs/ 是本地审阅报告与计划的存放处，不属于交付物。
+# 注意：它与被忽略的 plan.md 不同 —— plan.md 是接手方唯一的设计依据，
+# 由本文件末尾单独列出。
 docs/
 plan.md
+# 2026-10-02 清理：该目录（本地模拟回收站，含已删文件的副本）已空，
+# 规则保留以防后续 agent 再次使用该约定时误提交
 .recycle/
+
+# 临时目录（曾出现 .ptmp/、ktmp_*/、probe_*/ 等未忽略的空目录，
+# 一旦有人往里写临时文件就会污染工作区）
+.ptmp/
+tmp/
+ktmp_*/
+probe_*/
 
 # VS
 .vs/

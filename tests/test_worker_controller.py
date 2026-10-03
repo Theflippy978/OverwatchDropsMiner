@@ -6,7 +6,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from overwatch_drops_miner.gui_parts.worker_controller import WorkerController
+from python_sidecar.backend.browser.worker_controller import WorkerController
 
 
 class FakeMiner:
@@ -46,7 +46,7 @@ class WorkerControllerTest(unittest.TestCase):
             return miner
 
         with patch(
-            "overwatch_drops_miner.gui_parts.worker_controller.BilibiliWatchTimeMiner",
+            "python_sidecar.backend.browser.worker_controller.BilibiliWatchTimeMiner",
             side_effect=create_miner,
         ):
             self.assertTrue(controller.start(object(), logger=logger))
@@ -103,7 +103,7 @@ class WorkerControllerTest(unittest.TestCase):
         controller.miner = FakeMiner(object())  # type: ignore[assignment]
 
         with patch(
-            "overwatch_drops_miner.gui_parts.worker_controller.BilibiliWatchTimeMiner"
+            "python_sidecar.backend.browser.worker_controller.BilibiliWatchTimeMiner"
         ) as miner_type:
             self.assertFalse(
                 controller.start(
@@ -153,7 +153,7 @@ class WorkerControllerTest(unittest.TestCase):
             return miner
 
         with patch(
-            "overwatch_drops_miner.gui_parts.worker_controller.BilibiliWatchTimeMiner",
+            "python_sidecar.backend.browser.worker_controller.BilibiliWatchTimeMiner",
             side_effect=create_miner,
         ):
             self.assertTrue(controller.start(object(), logger=logger))

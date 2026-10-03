@@ -4,18 +4,9 @@ export interface Account {
   running: boolean;
 }
 
-export interface MinerConfig {
-  cookie: string;
-  room_ids: number[];
-  thread_count: number;
-  reconnect_delay_seconds: number;
-  task_ids: string[];
-  task_query_interval_seconds: number;
-  notify_urls: string[];
-  notify_on_task_complete: boolean;
-  auto_claim_rewards: boolean;
-  verbose: boolean;
-}
+// 注：原此处有一个 MinerConfig 接口（sidecar 端 config.json 的契约镜像），
+// 2026-10-02 删除：全 src/ 无任何 import，Rust 侧同名结构体也已删除。
+// 两处维护同一份线格式而无人消费，是纯粹的腐化源。
 
 export interface GuiConfigValues {
   cookie: string;
@@ -40,8 +31,9 @@ export interface AccountStatus {
   progress: ProgressValues | null;
   /** 任务级进度对象（当前后端无数据，保留字段兼容） */
   task_progress: TaskProgress | null;
-  /** Cookie 失效自动停止（true 时表示因登录失效而停止） */
-  login_invalidated?: boolean;
+  /** Cookie 失效自动停止（true 时表示因登录失效而停止）。
+      后端 serde 虽标 default，但序列化时总会写出该键，故为必填。 */
+  login_invalidated: boolean;
 }
 
 export interface ProgressValues {
@@ -54,6 +46,9 @@ export interface CheckPoint {
   sid: string;
   alias: string;
   status: number;
+  /** 注意：后端 models.py:48 的 status in (3, 6) 含「已领取」，
+      所以 is_completed 为 true 不代表未领取，判定待领必须同时排除
+      status === 6。 */
   is_completed: boolean;
   cur_value: number;
   limit_value: number;
@@ -68,8 +63,12 @@ export interface TaskProgress {
   target: number;
   status: string;
   rewards: Reward[];
-  check_points?: CheckPoint[];
+  /** 后端序列化时总会写出该键（commands.rs 的 #[serde(default)] 只作用于
+      反序列化），故不是可选。 */
+  check_points: CheckPoint[];
 }
+
+export type TaskItem = TaskProgress;
 
 export interface Reward {
   name: string;

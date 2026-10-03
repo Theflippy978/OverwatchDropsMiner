@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import threading
 
-from overwatch_drops_miner.async_backend import ensure_anyio_asyncio_backend_ready
-from overwatch_drops_miner.client import BilibiliClient
+from python_sidecar.backend.async_backend import ensure_anyio_asyncio_backend_ready
+from python_sidecar.backend.client import BilibiliClient
 
 
 def test_anyio_asyncio_backend_warmup_is_idempotent() -> None:

@@ -9,29 +9,29 @@ import urllib.parse
 
 import httpx
 
-from overwatch_drops_miner.client_parts import core as core_module
-from overwatch_drops_miner.client_parts.constants import WBI_MIXIN_KEY_ENC_TAB
-from overwatch_drops_miner.client_parts.cookies import (
+from python_sidecar.backend.client_parts import core as core_module
+from python_sidecar.backend.client_parts.constants import WBI_MIXIN_KEY_ENC_TAB
+from python_sidecar.backend.client_parts.cookies import (
     DEFAULT_USER_AGENT,
     build_cookie_state,
     build_live_headers,
     build_mission_headers,
 )
-from overwatch_drops_miner.client_parts.models import (
+from python_sidecar.backend.client_parts.models import (
     MissionRewardInfo,
     TaskCheckpointProgress,
     TaskProgress,
 )
-from overwatch_drops_miner.client_parts.profile import (
+from python_sidecar.backend.client_parts.profile import (
     parse_self_info,
     validate_nav_payload,
 )
-from overwatch_drops_miner.client_parts.task_parsing import (
+from python_sidecar.backend.client_parts.task_parsing import (
     coerce_task_number,
     extract_task_indicator_values,
 )
-from overwatch_drops_miner.client_parts.task_discovery import fetch_live_task_groups
-from overwatch_drops_miner.client_parts.wbi import (
+from python_sidecar.backend.client_parts.task_discovery import fetch_live_task_groups
+from python_sidecar.backend.client_parts.wbi import (
     encode_query,
     parse_wbi_keys_from_nav,
     sign_wbi_params,

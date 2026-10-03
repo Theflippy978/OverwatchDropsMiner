@@ -5,7 +5,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from overwatch_drops_miner import dpapi
+from python_sidecar.backend import dpapi
 
 
 @unittest.skipUnless(os.name == "nt", "DPAPI is Windows-only")
@@ -33,7 +33,7 @@ class DpapiFailureBranchTest(unittest.TestCase):
     def test_protect_raises_oserror_when_api_fails(self) -> None:
         from unittest import mock
 
-        from overwatch_drops_miner import dpapi
+        from python_sidecar.backend import dpapi
 
         with mock.patch.object(dpapi._crypt32, "CryptProtectData", return_value=0):
             with self.assertRaises(OSError) as ctx:
@@ -44,7 +44,7 @@ class DpapiFailureBranchTest(unittest.TestCase):
     def test_local_free_failure_does_not_break_unprotect(self) -> None:
         from unittest import mock
 
-        from overwatch_drops_miner import dpapi
+        from python_sidecar.backend import dpapi
 
         cipher = dpapi.protect("hello")
         with mock.patch.object(dpapi._kernel32, "LocalFree", return_value=1):

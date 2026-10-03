@@ -9,18 +9,18 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from overwatch_drops_miner.gui_parts import browser_sniffer as browser_sniffer_module
-from overwatch_drops_miner.gui_parts.browser_sniffer import (
+from python_sidecar.backend.browser import browser_sniffer as browser_sniffer_module
+from python_sidecar.backend.browser.browser_sniffer import (
     classify_sniff_payload,
     is_sniff_finished,
     select_login_cookies,
 )
-from overwatch_drops_miner.gui_parts.browser_utils import (
+from python_sidecar.backend.browser.browser_utils import (
     browser_label,
     browser_try_order,
     extract_room_id_from_live_url,
 )
-from overwatch_drops_miner.gui_parts.extension_builder import (
+from python_sidecar.backend.browser.extension_builder import (
     build_page_reporter_js,
     write_chrome_extension,
     write_edge_extension,
@@ -46,10 +46,10 @@ class BrowserUtilsTest(unittest.TestCase):
 
     def test_browser_try_order_prefers_selected_then_default(self) -> None:
         with patch(
-            "overwatch_drops_miner.gui_parts.browser_utils.find_browser",
+            "python_sidecar.backend.browser.browser_utils.find_browser",
             side_effect=lambda browser: browser in {"chrome", "edge"},
         ), patch(
-            "overwatch_drops_miner.gui_parts.browser_utils.detect_default_browser",
+            "python_sidecar.backend.browser.browser_utils.detect_default_browser",
             return_value="edge",
         ):
             self.assertEqual(browser_try_order("chrome"), ("chrome", "edge"))
@@ -232,7 +232,7 @@ class BrowserActionsTest(unittest.TestCase):
         ), patch.object(
             browser_sniffer_module, "write_edge_extension"
         ), patch(
-            "overwatch_drops_miner.gui_parts.browser_utils.detect_default_browser",
+            "python_sidecar.backend.browser.browser_utils.detect_default_browser",
             return_value="edge",
         ):
             thread = browser_sniffer_module.start_browser_sniff(

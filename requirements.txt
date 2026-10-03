@@ -1,14 +1,39 @@
-# Python 依赖（Tauri sidecar 使用）
-httpx>=0.27,<1
-qrcode>=7.4,<9
-selenium>=4.20,<5
-# 通知渠道（overwatch_drops_miner/notifier.py 内延迟导入 apprise）
-apprise>=1.7,<2
-# Windows 控制台 UTF-8 修正（overwatch_drops_miner/logging_utils.py 内延迟导入）
-colorama>=0.4,<1
-# qrcode 出 PNG 需要 Pillow
-Pillow>=10,<12
-# PySide6 只被旧 Qt GUI / Qt 测试使用（paths.create_qsettings 内延迟导入），
-# sidecar 运行时不需要；需要跑 Qt 测试的环境请安装 requirements-dev.txt。
-# PySide6>=6.5,<7
+# Python 依赖（Tauri sidecar 运行时 + 开发测试，单文件）
+# 安装：python -m pip install -r requirements.txt
 
+# --- 运行时 ---
+
+# 唯一的 HTTP 客户端：API 请求、WBI 签名、账号 cookie 校验、更新检查
+httpx>=0.27,<1
+
+# 扫码登录二维码生成（sidecar 命令 qr_login 落 PNG 交前端显示）
+qrcode>=7.4,<9
+
+# 浏览器自动化：扩展安装、Cookie 捕获、房间号与任务 ID 嗅探
+# 打包需 hidden-import selenium.webdriver.edge.{options,service,webdriver}
+selenium>=4.20,<5
+
+# 通知发送（多渠道聚合，命令 send_notification 转发至此）
+apprise>=1.7,<2
+
+# Windows 控制台 UTF-8 输出，避免中文日志在 GBK 控制台乱码
+# （python_sidecar/backend/logging_utils.py 初始化时调用 colorama.just_fix_windows_console()）
+colorama>=0.4,<1
+
+# qrcode 生成 PNG 依赖 Pillow
+Pillow>=10,<12
+
+# --- 开发与测试（不进入 PyInstaller 产物）---
+
+# 测试框架。CI 与本地门禁统一用它跑 tests/
+pytest>=8,<9
+
+# pytest-asyncio：pytest.ini 里 asyncio_mode=auto 使 async def test_* 免 marker 生效。
+# 缺少它时 pytest 会告警 "Unknown config option: asyncio_mode" 并退化为默认严格模式，
+# async 测试会被静默跳过而非失败 —— 该告警不可忽略。
+pytest-asyncio>=0.23,<2
+
+# ruff：lint 与 import 排序。2026-10-02 接入后一次抓出 main.py 里
+# 8 处未定义 logger、1 处未定义 request（均在 except 分支内，
+# 会在异常处理路径上二次抛异常）。配置见 ruff.toml
+ruff>=0.6,<1

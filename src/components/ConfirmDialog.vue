@@ -33,17 +33,26 @@ const isOpen = computed({
   set: (value) => emit("update:open", value),
 });
 
-const confirmButtonVariant = computed(() => props.variant || "default");
+const confirmButtonVariant = computed(() => props.variant ?? "default");
 </script>
 
 <template>
   <Dialog v-model:open="isOpen">
-    <DialogContent class="sm:max-w-md">
+    <!-- loading 期间禁掉 ESC / 遮罩 / X 三条关闭路径：
+         删除账号是「stop_miner + remove_account」多步长耗时操作，
+         中途关掉对话框会让用户失去「我再想想」的机会，
+         而操作仍会跑完并真的删掉账号。按键已 disabled 却能关窗属自相矛盾。 -->
+    <DialogContent
+      class="sm:max-w-md"
+      :close-on-escape-key-down="!loading"
+      :close-on-click-outside="!loading"
+      :show-close="!loading"
+    >
       <DialogHeader>
         <DialogTitle>{{ title }}</DialogTitle>
         <DialogDescription>{{ message }}</DialogDescription>
       </DialogHeader>
-      
+
       <DialogFooter>
         <Button
           v-if="showCancel !== false"
@@ -51,15 +60,15 @@ const confirmButtonVariant = computed(() => props.variant || "default");
           :disabled="loading"
           @click="emit('cancel')"
         >
-          {{ cancelText || "取消" }}
+          {{ cancelText ?? "取消" }}
         </Button>
         <Button
           :variant="confirmButtonVariant"
           :disabled="loading"
           @click="emit('confirm')"
         >
-          <span v-if="loading" class="mr-2 h-4 w-4 animate-spin">⟳</span>
-          {{ confirmText || "确定" }}
+          <span v-if="loading" class="mr-2 h-4 w-4 animate-spin" aria-hidden="true">⟳</span>
+          {{ confirmText ?? "确定" }}
         </Button>
       </DialogFooter>
     </DialogContent>

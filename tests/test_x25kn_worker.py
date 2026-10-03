@@ -7,9 +7,9 @@ import time
 import unittest
 from unittest import mock
 
-from overwatch_drops_miner.client_parts.models import LiveTraceSession, TaskProgress
-from overwatch_drops_miner.config import MinerConfig
-from overwatch_drops_miner.x25kn_worker import X25KnWorker
+from python_sidecar.backend.client_parts.models import LiveTraceSession, TaskProgress
+from python_sidecar.backend.config import MinerConfig
+from python_sidecar.backend.x25kn_worker import X25KnWorker
 
 
 class _TaskClient:
@@ -245,7 +245,7 @@ class X25KnWorkerTest(unittest.TestCase):
                 mock.patch.object(worker, "_trace_heartbeat_loop", heartbeat_boom),
                 mock.patch.object(worker, "_task_monitor_loop", monitor_boom),
                 self.assertLogs(
-                    "overwatch_drops_miner.x25kn_worker", level="ERROR"
+                    "python_sidecar.backend.x25kn_worker", level="ERROR"
                 ) as logs,
                 self.assertRaises(RuntimeError) as ctx,
             ):

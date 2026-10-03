@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import threading
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from overwatch_drops_miner.config import MinerConfig
-from overwatch_drops_miner.miner import BilibiliWatchTimeMiner, SessionPlan
+from python_sidecar.backend.config import MinerConfig
+from python_sidecar.backend.miner import BilibiliWatchTimeMiner
 
 
 def config() -> MinerConfig:
@@ -33,7 +32,7 @@ class MinerLoginGuardTest(unittest.TestCase):
             miner._stop_event.wait(timeout=2)
 
         with patch.object(miner, "_thread_entry", side_effect=thread_entry), patch(
-            "overwatch_drops_miner.miner.LOGIN_WATCHDOG_INTERVAL_SECONDS", 0.01
+            "python_sidecar.backend.miner.LOGIN_WATCHDOG_INTERVAL_SECONDS", 0.01
         ):
             miner.run()
         self.assertTrue(miner.login_invalidated)
@@ -58,7 +57,7 @@ class MinerLoginGuardTest(unittest.TestCase):
             miner._stop_event.wait(timeout=3)
 
         with patch.object(miner, "_thread_entry", side_effect=thread_entry), patch(
-            "overwatch_drops_miner.miner.LOGIN_WATCHDOG_INTERVAL_SECONDS", 0.01
+            "python_sidecar.backend.miner.LOGIN_WATCHDOG_INTERVAL_SECONDS", 0.01
         ):
             miner.run()
         self.assertGreaterEqual(calls, 3)

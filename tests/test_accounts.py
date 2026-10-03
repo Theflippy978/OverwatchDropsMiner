@@ -8,8 +8,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from overwatch_drops_miner.accounts import AccountStore
-from overwatch_drops_miner import dpapi
+from python_sidecar.backend.accounts import AccountStore
 
 
 class AccountStoreTest(unittest.TestCase):
@@ -75,7 +74,7 @@ class AccountStoreTest(unittest.TestCase):
                 raise OSError("模拟替换失败")
 
             with unittest.mock.patch(
-                "overwatch_drops_miner.accounts.os.replace",
+                "python_sidecar.backend.accounts.os.replace",
                 side_effect=broken_replace,
             ):
                 with self.assertRaises(OSError):

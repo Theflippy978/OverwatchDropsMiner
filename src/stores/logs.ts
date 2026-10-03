@@ -25,7 +25,13 @@ export const useLogsStore = defineStore("logs", () => {
   function flush() {
     flushTimer = null;
     if (buffer.length === 0) return;
-    logs.value.push(...buffer);
+    // 必须逐条 push：push(...buffer) 展开成实参会撞 V8 的参数上限
+    // （约 65k~125k），超限抛 RangeError 且整批日志丢失。
+    // 本项目量级可触及：房间数 × 线程数 ≤ 128 条连接，verbose 打开后
+    // 每条连接都产日志，而合并窗口只有 120ms。
+    for (const entry of buffer) {
+      logs.value.push(entry);
+    }
     buffer.length = 0;
     const overflow = logs.value.length - maxLogs;
     if (overflow > 0) {

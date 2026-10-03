@@ -2,16 +2,23 @@ name: Build & Release
 
 on:
   push:
-    branches: [main, dev, refactorUI]
+    # 实际存在的分支是 master / refactorUI；原先写 main+dev 会让人误以为
+    # 「推 main 会跑 CI」，而真正的主分支 master 反而不在列表里
+    branches: [master, refactorUI]
     paths:
       - '.github/workflows/build.yml'
       - 'requirements.txt'
-      - 'requirements-dev.txt'
-      - 'build.py'
-      - 'main.py'
-      - 'overwatch_drops_miner/**'
+      # 前端与 Rust/Tauri：原先这两块不在 paths 里，导致 src/** 与
+      # src-tauri/** 的任何改动既不触发测试也不触发构建（2026-10-02 修正）
+      - 'src/**'
+      - 'src-tauri/**'
+      - 'python_sidecar/backend/**'
       - 'python_sidecar/**'
       - 'tests/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'vite.config.ts'
+      - 'tsconfig.json'
       - 'img/app.ico'
   workflow_dispatch:
     inputs:
@@ -28,6 +35,18 @@ on:
         description: '正式版版本号 (如 v1.0.0)，仅 stable 需要'
         required: false
         type: string
+  pull_request:
+    # 实际存在的分支是 master / refactorUI；原先写 main+dev 会让人误以为
+    # 「推 main 会跑 CI」，而真正的主分支 master 反而不在列表里
+    branches: [master, refactorUI]
+    paths:
+      - '.github/workflows/build.yml'
+      - 'requirements.txt'
+      - 'src/**'
+      - 'src-tauri/**'
+      - 'python_sidecar/backend/**'
+      - 'python_sidecar/**'
+      - 'tests/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -37,8 +56,11 @@ jobs:
   # Z-6：测试门禁——此前 23 个测试文件在 CI 中从未执行，
   # 测试红着也照常出包；现在构建必须先过全部单测。
   test:
-    name: Run tests (pytest, offscreen Qt)
+    name: Run tests (pytest)
     runs-on: ubuntu-latest
+    # tests/ 里有真实线程/事件循环用例，极端调度下可能挂死；
+    # 不设上限会让一次偶发挂死占满 runner 默认 6 小时并阻塞后续 CI
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -47,24 +69,91 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
-      - name: Install system libraries for PySide6
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libglib2.0-0
-
       - name: Install dependencies
         run: |
           python -m pip install --disable-pip-version-check -r requirements.txt
-          python -m pip install --disable-pip-version-check -r requirements-dev.txt
 
       - name: Run tests
         env:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest tests/ -q
 
+  lint:
+    # 2026-10-02 新增。此前全仓库零 Python lint 门禁，首次启用 ruff 就抓出
+    # python_sidecar/main.py 的 8 处 `logger` 未定义 + 1 处 `request` 未定义
+    # —— 全部位于 except 分支（异常处理路径自身再抛 NameError），且因为
+    # 只在异常时可达而完全没有测试覆盖。
+    name: Lint Python (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install ruff
+        run: python -m pip install --disable-pip-version-check "ruff>=0.6,<1"
+      - name: ruff check
+        run: python -m ruff check .
+      # 死代码门禁：从 sidecar 主程序 + tests/ 做 AST 可达性分析。
+      # 2026-10-02 清理前检出 17 个文件 / 4077 行（15 个 gui_parts/* + gui.py
+      # + 两个只测死代码的测试）。当前为 informational（只报告不阻断），
+      # 等存量清零后可改为阻断。脚本自身经「造探针文件→检出→回滚」验证有效。
+      - name: Dead module check (informational)
+        run: python tests/check_dead_modules.py
+
+  static-check:
+    # 2026-10-02 新增。此前 CI 完全不构建 Tauri、不做类型检查，
+    # Rust 与前端的语法/类型错误只能靠本地手跑发现。
+    # 注意 vue-tsc 抓不到「复选框 v-model:checked 在 reka-ui 2.10.5 失效」
+    # 这类运行时问题，但它仍是唯一的静态类型门禁。
+    name: Static checks (Rust / frontend)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: cargo check
+        run: cargo check --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: cargo fmt check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked -- -D warnings
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check frontend
+        run: pnpm exec vue-tsc --noEmit
+
   prepare:
     name: Prepare version
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
       update_channel: ${{ steps.version.outputs.update_channel }}
@@ -107,13 +196,15 @@ jobs:
           echo "is_prerelease=$is_prerelease" >> "$GITHUB_OUTPUT"
 
   build-windows:
-    name: Windows GUI (PyInstaller onefile)
-    # 推送事件只跑上面的测试门禁；打包/发布仅在人工 workflow_dispatch 时执行。
-    # 注意：下面的 build.py / main.py 属于旧 PySide6 GUI，已不在本分支仓库中，
-    # 打包流程迁移属于「打包优化」后续轮次（本轮不动打包逻辑）。
+    name: Windows release (sidecar + Tauri)
+    # 推送事件只跑上面的测试门禁 + 静态检查；打包/发布仅在人工 workflow_dispatch 时执行。
+    # 2026-10-02 修正：原流程 `python build.py` 指向已不存在的旧 PySide6 GUI
+    # 入口（重构后 main.py 只有一个 sidecar），且 paths 过滤不含
+    # src-tauri/** 与 src/** —— Rust 与前端改动既不触发测试也不触发任何构建。
     if: github.event_name == 'workflow_dispatch'
-    needs: [prepare, test]
+    needs: [prepare, test, lint, static-check]
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -126,7 +217,7 @@ jobs:
           REPOSITORY_URL = "https://github.com/mi0e/OverwatchDropsMiner"
           LATEST_RELEASE_API = "https://api.github.com/repos/mi0e/OverwatchDropsMiner/releases/latest"
           RELEASES_URL = "https://github.com/mi0e/OverwatchDropsMiner/releases/latest"
-          "@ | Set-Content -Path "overwatch_drops_miner/_version.py" -Encoding UTF8
+          "@ | Set-Content -Path "python_sidecar/backend/_version.py" -Encoding UTF8
 
       - uses: actions/setup-python@v5
         with:
@@ -138,7 +229,7 @@ jobs:
         with:
           path: |
             ~\AppData\Local\pyinstaller
-          key: ${{ runner.os }}-pyinstaller-${{ hashFiles('requirements.txt', 'requirements-dev.txt', 'build.py') }}
+          key: ${{ runner.os }}-pyinstaller-${{ hashFiles('requirements.txt', 'python_sidecar/**/*.py') }}
           restore-keys: |
             ${{ runner.os }}-pyinstaller-
 
@@ -147,13 +238,45 @@ jobs:
           python -m pip install --disable-pip-version-check -r requirements.txt
           python -m pip install --disable-pip-version-check pyinstaller
 
-      - name: Build with PyInstaller
-        run: python build.py
+      # sidecar 必须以 triple 后缀名产出：Tauri externalBin 约定，
+      # 而 Rust 侧 locate_sidecar_exe 在 target/release 找的是无后缀的
+      # python_sidecar.exe（tauri build 会自动剥后缀复制过去）
+      - name: Build sidecar with PyInstaller
+        run: |
+          python -m PyInstaller --onefile --clean `
+            --name python_sidecar-x86_64-pc-windows-msvc `
+            --distpath src-tauri/binaries `
+            --workpath build/pyinstaller `
+            --specpath build/pyinstaller `
+            --paths . `
+            --hidden-import selenium.webdriver.edge.options `
+            --hidden-import selenium.webdriver.edge.service `
+            --hidden-import selenium.webdriver.edge.webdriver `
+            python_sidecar/main.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri app
+        run: pnpm tauri build
+        env:
+          CI: 'true'
 
       - name: Package ZIP
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist/OverwatchDropsMiner.exe" -DestinationPath "dist/OverwatchDropsMiner-win-${{ needs.prepare.outputs.version }}.zip" -CompressionLevel Fastest -Force
+          New-Item -ItemType Directory -Path "dist" -Force | Out-Null
+          Compress-Archive `
+            -Path "src-tauri/target/release/overwatch-drops-miner.exe", "src-tauri/target/release/python_sidecar.exe" `
+            -DestinationPath "dist/OverwatchDropsMiner-win-${{ needs.prepare.outputs.version }}.zip" `
+            -CompressionLevel Fastest -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

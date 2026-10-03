@@ -9,14 +9,21 @@ import { useTasksStore } from "@/stores/tasks";
 export const useAccountsStore = defineStore("accounts", () => {
   const accounts = ref<Account[]>([]);
   const loading = ref(false);
+  /** 加载/操作错误。缺了它，sidecar 起不来时 accounts 保持 []，
+      组件会渲染「暂无账号」，把故障伪装成空状态。 */
+  const error = ref("");
   const selectedAccountId = ref<string | null>(null);
   let accountUnlisten: UnlistenFn | null = null;
   let initialized = false;
 
   async function fetchAccounts() {
     loading.value = true;
+    error.value = "";
     try {
       accounts.value = await invoke<Account[]>("get_accounts");
+    } catch (e) {
+      error.value = `加载账号失败: ${e}`;
+      throw e;
     } finally {
       loading.value = false;
     }
@@ -25,6 +32,8 @@ export const useAccountsStore = defineStore("accounts", () => {
   async function addAccount(cookie: string) {
     const account = await invoke<Account>("add_account", { cookie });
     accounts.value.push(account);
+    // 同一 id 再次出现是合法复用，清掉删除标记避免任务集被误判为已删除
+    useTasksStore().reviveAccountTasks(account.id);
     return account;
   }
 
@@ -49,16 +58,18 @@ export const useAccountsStore = defineStore("accounts", () => {
     return account;
   }
 
+  // running 的唯一真源是 account-state-changed 事件。
+  // 原实现在 start/stel 成功后乐观写 running，但事件走 app_handle.emit、
+  // 命令响应走 per-id pending map，两条不同 IPC 通道的到达顺序不受约束：
+  // 「点启动后立刻点停止」时 stop 的响应先到置 false，随后启动那次的状态
+  // 事件姗姗来迟改回 true —— 此后没有任何东西纠正它，anyRunning 永久为真，
+  // 窗口再也无法关闭，只能杀进程。
   async function startMiner(accountId: string) {
     await invoke("start_miner", { accountId });
-    const account = accounts.value.find((a) => a.id === accountId);
-    if (account) account.running = true;
   }
 
   async function stopMiner(accountId: string) {
     await invoke("stop_miner", { accountId });
-    const account = accounts.value.find((a) => a.id === accountId);
-    if (account) account.running = false;
   }
 
   async function getStatus(accountId: string): Promise<AccountStatus> {
@@ -99,6 +110,7 @@ export const useAccountsStore = defineStore("accounts", () => {
   return {
     accounts,
     loading,
+    error,
     selectedAccountId,
     fetchAccounts,
     addAccount,

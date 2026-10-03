@@ -7,7 +7,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from overwatch_drops_miner import paths
+from python_sidecar.backend import paths
 
 
 class PathsTest(unittest.TestCase):

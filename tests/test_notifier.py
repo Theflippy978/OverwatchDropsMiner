@@ -5,7 +5,7 @@ from unittest import mock
 
 import httpx
 
-from overwatch_drops_miner.notifier import (
+from python_sidecar.backend.notifier import (
     MultiPlatformNotifier,
     _NativeNotifyTarget,
 )
@@ -56,7 +56,7 @@ class GotifyTest(unittest.TestCase):
         )
         assert target is not None
         with mock.patch(
-            "overwatch_drops_miner.notifier.httpx.post",
+            "python_sidecar.backend.notifier.httpx.post",
             return_value=_fake_response(200),
         ) as post:
             self.assertTrue(target.notify("标题", "内容"))
@@ -71,7 +71,7 @@ class GotifyTest(unittest.TestCase):
         target = _NativeNotifyTarget.from_url("gotify://host/TOKEN")
         assert target is not None
         with mock.patch(
-            "overwatch_drops_miner.notifier.httpx.post",
+            "python_sidecar.backend.notifier.httpx.post",
             return_value=_fake_response(200),
         ) as post:
             self.assertTrue(target.notify("t", "b"))
@@ -91,7 +91,7 @@ class ServerChanTest(unittest.TestCase):
         assert target is not None
         long_title = "标" * 40
         with mock.patch(
-            "overwatch_drops_miner.notifier.httpx.post",
+            "python_sidecar.backend.notifier.httpx.post",
             return_value=_fake_response(200, {"code": 0}),
         ) as post:
             self.assertTrue(target.notify(long_title, "body"))
@@ -110,7 +110,7 @@ class WecombotTest(unittest.TestCase):
         )
         assert target is not None
         with mock.patch(
-            "overwatch_drops_miner.notifier.httpx.post",
+            "python_sidecar.backend.notifier.httpx.post",
             return_value=_fake_response(200, {"errcode": 0}),
         ) as post:
             self.assertTrue(target.notify("t", "b"))
@@ -144,7 +144,7 @@ class SuccessPayloadNormalizationTest(unittest.TestCase):
             with self.subTest(payload=payload):
                 target = self._target()
                 with mock.patch(
-                    "overwatch_drops_miner.notifier.httpx.post",
+                    "python_sidecar.backend.notifier.httpx.post",
                     return_value=_fake_response(200, payload),
                 ):
                     self.assertEqual(target.notify("t", "b"), expected)
@@ -152,7 +152,7 @@ class SuccessPayloadNormalizationTest(unittest.TestCase):
     def test_http_error_status_fails(self) -> None:
         target = self._target()
         with mock.patch(
-            "overwatch_drops_miner.notifier.httpx.post",
+            "python_sidecar.backend.notifier.httpx.post",
             return_value=_fake_response(500),
         ):
             self.assertFalse(target.notify("t", "b"))
@@ -182,8 +182,8 @@ class WxworkTokenCacheTest(unittest.TestCase):
             return _fake_response(200, {"errcode": 0, "access_token": token})
 
         return (
-            mock.patch("overwatch_drops_miner.notifier.httpx.post", side_effect=fake_post),
-            mock.patch("overwatch_drops_miner.notifier.httpx.get", side_effect=fake_get),
+            mock.patch("python_sidecar.backend.notifier.httpx.post", side_effect=fake_post),
+            mock.patch("python_sidecar.backend.notifier.httpx.get", side_effect=fake_get),
             gettoken_calls,
         )
 

@@ -1,10 +1,11 @@
 """
 Python Sidecar - 作为 Tauri 2 的后端服务
-通过 IPC 与 Tauri 前端通信，复用现有 overwatch_drops_miner 后端逻辑
+通过 IPC 与 Tauri 前端通信；业务逻辑在 python_sidecar.backend 中。
 """
 import asyncio
 import json
 import logging
+import math
 import sys
 import os
 import threading
@@ -12,9 +13,82 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# 添加项目根目录到 Python 路径
-project_root = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(project_root))
+# 把**仓库根**加入 Python 路径，使 `import python_sidecar.backend.*` 可解析。
+# 本文件在 python_sidecar/main.py，故 parents[1] 即仓库根 —— 这与 2026-10-02
+# 之前的布局一致（当时业务代码在仓库根下的 overwatch_drops_miner/）。
+# PyInstaller 打包后本文件位于冻结的 sys._MEIPASS 根下，parent 逻辑同样成立
+# （onefile 会把整个包打进去并以绝对导入方式解析）。
+_project_root = Path(__file__).resolve().parents[1]
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+
+# 线程数 / 总连接数上限。与 python_sidecar/backend/config.py 的 validate()
+# （128）以及前端 stores/config.ts 的 MAX_THREAD_COUNT 保持同源。
+# 此前 sidecar 的 _clamp_int 是 256、config.py 是 128、前端是 256：
+# 60 线程 × 3 房间 = 180 能保存成功，启动时才被 validate 拒绝。
+MAX_THREAD_COUNT = 128
+
+# 浏览器嗅探会话的用户可见等待上限（秒）。用户在弹出的浏览器里手动登录 /
+# 进直播间，机器做不了，只能等；120s 是 UX 与"来不及操作"之间的折中。
+# Cookie 捕获、房间号、任务ID 三种模式共用，由 _drive_sniff_session 统一使用。
+SNIFF_TIMEOUT_SECONDS = 120.0
+
+# 模块级 logger。此前 _add_account 等处用的是函数内的
+# logging.getLogger(__name__) 局部变量，模块并无同名全局 ——
+# 若别处直接写 logger.xxx() 会抛 NameError，且恰好都在 except 分支里
+# （ruff F821 抓到 8 处）。异常处理路径本身再抛异常是最坏的失败模式。
+logger = logging.getLogger(__name__)
+
+
+async def _probe_identity(
+    cookie: str, timeout: float = 30.0
+) -> tuple[bool, str, str]:
+    """探测 Cookie 对应的 B 站身份，最多 2 次、间隔 1 秒。
+
+    返回 (是否有效, uname, 错误原因)。_add_account 与 _start_miner
+    共用，避免同一段 tuple 解包契约在两处各写一遍。
+    注意 uid 缺失时**仍会回填 uname**：调用方据此区分
+    「未登录」与「已识别用户但 ID 缺失」两种错误归因。
+    """
+    from python_sidecar.backend.client import BilibiliClient
+
+    last_error = ""
+    last_uname = ""
+    last_info_type = ""
+    for attempt in range(2):
+        try:
+            client = BilibiliClient(cookie)
+            try:
+                info = await asyncio.wait_for(client.get_self_info(), timeout=timeout)
+            finally:
+                try:
+                    await client.close()
+                except Exception:
+                    pass
+            # get_self_info 返回 (uid | None, uname) 元组
+            # （client_parts/profile.parse_self_info）
+            uid, uname = info if isinstance(info, tuple) else (None, "")
+            last_uname = uname or ""
+            last_info_type = type(info).__name__
+            if uid is None:
+                last_error = "Cookie 已失效或未登录"
+                # 注释写「间隔 1 秒」，但原实现只在 except 分支 sleep，
+                # 最常见的失败路径（uid is None）零间隔连续打两次 /nav，
+                # 既起不到重试作用也更易被风控。
+                if attempt == 0:
+                    await asyncio.sleep(1.0)
+                continue
+            return True, uname, ""
+        except Exception as e:
+            last_error = _safe_error(e)
+            last_info_type = type(e).__name__
+            if attempt == 0:
+                await asyncio.sleep(1.0)
+    if last_error == "Cookie 已失效或未登录" and last_uname:
+        # 已识别用户但 uid 缺失：单独的错误归因，便于用户判断是协议变化
+        return False, last_uname, f"已识别用户 {last_uname} 但用户 ID 缺失（{last_info_type}）"
+    return False, "", last_error
 
 
 def _clamp_int(value: Any, default: int, min_val: int, max_val: int) -> int:
@@ -27,8 +101,32 @@ def _clamp_int(value: Any, default: int, min_val: int, max_val: int) -> int:
 
 def _normalize_task_ids_text(value: Any) -> str:
     """任务 ID 文本去重 + 稳定排序（用于判断“输入是否真的变了”）"""
+    if value is None:
+        return ""
     parts = [p.strip() for p in str(value).split(",") if p.strip()]
     return ",".join(sorted(dict.fromkeys(parts)))
+
+
+def _safe_error(exc: BaseException) -> str:
+    """把异常转成适合展示给用户的文案。
+
+    两个必须处理的问题：
+    1. ``str(TimeoutError())`` 是空串 —— 直接 f-string 进错误消息会让用户
+       看到一个空白提示（第五轮已在 browser_capture 修过同类问题，
+       _refresh_tasks / _claim_rewards 的超时却漏修）。
+    2. httpx 的异常消息常携带完整请求 URL，query 里可能含 csrf/bili_jct
+       等会话凭据。仓库已有 client_parts.http.sanitize_exception_text，
+       这里统一走它而不是裸 str(e)。
+    """
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return "请求超时"
+    try:
+        from python_sidecar.backend.client_parts.http import sanitize_exception_text
+
+        return sanitize_exception_text(exc) or type(exc).__name__
+    except Exception:
+        text = str(exc)
+        return text if text else type(exc).__name__
 
 
 class FrontendLogHandler(logging.Handler):
@@ -41,7 +139,7 @@ class FrontendLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            from overwatch_drops_miner.account_log_context import get_current_account
+            from python_sidecar.backend.account_log_context import get_current_account
 
             level = record.levelno
             if level >= logging.ERROR:
@@ -93,8 +191,6 @@ class PythonSidecar:
         self._sniff_lock = threading.Lock()
         self._progress_lock = threading.Lock()
         self._init_backend()
-        self._browser_capture_result: dict | None = None
-        self._browser_capture_event: threading.Event | None = None
         # 扫码登录会话（跨命令保持一个 HTTP client）
         self._qr_api: Any | None = None
         self._qr_key = ""
@@ -105,23 +201,25 @@ class PythonSidecar:
         self._sniff_thread_ref: Any | None = None
         # 进度值缓存（account_id -> (cur, limit)）
         self._progress_values: dict[str, tuple[float, float]] = {}
+        # 上次已推送的运行状态，用于 account-state-changed 去重
+        self._last_running_state: dict[str, bool] = {}
         self._config_file = self._get_config_file()
         self._load_config_file()
-        self._watch_trackers: dict[str, Any] = {}
+        # 注：原 self._watch_trackers 字段已删除 —— WatchTimeTracker 迁移到
+        # AccountMinerManager._sessions 后它零读写，是残留。
     
     def _init_backend(self):
         """初始化现有后端模块"""
         try:
-            from overwatch_drops_miner.accounts import AccountStore
-            from overwatch_drops_miner.miner_manager import AccountMinerManager
+            from python_sidecar.backend.accounts import AccountStore
+            from python_sidecar.backend.miner_manager import AccountMinerManager
             
             self.account_store = AccountStore()
             self.miner_manager = AccountMinerManager(self._build_config)
             print("[Sidecar] 后端初始化成功", file=sys.stderr)
         except Exception as e:
             print(f"[Sidecar] 后端初始化失败: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc()
+            logger.warning("命令执行失败", exc_info=True)
         finally:
             # 日志统一走 stderr（stdout 是 JSON IPC 通道，不能被污染）
             self._setup_logging(False)
@@ -129,7 +227,7 @@ class PythonSidecar:
     def _setup_logging(self, verbose: bool) -> None:
         """初始化/重建日志输出到 stderr，并附带转发到前端的事件 handler"""
         try:
-            from overwatch_drops_miner.logging_utils import setup_logging
+            from python_sidecar.backend.logging_utils import setup_logging
             setup_logging(verbose=verbose, no_color=True)
             root = logging.getLogger()
             if not any(isinstance(h, FrontendLogHandler) for h in root.handlers):
@@ -140,14 +238,14 @@ class PythonSidecar:
     def _apply_verbose(self, verbose: bool) -> None:
         """详细日志开关即时生效（不重建 handler，仅切换级别与格式）"""
         try:
-            from overwatch_drops_miner.logging_utils import apply_verbose_runtime
+            from python_sidecar.backend.logging_utils import apply_verbose_runtime
             apply_verbose_runtime(verbose=verbose, no_color=True)
             print(f"[Sidecar] verbose = {verbose}", file=sys.stderr)
         except Exception as e:
             print(f"[Sidecar] 切换详细日志失败: {e}", file=sys.stderr)
     
     def _get_config_file(self):
-        from overwatch_drops_miner.paths import get_config_dir
+        from python_sidecar.backend.paths import get_config_dir
         config_dir = get_config_dir()
         config_dir.mkdir(parents=True, exist_ok=True)
         return config_dir / "config.json"
@@ -160,32 +258,43 @@ class PythonSidecar:
                     # 兼容旧版结构化字段（room_ids 列表）与新版文本字段（rooms_text）
                     room_ids = data.get("room_ids", [])
                     if not room_ids and data.get("rooms_text"):
-                        from overwatch_drops_miner.utils import parse_room_ids
+                        from python_sidecar.backend.utils import parse_room_ids
                         try:
                             room_ids = parse_room_ids(str(data.get("rooms_text", "")))
                         except ValueError:
                             room_ids = []
                     task_ids = data.get("task_ids", [])
                     if not task_ids and data.get("task_ids_text"):
-                        from overwatch_drops_miner.utils import parse_task_ids
+                        from python_sidecar.backend.utils import parse_task_ids
                         task_ids = parse_task_ids(str(data.get("task_ids_text", "")))
                     notify_urls = data.get("notify_urls", [])
                     if not notify_urls and data.get("notify_urls_text"):
-                        from overwatch_drops_miner.utils import parse_url_list
+                        from python_sidecar.backend.utils import parse_url_list
                         notify_urls = parse_url_list(str(data.get("notify_urls_text", "")))
                     with self._config_lock:
                         self._config_data = {
                             "room_ids": room_ids,
-                            "thread_count": data.get("thread_count", 60),
-                            "reconnect_delay_seconds": data.get("reconnect_delay_seconds", 8),
+                            # 必须钳制：_save_config 与 _import_config 都调了
+                            # _clamp_int，唯独启动加载没有 —— 手改 config.json
+                            # 写 "thread_count": 9999 就能绕过钳制。
+                            "thread_count": _clamp_int(
+                                data.get("thread_count", 60), 60, 1, MAX_THREAD_COUNT
+                            ),
+                            "reconnect_delay_seconds": _clamp_int(
+                                data.get("reconnect_delay_seconds", 8), 8, 1, 3600
+                            ),
                             "task_ids": task_ids,
-                            "task_query_interval_seconds": data.get("task_query_interval_seconds", 30),
+                            "task_query_interval_seconds": _clamp_int(
+                                data.get("task_query_interval_seconds", 30), 30, 10, 3600
+                            ),
                             "notify_urls": notify_urls,
-                            "notify_on_task_complete": data.get("notify_on_task_complete", True),
-                            "auto_claim_rewards": data.get("auto_claim_rewards", False),
-                            "verbose": data.get("verbose", False),
+                            "notify_on_task_complete": bool(
+                                data.get("notify_on_task_complete", True)
+                            ),
+                            "auto_claim_rewards": bool(data.get("auto_claim_rewards", False)),
+                            "verbose": bool(data.get("verbose", False)),
                         }
-                        verbose = bool(self._config_data.get("verbose", False))
+                        verbose = self._config_data["verbose"]
                     self._apply_verbose(verbose)
                     print(f"[Sidecar] 配置已加载: {self._config_file}", file=sys.stderr)
         except Exception as e:
@@ -193,8 +302,8 @@ class PythonSidecar:
 
     def _save_config_file(self):
         try:
-            from overwatch_drops_miner.gui_parts.config_io import build_config_payload
-            from overwatch_drops_miner.config import MinerConfig
+            from python_sidecar.backend.browser.config_io import build_config_payload
+            from python_sidecar.backend.config import MinerConfig
             with self._config_lock:
                 data = dict(self._config_data)
             config = MinerConfig(
@@ -212,14 +321,14 @@ class PythonSidecar:
                 verbose=data.get("verbose", False),
                 auto_claim_rewards=data.get("auto_claim_rewards", False),
             )
-            from overwatch_drops_miner.gui_parts.config_io import save_config_data
+            from python_sidecar.backend.browser.config_io import save_config_data
             save_config_data(self._config_file, payload)
         except Exception as e:
             print(f"[Sidecar] 保存配置文件失败: {e}", file=sys.stderr)
 
     def _build_config(self, cookie: str):
         """构建 miner 配置"""
-        from overwatch_drops_miner.config import MinerConfig
+        from python_sidecar.backend.config import MinerConfig
 
         with self._config_lock:
             room_ids = self._config_data.get("room_ids", [])
@@ -242,7 +351,11 @@ class PythonSidecar:
         )
     
     def add_event_callback(self, callback):
-        """添加事件回调"""
+        """添加事件回调。
+
+        保留是为测试/嵌入预留的扩展点：IPC 重构后事件已全部走 stdout，
+        生产路径无调用方（_emit_event 里的遍历恒为空）。
+        """
         self._event_callbacks.append(callback)
     
     def _write_line(self, text: str) -> None:
@@ -251,11 +364,24 @@ class PythonSidecar:
             sys.stdout.write(text + "\n")
             sys.stdout.flush()
 
+    @staticmethod
+    def _dumps(payload: Any) -> str:
+        """JSON 序列化。
+
+        allow_nan=False 是必需的：默认 True 会输出裸 NaN / Infinity，
+        那不是合法 JSON，Rust 侧 serde_json::from_str 解析失败后直接丢弃
+        该行 —— 调用方的 pending waiter 永远等不到，阻塞满 300s 超时。
+        可达路径：get_account_status 的 progress.cur/limit 来自
+        _progress_values，其值取自 float(cur_value)，而上游 json.loads
+        默认接受 NaN 字面量。
+        """
+        return json.dumps(payload, ensure_ascii=False, allow_nan=False)
+
     def _emit_event(self, event_type: str, data: dict):
         """发送事件到 Tauri：{"type": "event", "event": xxx, "data": {...}}"""
         payload = {"type": "event", "event": event_type, "data": data}
         try:
-            self._write_line(json.dumps(payload, ensure_ascii=False))
+            self._write_line(self._dumps(payload))
         except Exception as e:
             print(f"[Sidecar] 事件输出失败: {e}", file=sys.stderr)
         for callback in self._event_callbacks:
@@ -301,9 +427,12 @@ class PythonSidecar:
         try:
             return await handler(params)
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return {"error": str(e)}
+            # 注意：这里的形参名是 command（不是 serve_requests.run_request
+            # 里的 request）。写错会让「handler 抛异常」这条路径自身再抛
+            # NameError —— 异常处理路径连续失败是最坏的失败模式，且因为
+            # 只在异常分支可达而完全没有测试覆盖（由 ruff F821 抓到）。
+            logger.warning("命令处理失败: %s", command, exc_info=True)
+            return {"error": _safe_error(e)}
     
     async def _get_accounts(self, params: dict) -> dict:
         """获取账号列表"""
@@ -324,32 +453,21 @@ class PythonSidecar:
         cookie = params.get("cookie", "")
         if not cookie:
             return {"error": "Cookie 不能为空"}
-        
+
         if not self.account_store:
             return {"error": "后端未初始化"}
 
-        from overwatch_drops_miner.client import BilibiliClient
+        # 与 _start_miner 共用 _probe_identity（消除 tuple 契约的重复实现）
+        ok, uname, error = await _probe_identity(cookie, timeout=30.0)
+        if not ok:
+            if uname:
+                return {"error": error}
+            return {"error": f"无法获取用户信息，Cookie 可能已失效或未登录（{error}）"}
 
-        client = BilibiliClient(cookie)
-        try:
-            info = await asyncio.wait_for(client.get_self_info(), timeout=30.0)
-        except Exception as e:
-            return {"error": f"Cookie 验证失败: {e}"}
-        finally:
-            try:
-                await client.close()
-            except Exception:
-                pass
-
-        uname = str(info.get("uname", "") or "") if isinstance(info, dict) else ""
-        uid = info.get("uid") if isinstance(info, dict) else None
-        if not uid:
-            return {"error": "无法获取用户信息，Cookie 可能已失效"}
-
-        account = self.account_store.add(cookie)
+        # AccountStore.add 支持直接带 remark，避免 add → update 两次落盘
+        # （磁盘上会短暂存在 remark="" 的中间态）
+        account = self.account_store.add(cookie, remark=uname or "")
         remark = uname or account.remark or account.id[:8]
-        if uname:
-            account = self.account_store.update(account.id, remark=uname)
 
         return {"id": account.id, "remark": remark, "running": False}
     
@@ -362,12 +480,16 @@ class PythonSidecar:
         if self.miner_manager and self.miner_manager.is_running(account_id):
             self.miner_manager.request_stop(account_id)
 
-        if self.account_store:
-            self.account_store.remove(account_id)
+        # 删除不存在的账号必须报错：原实现丢弃 AccountStore.remove 的
+        # bool 返回值，删任何 id 都「成功」。前端 accounts.ts 却已经把本地
+        # 条目 filter 掉了，两边状态不一致且无法察觉。
+        if self.account_store and not self.account_store.remove(account_id):
+            return {"error": "账号不存在或已被删除"}
 
         # 清理进度值缓存
         with self._progress_lock:
             self._progress_values.pop(account_id, None)
+        self._last_running_state.pop(account_id, None)
 
         return {}
 
@@ -413,33 +535,17 @@ class PythonSidecar:
         try:
             config.validate()
         except ValueError as e:
-            return {"error": str(e)}
+            return {"error": _safe_error(e)}
 
-        # 启动前登录探测（最多 2 次，间隔 1 秒）
-        from overwatch_drops_miner.client import BilibiliClient
-        login_ok = False
-        last_error = ""
-        for attempt in range(2):
-            try:
-                client = BilibiliClient(account.cookie())
-                try:
-                    info = await asyncio.wait_for(client.get_self_info(), timeout=10.0)
-                finally:
-                    await client.close()
-                uid = info.get("uid") if isinstance(info, dict) else None
-                if uid is None:
-                    last_error = "Cookie 已失效，无法启动"
-                    continue
-                uname = str(info.get("uname", "") or "") if isinstance(info, dict) else ""
-                print(f"[Sidecar] 登录成功: {uname} (UID: {uid})", file=sys.stderr)
-                login_ok = True
-                break
-            except Exception as e:
-                last_error = str(e)
-                if attempt == 0:
-                    await asyncio.sleep(1.0)
-        if not login_ok:
-            return {"error": f"启动登录检测失败，请检查网络后重试：{last_error}"}
+        # 启动前登录探测（最多 2 次，间隔 1 秒）。
+        # 与 _add_account 共用 _probe_identity：此前两处逐行重复同一段
+        # tuple 解包逻辑，修过一次 tuple/dict 契约 P0 时要改两处，
+        # 将来漂移还会发生。miner.run() 内部另有一次探测（保留，
+        # 它负责守卫线程启动），因此单次启动最多打 B 站 /nav 三次。
+        ok, uname, probe_error = await _probe_identity(account.cookie(), timeout=10.0)
+        if not ok:
+            return {"error": f"启动登录检测失败，请检查网络后重试：{probe_error}"}
+        print(f"[Sidecar] 启动前登录校验通过: {uname}", file=sys.stderr)
 
         success = self.miner_manager.start(account)
         if not success:
@@ -448,6 +554,12 @@ class PythonSidecar:
             if cleanup == "stopped":
                 success = self.miner_manager.start(account)
             if not success:
+                # 可能是并发的同账号 start_miner：manager.start 在锁内复查后
+                # 对第二个返回 False。此时 miner 其实已经在跑，
+                # 报「后台尚未完全停止」会让前端抛异常且不设 running，
+                # 界面显示未运行而实际在跑（要等轮询线程 ≤200ms 自愈）。
+                if self.miner_manager.is_running(account_id):
+                    return {}
                 return {"error": "该账号后台尚未完全停止，请稍候几秒后重试"}
 
         self._emit_event("account-state-changed", {"account_id": account_id, "running": True})
@@ -485,7 +597,7 @@ class PythonSidecar:
         cur_value, limit_value = progress_values
         has_bili_data = bool(limit_value) or bool(cur_value)
 
-        from overwatch_drops_miner.gui_parts.task_presenter import format_watch_status_line
+        from python_sidecar.backend.browser.task_presenter import format_watch_status_line
         status_line = format_watch_status_line(
             running=running,
             bili_cur_minutes=cur_value if has_bili_data else None,
@@ -516,7 +628,7 @@ class PythonSidecar:
     
     async def _save_config(self, params: dict) -> dict:
         """保存配置（文本字段进、文本出，对齐 GuiConfigValues 契约）"""
-        from overwatch_drops_miner.utils import parse_room_ids, parse_task_ids, parse_url_list
+        from python_sidecar.backend.utils import parse_room_ids, parse_task_ids, parse_url_list
 
         config = params.get("config", {})
         verbose = bool(config.get("verbose", False))
@@ -526,7 +638,7 @@ class PythonSidecar:
         try:
             room_ids = parse_room_ids(rooms_text) if rooms_text else []
         except ValueError as e:
-            return {"error": str(e)}
+            return {"error": _safe_error(e)}
 
         # 解析任务 ID 文本（去重 + 稳定排序，避免仅顺序不同的输入被当成变更）
         task_ids_text = _normalize_task_ids_text(config.get("task_ids_text", ""))
@@ -537,7 +649,7 @@ class PythonSidecar:
         notify_urls = parse_url_list(notify_urls_text) if notify_urls_text else []
 
         # 数值字段解析与钳制（越界/非法输入一律回落到默认值）
-        thread_count = _clamp_int(config.get("thread_count_text", "60"), 60, 1, 256)
+        thread_count = _clamp_int(config.get("thread_count_text", "60"), 60, 1, MAX_THREAD_COUNT)
         reconnect_delay = _clamp_int(config.get("reconnect_delay_text", "8"), 8, 1, 3600)
         task_interval = _clamp_int(config.get("task_query_interval_text", "30"), 30, 10, 3600)
 
@@ -581,8 +693,8 @@ class PythonSidecar:
         if not path:
             return {"error": "未指定导出路径"}
         try:
-            from overwatch_drops_miner.gui_parts.config_io import build_config_payload
-            from overwatch_drops_miner.config import MinerConfig
+            from python_sidecar.backend.browser.config_io import build_config_payload
+            from python_sidecar.backend.config import MinerConfig
             with self._config_lock:
                 data = dict(self._config_data)
             config = MinerConfig(
@@ -600,7 +712,7 @@ class PythonSidecar:
                 verbose=data.get("verbose", False),
                 auto_claim_rewards=data.get("auto_claim_rewards", False),
             )
-            from overwatch_drops_miner.gui_parts.config_io import save_config_data
+            from python_sidecar.backend.browser.config_io import save_config_data
             save_config_data(path, payload)
             return {"path": path}
         except Exception as e:
@@ -612,11 +724,11 @@ class PythonSidecar:
         if not path:
             return {"error": "未指定配置文件路径"}
         try:
-            from overwatch_drops_miner.gui_parts.config_io import load_config_data, values_from_config_data
+            from python_sidecar.backend.browser.config_io import load_config_data, values_from_config_data
             data = load_config_data(path)
             values = values_from_config_data(data)
             # 解析为内部结构化数据
-            from overwatch_drops_miner.utils import parse_room_ids, parse_task_ids, parse_url_list
+            from python_sidecar.backend.utils import parse_room_ids, parse_task_ids, parse_url_list
             room_ids = parse_room_ids(values.rooms_text) if values.rooms_text else []
             task_ids = parse_task_ids(values.task_ids_text) if values.task_ids_text else []
             notify_urls = parse_url_list(values.notify_urls_text) if values.notify_urls_text else []
@@ -624,7 +736,9 @@ class PythonSidecar:
                 self._config_data = {
                     "room_ids": room_ids,
                     # 导入文件里的数值同样钳制，避免越界值直接进 miner
-                    "thread_count": _clamp_int(values.thread_count_text, 60, 1, 256),
+                    "thread_count": _clamp_int(
+                        values.thread_count_text, 60, 1, MAX_THREAD_COUNT
+                    ),
                     "reconnect_delay_seconds": _clamp_int(values.reconnect_delay_text, 8, 1, 3600),
                     "task_ids": task_ids,
                     "task_query_interval_seconds": _clamp_int(values.task_query_interval_text, 30, 10, 3600),
@@ -643,7 +757,7 @@ class PythonSidecar:
     async def _qr_login(self, params: dict) -> dict:
         """生成登录二维码（复用原后端 QrLoginApi）"""
         try:
-            from overwatch_drops_miner.client_parts.qr_login import QrLoginApi
+            from python_sidecar.backend.client_parts.qr_login import QrLoginApi
 
             self._qr_close()
             api = QrLoginApi()
@@ -667,7 +781,7 @@ class PythonSidecar:
 
     async def _qr_poll(self, params: dict) -> dict:
         """轮询扫码状态：unscanned / scanned / expired / success"""
-        from overwatch_drops_miner.client_parts.qr_login import QrLoginStatus
+        from python_sidecar.backend.client_parts.qr_login import QrLoginStatus
 
         with self._qr_lock:
             api = self._qr_api
@@ -757,14 +871,18 @@ class PythonSidecar:
             return {"error": error}
         cookie, task_ids = context  # type: ignore[misc]
 
-        from overwatch_drops_miner.client import BilibiliClient
-        from overwatch_drops_miner.gui_parts.task_presenter import format_task_progress
+        from python_sidecar.backend.client import BilibiliClient
+        from python_sidecar.backend.browser.task_presenter import format_task_progress
 
         client = BilibiliClient(cookie)
         try:
             progresses = await asyncio.wait_for(
                 client.get_task_progress(task_ids), timeout=60.0
             )
+        except (asyncio.TimeoutError, TimeoutError):
+            # 必须显式捕获：str(TimeoutError()) 是空串，直接冒泡会让用户
+            # 看到空白错误提示。与第五轮已修的 _browser_capture 同类。
+            return {"error": "查询任务进度超时（60 秒），请检查网络后重试"}
         finally:
             try:
                 await client.close()
@@ -777,10 +895,16 @@ class PythonSidecar:
                 best = max(progresses, key=lambda t: float(getattr(t, "limit_value", 0)))
                 cur = float(getattr(best, "cur_value", 0) or 0)
                 limit = float(getattr(best, "limit_value", 0) or 0)
+                # NaN/inf 会在下游 int(NaN) 抛错、或经 json.dumps 产出非法
+                # JSON 被 Rust 丢弃，必须在这里归零。
+                if not (math.isfinite(cur) and math.isfinite(limit)):
+                    cur, limit = 0.0, 0.0
                 with self._progress_lock:
                     self._progress_values[str(params.get("account_id", ""))] = (cur, limit)
             except (TypeError, ValueError):
-                pass
+                # 原实现 pass 静默吞掉，与 NaN 链路叠加后错误信息对用户
+                # 毫无意义（同一个 NaN 在这里被吞、在 _get_account_status 炸）
+                logger.warning("任务进度解析失败", exc_info=True)
 
         return {
             "tasks": [self._serialize_task(task) for task in progresses],
@@ -794,14 +918,23 @@ class PythonSidecar:
             return {"error": error}
         cookie, task_ids = context  # type: ignore[misc]
 
-        from overwatch_drops_miner.client import BilibiliClient
-        from overwatch_drops_miner.gui_parts.task_presenter import format_reward_claim_results
+        from python_sidecar.backend.client import BilibiliClient
+        from python_sidecar.backend.browser.task_presenter import format_reward_claim_results
 
         client = BilibiliClient(cookie)
         try:
             results = await asyncio.wait_for(
                 client.receive_all_mission_rewards(task_ids), timeout=180.0
             )
+        except (asyncio.TimeoutError, TimeoutError):
+            # 同 _refresh_tasks：180s 在多任务 ID + 限频退避场景下极易击穿，
+            # 而 TimeoutError 的 str() 是空串，用户只会看到空白提示。
+            return {
+                "error": "领取奖励超时（180 秒），可能已部分领取，请先手动刷新确认",
+                "success": False,
+                "results": [],
+                "text": "领取奖励超时（180 秒），可能已部分领取，请先手动刷新确认",
+            }
         finally:
             try:
                 await client.close()
@@ -912,83 +1045,138 @@ class PythonSidecar:
             self._sniff_thread_ref = None
 
     def _register_sniff_thread(self, thread: threading.Thread) -> None:
-        """登记嗅探工作线程（供 shutdown 时 join）"""
+        """注册嗅探线程，供 shutdown 时 join。"""
         with self._sniff_lock:
             self._sniff_thread_ref = thread
 
-    async def _browser_capture(self, params: dict) -> dict:
-        """浏览器捕获 - 使用 Selenium + 扩展捕获 B 站 Cookie"""
+    async def _drive_sniff_session(
+        self,
+        *,
+        action: str,
+        start_kwargs: dict[str, Any],
+        done: threading.Event,
+        timeout_error: str,
+        browser: str | None = None,
+        timeout_seconds: float = SNIFF_TIMEOUT_SECONDS,
+    ) -> dict[str, Any] | None:
+        """驱动一次浏览器嗅探会话，直到结果就绪或超时。
+
+        Cookie 捕获 / 房间号 / 任务ID 三种模式共用这一份生命周期骨架。此前三者各自
+        抄了一遍 acquire→register→起线程→等 done→finally cancel/release，而 finally
+        里 cancel/done 的顺序带着线程池踩踏的教训 —— 抄两份必然只改一处：
+
+            acquire → register(cancel) → 起嗅探线程 → 等 done（带超时）
+            → finally { cancel.set()；done.set()；release }
+
+        调用方只提供两样东西：``start_kwargs``（透传给
+        ``start_browser_sniff`` 的 kind 专属参数与回调）与 ``done`` 事件
+        （嗅探线程的回调通过 set 它表示结果就绪）。
+
+        返回值约定：
+          * ``None``      —— 结果已就绪，调用方去读自己的结果容器
+          * ``dict``      —— 已终止的错误（忙 / 缺依赖 / 超时 / 异常），
+                             内含 ``error`` 键，调用方直接返回
+        """
         if not self._acquire_sniff():
-            return {"error": "已有一个浏览器自动获取任务在进行中，请稍候"}
-        sniff_cancel = threading.Event()
-        # 登记嗅探会话引用（供 shutdown 时 join）
-        self._register_sniff(sniff_cancel)
+            return {"error": "已有另一个自动获取任务在运行，请稍后再试"}
+        cancel_event = threading.Event()
+        # 注册嗅探会话取消事件，shutdown 时 join
+        self._register_sniff(cancel_event)
         try:
-            from overwatch_drops_miner.gui_parts.browser_sniffer import start_browser_sniff, select_login_cookies
+            from python_sidecar.backend.browser.browser_sniffer import start_browser_sniff
 
-            self._browser_capture_result = None
-            self._browser_capture_event = threading.Event()
-
-            def on_cookies(cookies: list[dict[str, Any]]) -> None:
-                """Cookie 捕获回调"""
-                filtered = select_login_cookies(cookies)
-                if not filtered:
-                    self._browser_capture_result = {"error": "未获取到有效登录 Cookie，请确认已登录 B 站"}
-                    if self._browser_capture_event:
-                        self._browser_capture_event.set()
-                    return
-                cookie_parts = [f"{c['name']}={c['value']}" for c in filtered]
-                cookie_str = "; ".join(cookie_parts)
-                self._browser_capture_result = {"cookie": cookie_str}
-                if self._browser_capture_event:
-                    self._browser_capture_event.set()
-
-            def on_error(err_type: str, err_msg: str) -> None:
-                """错误回调"""
-                self._browser_capture_result = {"error": f"{err_type}: {err_msg}"}
-                if self._browser_capture_event:
-                    self._browser_capture_event.set()
-
-            # 在线程池中运行浏览器捕获（避免阻塞事件循环）
+            # 嗅探线程是阻塞 IO（起浏览器 5-15s），丢默认 executor，不阻塞事件循环
             loop = asyncio.get_event_loop()
-            browser = params.get("browser")
             sniff_thread = await loop.run_in_executor(
                 None,
                 lambda: start_browser_sniff(
-                    url_keyword=None,  # 对齐原项目：捕获任意 B 站页面 Cookie
-                    hint="正在打开浏览器捕获 B 站 Cookie...",
-                    start_url="https://www.bilibili.com/",
-                    on_cookies=on_cookies,
-                    on_error=on_error,
                     browser_preference=browser,
-                    finish_on_any=True,
-                    cancel_event=sniff_cancel,
-                )
+                    cancel_event=cancel_event,
+                    **start_kwargs,
+                ),
             )
             self._register_sniff_thread(sniff_thread)
 
-            # 等待捕获完成或超时（120秒）
-            if self._browser_capture_event:
+            try:
                 await asyncio.wait_for(
-                    asyncio.to_thread(self._browser_capture_event.wait),
-                    timeout=120.0
+                    asyncio.to_thread(done.wait),
+                    timeout=timeout_seconds,
                 )
-
-            if self._browser_capture_result:
-                return self._browser_capture_result
-
-            return {"error": "浏览器捕获超时或被取消"}
-
+            except TimeoutError:
+                return {"error": timeout_error}
+            return None
         except ImportError as e:
             return {"error": f"缺少依赖: {e}，请安装 selenium"}
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return {"error": str(e)}
+            logger.warning("%s失败", action, exc_info=True)
+            return {"error": _safe_error(e)}
         finally:
-            sniff_cancel.set()
+            # 必须 cancel 优先于 done：嗅探线程看到 cancel_event 会在 break 处
+            # 主动 driver.quit()；反序会让回调在退出后再 set，wait() 卡死。
+            # 必须 done.set()：wait_for 超时/取消后，asyncio.to_thread(event.wait)
+            # 仍有一条卡在默认 executor 线程里。**绝不** join 嗅探线程
+            # （cancel_event 到 break 到 driver.quit() 存在秒级延迟）：
+            #   1) 每多一条这样的默认 executor 线程，进程退出前要等最多 20 秒，
+            #      叠加起来会拖垮 qr_poll / 自动获取等操作；
+            #   2) asyncio.run() 退出时 shutdown_default_executor() 无期限地
+            #      join 这些线程，不 join 的话整个进程要等，Rust 侧强杀也卡。
+            cancel_event.set()
+            done.set()
             self._release_sniff()
-    
+
+    async def _browser_capture(self, params: dict) -> dict:
+        """浏览器捕获 - 使用 Selenium + 扩展捕获 B 站 Cookie
+
+        生命周期由 ``_drive_sniff_session`` 统一负责，本方法只提供 kind 专属的
+        回调与结果解析。
+        """
+        from python_sidecar.backend.browser.browser_sniffer import select_login_cookies
+
+        result_box: dict[str, Any] = {}
+        done = threading.Event()
+
+        def on_cookies(cookies: list[dict[str, Any]]) -> None:
+            """Cookie 捕获回调"""
+            if not done.is_set():
+                filtered = select_login_cookies(cookies)
+                if not filtered:
+                    result_box.update(
+                        {"error": "未获取到有效登录 Cookie，请确认已登录 B 站"}
+                    )
+                else:
+                    cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in filtered)
+                    result_box.update({"cookie": cookie_str})
+                done.set()
+
+        def on_error(err_type: str, err_msg: str) -> None:
+            """错误回调"""
+            if not done.is_set():
+                result_box.update({"error": f"{err_type}: {err_msg}"})
+                done.set()
+
+        error = await self._drive_sniff_session(
+            action="浏览器捕获",
+            start_kwargs={
+                # 对齐原项目：捕获任意 B 站页面 Cookie
+                "url_keyword": None,
+                "hint": "正在打开浏览器捕获 B 站 Cookie...",
+                "start_url": "https://www.bilibili.com/",
+                "on_cookies": on_cookies,
+                "on_error": on_error,
+                "finish_on_any": True,
+            },
+            done=done,
+            browser=params.get("browser"),
+            timeout_error=(
+                "浏览器捕获超时（120 秒未捕获到登录 Cookie），"
+                "请确认浏览器已打开并完成 B 站登录"
+            ),
+        )
+        if error is not None:
+            return error
+        # done 已被 set 但一个回调都没写结果 = 嗅探线程自行退出
+        return dict(result_box) or {"error": "浏览器捕获被取消"}
+
     @staticmethod
     def _normalize_task_groups(groups: Any) -> list[dict[str, Any]]:
         """extract_bili_live_task_groups 结果 → [{label, task_ids, active}]"""
@@ -1019,15 +1207,14 @@ class PythonSidecar:
         if room_id <= 0:
             return {"error": "请先填写房间号，或改用模式2（浏览器嗅探）"}
 
-        from overwatch_drops_miner.client_parts.task_discovery import fetch_live_task_groups
+        from python_sidecar.backend.client_parts.task_discovery import fetch_live_task_groups
 
         try:
             groups = await asyncio.wait_for(
                 asyncio.to_thread(fetch_live_task_groups, room_id), timeout=30.0
             )
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            logger.warning("命令执行失败", exc_info=True)
             return {"error": f"自动获取模式1失败: {type(e).__name__}（可改用模式2）"}
 
         normalized = self._normalize_task_groups(groups)
@@ -1036,12 +1223,11 @@ class PythonSidecar:
         return {"room_id": room_id, "groups": normalized}
 
     async def _run_browser_sniff(self, *, kind: str, room_id: int, browser: str | None = None) -> dict:
-        """浏览器嗅探会话（kind: room=房间号 / task=任务ID模式2），单会话，120s 超时"""
-        if not self._acquire_sniff():
-            return {"error": "已有一个浏览器自动获取任务在进行中，请稍候"}
-        cancel_event = threading.Event()
-        # 登记嗅探会话引用（供 shutdown 时 join）
-        self._register_sniff(cancel_event)
+        """浏览器嗅探会话（kind: room=房间号 / task=任务ID模式2），单会话，120s 超时
+
+        生命周期由 ``_drive_sniff_session`` 统一负责，本方法只负责 kind 分支的
+        嗅探参数与回调。
+        """
         result_box: dict[str, Any] = {}
         done = threading.Event()
 
@@ -1050,114 +1236,92 @@ class PythonSidecar:
                 result_box.update(payload)
                 done.set()
 
-        try:
-            from overwatch_drops_miner.gui_parts.browser_sniffer import start_browser_sniff
+        def on_error(title: str, message: str) -> None:
+            _finish({"error": f"{title}: {message}"})
 
-            def on_error(title: str, message: str) -> None:
-                _finish({"error": f"{title}: {message}"})
+        sniff_kwargs: dict[str, Any]
+        if kind == "room":
+            def on_room_url(captured_room_id: int) -> None:
+                _finish({"room_id": int(captured_room_id)})
 
-            sniff_kwargs: dict[str, Any]
-            if kind == "room":
-                def on_room_url(captured_room_id: int) -> None:
-                    _finish({"room_id": int(captured_room_id)})
+            sniff_kwargs = {
+                "url_keyword": None,
+                "hint": "已打开浏览器，请在 2 分钟内进入目标直播间",
+                "on_page_url": on_room_url,
+                "finish_on_any": True,
+            }
+        else:
+            from python_sidecar.backend.browser.browser_utils import (
+                extract_room_id_from_live_url,
+            )
+            from python_sidecar.backend.utils import extract_bili_live_task_groups
 
-                sniff_kwargs = {
-                    "url_keyword": None,
-                    "hint": "已打开浏览器，请在 2 分钟内进入目标直播间",
-                    "on_page_url": on_room_url,
-                    "finish_on_any": True,
-                }
-            else:
-                from overwatch_drops_miner.gui_parts.browser_utils import (
-                    extract_room_id_from_live_url,
+            def on_page_html(page_html: str, page_url: str) -> bool:
+                found_room = extract_room_id_from_live_url(page_url)
+                normalized = self._normalize_task_groups(
+                    extract_bili_live_task_groups(page_html)
                 )
-                from overwatch_drops_miner.utils import extract_bili_live_task_groups
+                if not normalized:
+                    return False
+                payload: dict[str, Any] = {"groups": normalized}
+                if found_room:
+                    payload["room_id"] = int(found_room)
+                _finish(payload)
+                return True
 
-                def on_page_html(page_html: str, page_url: str) -> bool:
+            def on_network_match(payload_raw: Any) -> None:
+                try:
+                    payload_data = payload_raw if isinstance(payload_raw, dict) else {}
+                    request_url = str(payload_data.get("url") or "")
+                    page_url = str(payload_data.get("page_url") or "")
                     found_room = extract_room_id_from_live_url(page_url)
-                    normalized = self._normalize_task_groups(
-                        extract_bili_live_task_groups(page_html)
-                    )
-                    if not normalized:
-                        return False
-                    payload: dict[str, Any] = {"groups": normalized}
-                    if found_room:
+                    if found_room is None:
+                        found_room = extract_room_id_from_live_url(request_url)
+                    data = payload_data.get("data")
+                    if not isinstance(data, dict) or data.get("code") != 0:
+                        return
+                    tasks = (data.get("data") or {}).get("list") or []
+                    task_ids = [
+                        str(t.get("task_id")).strip()
+                        for t in tasks
+                        if isinstance(t, dict) and t.get("task_id")
+                    ]
+                    if not task_ids:
+                        return
+                    payload = {
+                        "groups": [{
+                            "label": "页面任务接口捕获",
+                            "task_ids": task_ids,
+                            "active": True,
+                        }],
+                    }
+                    if found_room is not None:
                         payload["room_id"] = int(found_room)
                     _finish(payload)
-                    return True
+                except Exception:
+                    return
 
-                def on_network_match(payload_raw: Any) -> None:
-                    try:
-                        payload_data = payload_raw if isinstance(payload_raw, dict) else {}
-                        request_url = str(payload_data.get("url") or "")
-                        page_url = str(payload_data.get("page_url") or "")
-                        found_room = extract_room_id_from_live_url(page_url)
-                        if found_room is None:
-                            found_room = extract_room_id_from_live_url(request_url)
-                        data = payload_data.get("data")
-                        if not isinstance(data, dict) or data.get("code") != 0:
-                            return
-                        tasks = (data.get("data") or {}).get("list") or []
-                        task_ids = [
-                            str(t.get("task_id")).strip()
-                            for t in tasks
-                            if isinstance(t, dict) and t.get("task_id")
-                        ]
-                        if not task_ids:
-                            return
-                        payload = {
-                            "groups": [{
-                                "label": "页面任务接口捕获",
-                                "task_ids": task_ids,
-                                "active": True,
-                            }],
-                        }
-                        if found_room is not None:
-                            payload["room_id"] = int(found_room)
-                        _finish(payload)
-                    except Exception:
-                        return
-
-                sniff_kwargs = {
-                    "url_keyword": "/x/task/totalv2",
-                    "hint": "已打开浏览器，请打开有当前任务的直播间并等待页面加载完成",
-                    "on_network_match": on_network_match,
-                    "on_page_html": on_page_html,
-                    "finish_on_any": True,
-                    "start_url": (
-                        f"https://live.bilibili.com/{room_id}" if room_id > 0 else None
-                    ),
-                }
-
-            loop = asyncio.get_event_loop()
-            sniff_thread = await loop.run_in_executor(
-                None,
-                lambda: start_browser_sniff(
-                    on_error=on_error,
-                    browser_preference=browser,
-                    cancel_event=cancel_event,
-                    **sniff_kwargs,
+            sniff_kwargs = {
+                "url_keyword": "/x/task/totalv2",
+                "hint": "已打开浏览器，请打开有当前任务的直播间并等待页面加载完成",
+                "on_network_match": on_network_match,
+                "on_page_html": on_page_html,
+                "finish_on_any": True,
+                "start_url": (
+                    f"https://live.bilibili.com/{room_id}" if room_id > 0 else None
                 ),
-            )
-            self._register_sniff_thread(sniff_thread)
+            }
 
-            try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(done.wait),
-                    timeout=120.0,
-                )
-            except asyncio.TimeoutError:
-                return {"error": "浏览器捕获超时（2 分钟）"}
-            return dict(result_box)
-        except ImportError as e:
-            return {"error": f"缺少依赖: {e}，请安装 selenium"}
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return {"error": str(e)}
-        finally:
-            cancel_event.set()
-            self._release_sniff()
+        error = await self._drive_sniff_session(
+            action="浏览器嗅探",
+            start_kwargs={"on_error": on_error, **sniff_kwargs},
+            done=done,
+            browser=browser,
+            timeout_error="浏览器操作超时（2 分钟）",
+        )
+        if error is not None:
+            return error
+        return dict(result_box)
 
     async def _auto_fetch_room_id(self, params: dict) -> dict:
         """自动获取房间号（浏览器嗅探：打开目标直播间捕获 URL）"""
@@ -1200,7 +1364,7 @@ class PythonSidecar:
 
     async def _detect_browsers(self, params: dict) -> dict:
         try:
-            from overwatch_drops_miner.gui_parts.browser_utils import (
+            from python_sidecar.backend.browser.browser_utils import (
                 available_browsers,
                 detect_default_browser,
                 browser_label,
@@ -1239,15 +1403,25 @@ class PythonSidecar:
                     if result == "stopped" and account_id not in existing_ids:
                         self.miner_manager.discard_session(account_id)
 
-                    # 检测状态变化并发送事件
                     running = state == "running"
                     if result == "stopped":
                         running = False
-                    # 发送状态变化事件（覆盖 worker 自行退出、看门狗自动停止等）
+                    # 只在状态真正变化时推送。注释说的是「状态变化事件」，但原实现
+                    # 无条件发：shutdown_states() 返回所有会话（含 idle 残留），
+                    # 每 200ms 一次 → 257 账号约 1285 事件/秒，每条都是一行
+                    # stdout JSON + 一次跨进程 emit + 前端一次查找，纯浪费。
+                    if self._last_running_state.get(account_id) == running:
+                        continue
+                    self._last_running_state[account_id] = running
                     self._emit_event("account-state-changed", {
                         "account_id": account_id,
                         "running": running,
                     })
+
+                # 清理已消失会话的状态记录
+                live = set(states.keys())
+                for gone in [k for k in self._last_running_state if k not in live]:
+                    del self._last_running_state[gone]
 
             except Exception as e:
                 print(f"[Sidecar] 账号轮询异常: {e}", file=sys.stderr)
@@ -1256,19 +1430,27 @@ class PythonSidecar:
 
     async def _check_update(self, params: dict) -> dict:
         try:
-            from overwatch_drops_miner.gui_parts.update_checker import check_latest_release
-            from overwatch_drops_miner._version import (
+            from python_sidecar.backend.browser.update_checker import check_latest_release
+            from python_sidecar.backend._version import (
                 APP_VERSION,
                 UPDATE_CHANNEL,
                 LATEST_RELEASE_API,
                 RELEASES_URL,
             )
-            result = check_latest_release(
-                app_version=APP_VERSION,
-                update_channel=UPDATE_CHANNEL,
-                latest_release_api=LATEST_RELEASE_API,
-                releases_url=RELEASES_URL,
-                timeout=8,
+            # 必须丢到线程里：check_latest_release 是同步 urllib（8s 超时），
+            # 直接在事件循环里调会让这 8 秒内所有在途 IPC 都无法响应、
+            # 扫码轮询定时器也不触发。而 App.vue 启动后 3s 就调它，
+            # 正好和用户首次点击（加载配置、拉账号）重叠。
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    check_latest_release,
+                    app_version=APP_VERSION,
+                    update_channel=UPDATE_CHANNEL,
+                    latest_release_api=LATEST_RELEASE_API,
+                    releases_url=RELEASES_URL,
+                    timeout=8,
+                ),
+                timeout=10.0,
             )
             if result is None:
                 return {"update_available": False}
@@ -1277,18 +1459,30 @@ class PythonSidecar:
                 "latest_version": result.latest_version,
                 "release_url": result.release_url,
             }
+        except (asyncio.TimeoutError, TimeoutError):
+            return {"update_available": False}
         except Exception as e:
-            return {"error": f"检查更新失败: {e}"}
+            return {"error": f"检查更新失败: {_safe_error(e)}"}
 
     async def _shutdown(self, params: dict) -> dict:
-        """应用关闭时清理浏览器资源"""
+        """应用关闭时清理浏览器与 miner 资源"""
         closed = True
         # 取消扫码会话
         self._qr_close()
+        # 停止所有 miner：原实现从不调 stop_all（该公开 API 在整个
+        # main.py 里零调用），miner 线程只能靠 Rust 的 force_kill 硬杀，
+        # 可能停在心跳中途。让它有机会优雅收尾。
+        if self.miner_manager is not None:
+            try:
+                self.miner_manager.stop_all()
+            except Exception:
+                logger.warning("停止所有 miner 失败", exc_info=True)
+                closed = False
         # 停止嗅探线程（先在锁内取引用，再在锁外等待，避免与嗅探线程释放路径互锁）
         with self._sniff_lock:
             cancel_event = self._sniff_cancel_event
             thread = self._sniff_thread_ref
+            busy = self._sniff_busy
         if cancel_event is not None:
             cancel_event.set()
             if thread is not None and thread.is_alive():
@@ -1296,12 +1490,18 @@ class PythonSidecar:
                 if thread.is_alive():
                     print("[Sidecar] 浏览器嗅探线程未在预算时间内退出", file=sys.stderr)
                     closed = False
+            elif busy and thread is None:
+                # 竞态：_register_sniff 把 cancel_event 建好但 _sniff_thread_ref
+                # 尚未填充（selenium 启动本身要 5-15s），此时跳过 join 就会返回
+                # closed=true，而浏览器正要启动。宁可报 false 也不能谎报干净。
+                print("[Sidecar] 嗅探线程正在启动，shutdown 未能确认其退出", file=sys.stderr)
+                closed = False
         return {"closed": closed}
 
     async def _send_notification(self, params: dict) -> dict:
         """发送通知"""
         try:
-            from overwatch_drops_miner.notifier import MultiPlatformNotifier
+            from python_sidecar.backend.notifier import MultiPlatformNotifier
             
             title = params.get("title", "通知")
             body = params.get("body", "")
@@ -1316,16 +1516,25 @@ class PythonSidecar:
             notifier = MultiPlatformNotifier(notify_urls)
             if not notifier.enabled:
                 return {"error": "无可用的通知渠道"}
-            
-            success = notifier.notify(title, body)
-            return {"success": success}
-            
+
+            # notify 内部对每个目标串行 httpx.post(timeout=10)，N 个 URL 最坏
+            # N×10s，且原先直接跑在事件循环里 —— 期间整个 sidecar 的 IPC
+            # 全部无响应。丢到线程并加 30s 总预算。
+            success = await asyncio.wait_for(
+                asyncio.to_thread(notifier.notify, title, body),
+                timeout=30.0,
+            )
+            return {"success": bool(success)}
+
         except ImportError as e:
             return {"error": f"缺少依赖: {e}，请安装 httpx"}
+        except (asyncio.TimeoutError, TimeoutError):
+            return {"error": "发送通知超时（30 秒），请检查通知 URL 是否可达"}
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return {"error": str(e)}
+            # 原先 traceback.print_exc()：release 下 stderr 无效句柄，
+            # 用户界面与日志都拿不到任何线索
+            logger.warning("发送通知失败", exc_info=True)
+            return {"error": _safe_error(e)}
 
 
 async def main():
@@ -1337,10 +1546,26 @@ async def main():
     - 仍然只有一个事件循环，扫码会话的 httpx 客户端不会被跨 loop 使用。
     """
     # 修复 stderr/stdout 中文乱码（stdout 承载 JSON 协议，必须 UTF-8）
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+
+    # stderr 兜底：release 下主进程是 GUI 子系统（main.rs 的
+    # windows_subsystem = "windows"）且 sidecar 以 CREATE_NO_WINDOW 启动，
+    # GetStdHandle(STD_ERROR_HANDLE) 很可能返回无效句柄，CPython 此时把
+    # sys.stderr 置为 None。而 print(*, file=None) 的语义是「回落到
+    # sys.stdout」—— 这些诊断行会变成非法 JSON 污染协议通道，
+    # 同时真正的错误诊断（后端初始化失败、配置读写失败、嗅探未退出…）
+    # 在用户界面与日志里彻底消失。改为写 devnull 至少不污染协议。
+    if sys.stderr is None:
+        try:
+            sys.stderr = open(os.devnull, "w", encoding="utf-8")
+        except Exception:
+            sys.stderr = open(os.devnull, "w")
+    elif hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
     sidecar = PythonSidecar()
     print("[Sidecar] 启动成功，等待 Tauri 连接...", file=sys.stderr)
@@ -1355,7 +1580,14 @@ async def main():
     )
     poll_thread.start()
 
-    await serve_requests(sidecar)
+    try:
+        await serve_requests(sidecar)
+    finally:
+        # poll_stop 之前只创建、从不 set —— 「给轮询加 stop_event 以支持优雅退出」
+        # 这项改动只完成了参数，退出路径一直缺失。靠 daemon 兜底虽不致命，
+        # 但线程会活到进程结束。
+        poll_stop.set()
+        poll_thread.join(timeout=1.0)
 
 
 async def serve_requests(sidecar: PythonSidecar) -> None:
@@ -1375,11 +1607,26 @@ async def serve_requests(sidecar: PythonSidecar) -> None:
                 request.get("command"), request.get("params", {})
             )
         except Exception as e:
-            response = {"error": str(e)}
+            response = {"error": _safe_error(e)}
         # 回带请求 id，便于 Rust 侧把响应路由到等待中的调用
         if "id" in request:
             response = {**response, "id": request["id"]}
-        sidecar._write_line(json.dumps(response, ensure_ascii=False))
+        # 序列化必须兜底：任何 handler 返回不可序列化对象，或 stdout 已
+        # broken pipe 导致 _write_line 抛异常，都会让这一行响应根本没写出去，
+        # Rust 侧 rx.recv_timeout 会一直等到 300s 超时，而异常只进 asyncio
+        # 的 "Task exception was never retrieved"（写 stderr，release 下
+        # 不可见）。_emit_event 已有同样的 try，这里补齐一致性。
+        try:
+            sidecar._write_line(sidecar._dumps(response))
+        except Exception as e:
+            fallback = {"error": f"响应序列化/写出失败: {e}"}
+            if "id" in request:
+                fallback["id"] = request["id"]
+            try:
+                # allow_nan=False 自身也可能抛（值含 NaN），最后用默认参数兜底
+                sidecar._write_line(json.dumps(fallback, ensure_ascii=False))
+            except Exception:
+                pass
 
     tasks: set[asyncio.Task] = set()
 
@@ -1389,11 +1636,9 @@ async def serve_requests(sidecar: PythonSidecar) -> None:
         tasks.add(task)
         task.add_done_callback(tasks.discard)
 
-    def _cleanup_tasks() -> None:
-        """清理已完成的任务引用，防止集合无限增长"""
-        done = [t for t in tasks if t.done()]
-        for t in done:
-            tasks.discard(t)
+    # 曾经有个 _cleanup_tasks() 用来「防止 tasks 集合无限增长」，它是恒为空操作的死代码
+    # —— 真正生效的是 _spawn 里的 add_done_callback(tasks.discard)，而 _spawn 刚创建的
+    # task 尚未被调度，t.done() 必为 False，所以它永远删不到东西。已删除该函数与调用点。
 
     def submit(line: str) -> None:
         """（事件循环线程内）解析一行请求并立即起一个并发任务"""
@@ -1409,7 +1654,6 @@ async def serve_requests(sidecar: PythonSidecar) -> None:
             sidecar._write_line(json.dumps({"error": "无效的请求格式"}, ensure_ascii=False))
             return
         _spawn(request)
-        _cleanup_tasks()
 
     def reader() -> None:
         """stdin 读取线程：读到一行就投递回事件循环"""

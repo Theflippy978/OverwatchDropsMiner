@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from overwatch_drops_miner.gui_parts.task_presenter import (
+from python_sidecar.backend.browser.task_presenter import (
     format_watch_status_line,
 )
 

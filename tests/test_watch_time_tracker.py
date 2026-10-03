@@ -6,7 +6,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from overwatch_drops_miner.watch_time_tracker import (
+from python_sidecar.backend.watch_time_tracker import (
     WatchTimeTracker,
     estimate_remaining_seconds,
 )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from overwatch_drops_miner.gui_parts.update_checker import (
+from python_sidecar.backend.browser.update_checker import (
     normalize_version,
     parse_update_payload,
     should_check_update,
