@@ -2,96 +2,125 @@
      width="1200" height="400" viewBox="0 0 1200 400"
      role="img" aria-labelledby="title desc">
   <title id="title">守望先锋直播掉宝助手</title>
-  <desc id="desc">专为守望先锋直播掉宝设计的自动化挂机工具，支持多账号管理、扫码登录、自动领取奖励</desc>
+  <desc id="desc">应用图标与白色主题界面。左侧为项目名与运行环境；右侧为真实的任务进度卡：Theflippy 账号挂宝中、B 站有效观看 600 分钟、检查点进度条与对应掉宝奖励。</desc>
 
-  <defs>
-    <linearGradient id="bg-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#0a0a0a;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#1a1a2e;stop-opacity:1" />
-    </linearGradient>
-    <linearGradient id="accent-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" style="stop-color:#00a8ff;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#ff6b35;stop-opacity:1" />
-    </linearGradient>
-  </defs>
+  <!-- 配色取自应用自身：浅色主题令牌（src/style.css 的 @theme）与应用图标主色 #EF7E06 -->
 
-  <!-- 背景 -->
-  <rect width="1200" height="400" rx="12" fill="url(#bg-gradient)"/>
-  
-  <!-- 六边形网格背景 (守望先锋主题) -->
-  <pattern id="hexagons" width="60" height="52" patternUnits="userSpaceOnUse">
-    <path d="M30 0 L60 15 L60 37 L30 52 L0 37 L0 15 Z" fill="none" stroke="#ffffff" stroke-width="0.5" opacity="0.1"/>
-  </pattern>
-  <rect width="1200" height="400" fill="url(#hexagons)" opacity="0.3"/>
+  <rect width="1200" height="400" rx="18" fill="#FFFFFF"/>
+  <rect x="0.5" y="0.5" width="1199" height="399" rx="18" fill="none" stroke="#E5E5E5"/>
 
-  <!-- 左侧标题区域 -->
-  <g id="title-block" transform="translate(56 40)">
-    <!-- 项目分类 -->
-    <text x="0" y="0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="16" fill="#00a8ff" font-weight="600">AUTOMATION TOOL</text>
-    
-    <!-- 项目名称 -->
-    <text x="0" y="60" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="48" fill="#ffffff" font-weight="700">守望先锋直播掉宝助手</text>
-    
-    <!-- 描述 -->
-    <text x="0" y="100" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="20" fill="#aaaaaa">专为守望先锋直播掉宝设计的自动化挂机工具</text>
-    
-    <!-- 元数据标签 -->
-    <g transform="translate(0 140)">
-      <rect width="80" height="30" rx="15" fill="#00a8ff" opacity="0.2"/>
-      <text x="40" y="20" font-family="'SFMono-Regular', Menlo, monospace" font-size="14" fill="#00a8ff" text-anchor="middle">Python 3.10+</text>
-      
-      <g transform="translate(100 0)">
-        <rect width="90" height="30" rx="15" fill="#ff6b35" opacity="0.2"/>
-        <text x="45" y="20" font-family="'SFMono-Regular', Menlo, monospace" font-size="14" fill="#ff6b35" text-anchor="middle">PySide6</text>
+  <!-- ================= 左：应用图标与项目标识 ================= -->
+  <g id="title-block">
+    <!-- 程序图标本体：与 exe / 任务栏 / 资源管理器 / 标题栏同源
+         （src-tauri/icons/128x128.png，即 `pnpm tauri icon img/app.ico` 的产物），
+         以 base64 内嵌而非手绘近似，也非外部引用 ——
+         内嵌是唯一在 README 里既能显示真图、又不依赖外部请求的方式。 -->
+    <image x="56" y="52" width="34" height="34"
+           href="data:image/png;base64,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"
+           alt="" aria-hidden="true"/>
+
+    <text x="104" y="76"
+          font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="15" letter-spacing="1.6" fill="#EF7E06">TAURI 2 · VUE 3 · PYTHON</text>
+
+    <text x="56" y="156"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif"
+          font-size="46" font-weight="700" fill="#0A0A0A">守望先锋直播掉宝助手</text>
+
+    <text x="56" y="202"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif"
+          font-size="20" fill="#737373">多账号挂机 · 自动领取掉宝奖励 · 实时进度追踪</text>
+
+    <g id="metadata" transform="translate(56 242)"
+       font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">
+      <g>
+        <rect width="95" height="32" rx="16" fill="#F5F5F5" stroke="#E5E5E5"/>
+        <text x="47.5" y="21" text-anchor="middle" fill="#404040">Windows</text>
       </g>
-      
+      <g transform="translate(105 0)">
+        <rect width="95" height="32" rx="16" fill="#F5F5F5" stroke="#E5E5E5"/>
+        <text x="47.5" y="21" text-anchor="middle" fill="#404040">Tauri 2</text>
+      </g>
       <g transform="translate(210 0)">
-        <rect width="80" height="30" rx="15" fill="#ffffff" opacity="0.2"/>
-        <text x="40" y="20" font-family="'SFMono-Regular', Menlo, monospace" font-size="14" fill="#ffffff" text-anchor="middle">Windows</text>
+        <rect width="76" height="32" rx="16" fill="#F5F5F5" stroke="#E5E5E5"/>
+        <text x="38" y="21" text-anchor="middle" fill="#404040">Vue 3</text>
       </g>
+      <g transform="translate(296 0)">
+        <rect width="134" height="32" rx="16" fill="#F5F5F5" stroke="#E5E5E5"/>
+        <text x="67" y="21" text-anchor="middle" fill="#404040">Python 3.14</text>
+      </g>
+    </g>
+
+    <g transform="translate(56 332)">
+      <circle cx="5" cy="-5" r="4.5" fill="#1B7E2A"/>
+      <text x="20" y="0"
+            font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+            font-size="16" fill="#737373">挂宝已启动 · 账号：Theflippy · 房间号：[23612045] · 线程数：256</text>
     </g>
   </g>
 
-  <!-- 右侧终端证明区域 -->
-  <g id="terminal-proof" transform="translate(700 40)">
-    <!-- 终端窗口 -->
-    <rect x="0" y="0" width="440" height="320" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
-    
-    <!-- 终端标题栏 -->
-    <rect x="0" y="0" width="440" height="32" rx="8" fill="#161b22"/>
-    <rect x="0" y="24" width="440" height="8" fill="#161b22"/>
-    
-    <!-- 窗口控制按钮 -->
-    <circle cx="20" cy="16" r="6" fill="#ff5f57"/>
-    <circle cx="40" cy="16" r="6" fill="#febc2e"/>
-    <circle cx="60" cy="16" r="6" fill="#28c840"/>
-    
-    <!-- 终端标题 -->
-    <text x="220" y="20" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#8b949e" text-anchor="middle">OverwatchDropsMiner </text>
-    
-    <!-- 终端内容 -->
-    <g transform="translate(20 50)">
-      <!-- 输出内容 -->
-      <text x="0" y="30" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#8b949e">[INFO] 初始化 ...</text>
-      <text x="0" y="50" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#8b949e">[INFO] 加载账号配置...</text>
-      <text x="0" y="70" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#3fb950">[SUCCESS] 找到 3 个账号</text>
-      
-      <!-- 账号状态 -->
-      <g transform="translate(0 100)">
-        <rect x="0" y="0" width="400" height="80" rx="4" fill="#161b22" stroke="#30363d" stroke-width="1"/>
-        <text x="20" y="25" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#00a8ff">账号: OverwatchFan_001</text>
-        <text x="20" y="45" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#8b949e">状态: 监听中 | 掉宝: 已领取 12 个</text>
-        <text x="20" y="65" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#3fb950">进度: ████████████████ 100%</text>
-      </g>
-      
-      <!-- 更多账号 -->
-      <g transform="translate(0 200)">
-        <text x="0" y="0" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#8b949e">[INFO] 所有账号运行正常</text>
-        <text x="0" y="20" font-family="'SFMono-Regular', Menlo, monospace" font-size="12" fill="#3fb950">[SUCCESS] 挂宝领取成功</text>
-      </g>
-    </g>
-  </g>
+  <!-- ================= 右：真实任务进度卡（白色主题） ================= -->
+  <g id="progress-card"
+     font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+    <rect x="608" y="44" width="536" height="306" rx="14" fill="#FFFFFF" stroke="#E5E5E5"/>
 
-  <!-- 底部装饰线 -->
-  <rect x="56" y="360" width="1088" height="2" fill="url(#accent-gradient)" opacity="0.5"/>
+    <text x="632" y="84" font-size="20" font-weight="700" fill="#0A0A0A">挂宝进度</text>
+
+    <g transform="translate(726 60)">
+      <rect width="168" height="28" rx="14" fill="#1B7E2A" fill-opacity="0.10"/>
+      <text x="84" y="19" text-anchor="middle" font-size="14" fill="#1B7E2A">Theflippy（挂宝中）</text>
+    </g>
+
+    <g id="status-fields">
+      <rect x="632" y="100" width="232" height="52" rx="8" fill="#F5F5F5"/>
+      <text x="648" y="122" font-size="15" fill="#737373">状态</text>
+      <text x="648" y="144" font-size="18" fill="#0A0A0A">挂宝中</text>
+
+      <rect x="888" y="100" width="232" height="52" rx="8" fill="#F5F5F5"/>
+      <text x="904" y="122" font-size="15" fill="#737373">有效观看（B站）</text>
+      <text x="904" y="144" font-size="18" fill="#0A0A0A">600 分钟</text>
+
+      <rect x="632" y="162" width="232" height="52" rx="8" fill="#F5F5F5"/>
+      <text x="648" y="184" font-size="15" fill="#737373">本地连接</text>
+      <text x="648" y="206" font-size="18" fill="#0A0A0A">2 分 22 秒</text>
+
+      <rect x="888" y="162" width="232" height="52" rx="8" fill="#F5F5F5"/>
+      <text x="904" y="184" font-size="15" fill="#737373">预计剩余</text>
+      <text x="904" y="206" font-size="18" fill="#0A0A0A">已达标</text>
+    </g>
+
+    <rect x="632" y="226" width="488" height="26" rx="6" fill="#F5F5F5"/>
+    <rect x="632" y="226" width="488" height="26" rx="6" fill="#171717"/>
+    <text x="876" y="244" text-anchor="middle" font-size="14" font-weight="700" fill="#FAFAFA">掉宝进度 100%</text>
+
+    <text x="632" y="278" font-size="16" fill="#0A0A0A">1. 观看直播（当前: 600 分钟）</text>
+
+    <g id="checkpoints" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+      <text x="632" y="302" font-size="16" fill="#0A0A0A"
+            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif">60分</text>
+      <text x="686" y="302" font-size="15" fill="#A1A1A1">[</text>
+      <text x="695" y="302" font-size="15" fill="#0A0A0A">##############</text>
+      <text x="821" y="302" font-size="15" fill="#A1A1A1">]</text>
+      <text x="836" y="302" font-size="15" fill="#737373">60/60</text>
+
+      <text x="632" y="332" font-size="16" fill="#0A0A0A"
+            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif">600分</text>
+      <text x="686" y="332" font-size="15" fill="#A1A1A1">[</text>
+      <text x="695" y="332" font-size="15" fill="#0A0A0A">##############</text>
+      <text x="821" y="332" font-size="15" fill="#A1A1A1">]</text>
+      <text x="836" y="332" font-size="15" fill="#737373">600/600</text>
+    </g>
+
+    <g transform="translate(918 286)">
+      <rect width="64" height="22" rx="11" fill="#1B7E2A" fill-opacity="0.10"/>
+      <text x="32" y="15" text-anchor="middle" font-size="13" fill="#1B7E2A">已完成</text>
+    </g>
+    <g transform="translate(918 316)">
+      <rect width="64" height="22" rx="11" fill="#1B7E2A" fill-opacity="0.10"/>
+      <text x="32" y="15" text-anchor="middle" font-size="13" fill="#1B7E2A">已完成</text>
+    </g>
+
+    <text x="996" y="302" font-size="15" fill="#737373">太阳茶头像 ×1</text>
+    <text x="996" y="332" font-size="15" fill="#737373">电竞补给 ×1</text>
+  </g>
 </svg>
