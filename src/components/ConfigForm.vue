@@ -436,7 +436,7 @@ function cancelBrowserPicker() {
   <Card class="card-hover">
     <CardContent class="space-y-3.5 px-[18px] py-[14px]">
       <!-- 分组一：连接与任务
-           标签列宽度取 style.css 的 --cfg-label-w（84px）而不是各写各的字面量：
+           标签列宽度取 style.css 的 --cfg-label-w 而不是各写各的字面量：
            本组三行与下方运行参数三行必须共用同一个左边缘，
            否则「线程数」（3 字）会比「查询间隔(s)」（8 字）缩进 40px。
            minmax(0,1fr) 给输入框，auto 给行内按钮组：
@@ -531,10 +531,11 @@ function cancelBrowserPicker() {
 
              为什么不能是 grid-cols-3：`grid-cols-3` 展开为
              `repeat(3, minmax(0, 1fr))`，下限是 0 —— 列宽可以缩到比内容还窄；
-             而块内的标签 `w-[84px] shrink-0` 与输入框 `w-[68px] shrink-0`
-             都不允许缩，于是内容溢出各自的列、往右压到相邻列上，
-             表现为「按钮重叠」。写成 minmax(160px, 1fr)（160 = 84+8+68 的
-             块内最小宽）后，列宽永远 ≥ 内容宽，窄窗口下的表现从
+             而块内的标签 `w-[var(--cfg-label-w)] shrink-0` 与输入框
+             `w-[68px] shrink-0` 都不允许缩，于是内容溢出各自的列、
+             往右压到相邻列上，表现为「按钮重叠」。
+             写成 minmax(160px, 1fr)（160 = 74 + 8 + 68，即
+             --cfg-label-w + gap + 输入框宽）后，列宽永远 ≥ 内容宽，窄窗口下的表现从
              「重叠」变成「整卡溢出」——后者由最小窗口尺寸兜住，
              前者无论窗口多宽都会出现。
 

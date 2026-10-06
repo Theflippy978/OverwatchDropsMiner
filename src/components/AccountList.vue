@@ -150,7 +150,8 @@ async function handleStart(accountId: string) {
   clearActionError();
   try {
     await accountsStore.startMiner(accountId);
-    // 对齐原 _finish_account_started：启动后自动选中该账号
+    // 启动后自动选中该账号：用户点「启动」的意图就是「我要看这个账号」，
+    // 不自动选中会让他再点一次账号行，而进度卡还停在别的账号上。
     emit("select", accountId);
   } catch (e) {
     showActionError(`启动失败: ${e}`, true);
@@ -326,9 +327,9 @@ function handleBottomRemove() {
     <CardContent class="min-h-0 flex-1 px-3.5 pt-0">
       <!-- 列表容器沿用 Qt 时代 QListWidget 的观感：
            输入框底色 + 1px 边框 + radius 8px + 内 padding 4px。
-           用原生 overflow-y-auto 而不是项目的 ScrollArea：后者靠reka 渲染
-           一条独立的隐藏式滚动条组件，CSS 的 ::-webkit-scrollbar 盖不住它，
-           而全局隐藏滚动条是本轮的统一要求。 -->
+           用原生 overflow-y-auto 而非引入 reka 的滚动条组件：后者会渲染
+           一条独立的隐藏式滚动条元素，CSS 的 ::-webkit-scrollbar 盖不住它，
+           而全局隐藏滚动条是本项目的统一要求。 -->
       <div class="scroll-hidden h-full overflow-y-auto rounded-lg border border-input bg-input/40 p-1">
         <div
           v-if="accountsStore.loading"

@@ -152,6 +152,9 @@ class AccountStore:
                 LOGGER.warning(
                     "已清洗 %d 个账号备注中的非法字符，下次保存后写回磁盘", repaired
                 )
+                # 上面这句日志只有在真正调用 sanitize_text 后才成立。
+                # 若哪天删掉了清洗那两行，这段日志就会变成「说了但没做」——
+                # 判断依据：内存里 remark 不应还含代理项。
 
     def _quarantine(self, reason: str) -> None:
         """把无法解析的文件改名备份并以空库启动。
@@ -263,10 +266,21 @@ class AccountStore:
     def remove(self, account_id: str) -> bool:
         with self._lock:
             before = len(self._accounts)
-            self._accounts = [
+            remaining = [
                 account for account in self._accounts if account.id != account_id
             ]
-            removed = len(self._accounts) < before
-            if removed:
+            removed = len(remaining) < before
+            if not removed:
+                return False
+            # 与 add/update 同口径：先落盘再换内存，落盘失败则回滚。
+            # 少了回滚的话，一次写失败就会让「内存里账号没了、磁盘上还在」，
+            # 当前会话看起来删掉了，下次启动又冒出来，且此后任何一次成功保存
+            # 都会把这次失败的删除悄悄持久化。
+            previous = self._accounts
+            self._accounts = remaining
+            try:
                 self._save_locked()
-        return removed
+            except Exception:
+                self._accounts = previous
+                raise
+        return True

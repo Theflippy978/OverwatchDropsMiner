@@ -41,7 +41,10 @@ const isMac = /Mac|iPhone|iPad/.test(navigator.platform ?? "");
 
 const canUndo = ref(false);
 const canCopy = ref(false);
-const canPaste = ref(true);
+/** 粘贴恒可用：能否真正读到剪贴板要等用户点了才知道（`readText()` 可能因
+    权限或非安全上下文失败），在这里预先探测反而要多一次权限请求。
+    故不用 ref —— 它从不被写，用 ref 只会让人以为有「按状态禁用」的逻辑。 */
+const canPaste = true;
 const canSelectAll = ref(false);
 
 /** 选区是否为空。空选区时禁用复制/全选，避免菜单项点了没反应。 */
@@ -138,8 +141,8 @@ const mod = isMac ? "⌘" : "Ctrl";
 const items = computed<MenuItem[]>(() => [
   { key: "undo", label: "撤销", shortcut: `${mod}Z`, enabled: canUndo.value, icon: RotateCcw },
   { key: "copy", label: "复制", shortcut: `${mod}C`, enabled: canCopy.value, icon: ClipboardCopy },
-  { key: "paste", label: "粘贴", shortcut: `${mod}V`, enabled: canPaste.value, icon: ClipboardPaste },
-  { key: "pasteText", label: "粘贴为纯文本", shortcut: "", enabled: canPaste.value, icon: Scissors },
+  { key: "paste", label: "粘贴", shortcut: `${mod}V`, enabled: canPaste, icon: ClipboardPaste },
+  { key: "pasteText", label: "粘贴为纯文本", shortcut: "", enabled: canPaste, icon: Scissors },
   { key: "selectAll", label: "全选", shortcut: `${mod}A`, enabled: canSelectAll.value, icon: MousePointerClick },
 ]);
 

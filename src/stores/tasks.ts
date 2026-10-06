@@ -19,8 +19,6 @@ interface AccountTasks {
   refreshQueued: boolean;
   /** 本轮（含排队轮）真正结束时 resolve。调用方靠它保证后续同步跑在新数据上 */
   refreshSettled: Promise<void> | null;
-  /** 排队的那次刷新是否来自手动点击（累积意图，防自动刷新吞掉手动刷新） */
-  queuedManual: boolean;
   claiming: boolean;
   claimQueued: boolean;
   /**
@@ -45,8 +43,8 @@ interface ClaimUnit {
 
 /**
  * 把任务列表摊平成“具体奖励任务 ID”维度。
- * 与原始 Qt 实现的 classify_auto_claim_task_ids 对齐：
- * 有 check_points 时按 sid 分类，否则回落到任务级 task_id。
+ * 有 check_points 时按每个检查点的 sid 分类，否则回落到任务级 task_id ——
+ * 领取的最小粒度是检查点而不是任务。
  */
 function collectClaimUnits(tasks: TaskItem[]): ClaimUnit[] {
   const units: ClaimUnit[] = [];
@@ -96,7 +94,6 @@ export const useTasksStore = defineStore("tasks", () => {
       refreshing: false,
       refreshQueued: false,
       refreshSettled: null,
-      queuedManual: false,
       claiming: false,
       claimQueued: false,
       taskIdsKey: "",
@@ -122,33 +119,16 @@ export const useTasksStore = defineStore("tasks", () => {
   }
 
   /**
-   * 刷新任务进度。返回的 Promise 在**本轮（含排队轮）真正结束**后才 resolve。
+   * 执行一轮刷新。settle 由调用方传入，且**整条链（本轮 + 全部排队轮）共用
+   * 同一个 settle**：只有链上最后一轮结束时才兑现。
    *
-   * 必须返回可等待的完成信号：调用方（TaskProgress.handleRefresh）拿到结果后
-   * 紧接着要拉一次 get_account_status 来同步顶部四字段与掉宝进度条。
-   * 原实现「已在刷新就直接 return」，于是那次同步跑在**旧数据**上 ——
-   * 用户点手动刷新，看到的仍是刷新前的进度。
+   * 不能每轮都新建一个 promise 覆盖 accountTasks.refreshSettled —— 排队方
+   * await 的是它进入时读到的那个旧 promise，而旧 promise 的 resolve 只在
+   * 「没有排队轮」的分支里被调用。一旦出现排队轮，先前的等待方就永远挂住，
+   * TaskProgress.handleRefresh 里 await 之后的 fetchStatus 永不执行。
    */
-  async function refreshTasks(accountId: string, manual = true): Promise<void> {
-    if (deletedIds.has(accountId)) return;
+  async function runRound(accountId: string, settle: () => void): Promise<void> {
     const accountTasks = getAccountTasks(accountId);
-    if (accountTasks.refreshing) {
-      // 排队时累积「手动」意图：refreshQueued 只是布尔，若自动刷新在途
-      // 而用户点了手动刷新，重跑会退化成 manual=false，
-      // 「已有刷新进行中」提示永不出现，UI 表现为点了没反应。
-      accountTasks.refreshQueued = true;
-      if (manual) {
-        accountTasks.queuedManual = true;
-        accountTasks.text = "已有刷新进行中，已排队下一次刷新...";
-      }
-      // 排队轮完成后由下面的 finally 兑现；这里等它，不另起一轮。
-      await accountTasks.refreshSettled;
-      return;
-    }
-    let settle!: () => void;
-    accountTasks.refreshSettled = new Promise<void>((resolve) => {
-      settle = resolve;
-    });
     accountTasks.refreshing = true;
     accountTasks.error = "";
     try {
@@ -183,7 +163,8 @@ export const useTasksStore = defineStore("tasks", () => {
         accountTasks.pendingIds = new Set();
       }
 
-      // 按 sid 维度重算 handled/pending（对齐原项目 difference_update(incomplete)）
+      // 按 sid 维度重算 handled/pending：进行中的检查点要退出「已处理」，
+      // 否则周期任务重置后当天不会再自动领取。
       const units = collectClaimUnits(result.tasks ?? []);
       const incomplete = new Set<string>();
       const completed = new Set<string>();
@@ -214,15 +195,42 @@ export const useTasksStore = defineStore("tasks", () => {
       accountTasks.refreshing = false;
       if (accountTasks.refreshQueued) {
         accountTasks.refreshQueued = false;
-        const rerunManual = accountTasks.queuedManual;
-        accountTasks.queuedManual = false;
-        void refreshTasks(accountId, rerunManual);
+        // 必须 await 并传递同一个 settle：不 await 会让调用方在数据仍旧时
+        // 醒来，不传递则排队轮的结束信号无法回到最初的等待方。
+        await runRound(accountId, settle);
       } else {
-        // 没有排队轮才是真的结束；有排队轮时保持 pending，
-        // 由排队轮自己的 finally 兑现，否则等待方会在数据仍旧时醒来。
         settle();
       }
     }
+  }
+
+  /**
+   * 刷新任务进度。返回的 Promise 在**本轮（含全部排队轮）真正结束**后才 resolve。
+   *
+   * 必须返回可等待的完成信号：调用方（TaskProgress.handleRefresh）拿到结果后
+   * 紧接着要拉一次 get_account_status 来同步顶部四字段与掉宝进度条。
+   * 原实现「已在刷新就直接 return」，于是那次同步跑在**旧数据**上 ——
+   * 用户点手动刷新，看到的仍是刷新前的进度。
+   */
+  async function refreshTasks(accountId: string, manual = true): Promise<void> {
+    if (deletedIds.has(accountId)) return;
+    const accountTasks = getAccountTasks(accountId);
+    if (accountTasks.refreshing) {
+      // 排队时若来自手动点击，给出可见反馈；refreshQueued 是布尔，
+      // 连点多次与一次等价，重跑只会有一次。
+      accountTasks.refreshQueued = true;
+      if (manual) {
+        accountTasks.text = "已有刷新进行中，已排队下一次刷新...";
+      }
+      // 等当前这条链的结束信号；由链上最后一轮兑现。
+      await accountTasks.refreshSettled;
+      return;
+    }
+    let settle!: () => void;
+    accountTasks.refreshSettled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    await runRound(accountId, settle);
   }
 
   function maybeAutoClaim(accountId: string) {
@@ -234,7 +242,7 @@ export const useTasksStore = defineStore("tasks", () => {
     // 后端 client_parts/models.py 的 is_completed 把 status===6（已领取）也算作完成，
     // 所以已领取的奖励同时满足 claimed 与 completed；若只过滤 completed，
     // 冷启动时 handledIds 为空，会对全部历史已领奖励下发一次无效 claim。
-    // 上游原项目 classify_auto_claim_task_ids 用 status==6 优先归入 claimed，正是为此。
+    // collectClaimUnits 用 claimed 优先于 completed 的三档分类，正是为此。
     const toClaim = collectClaimUnits(accountTasks.tasks ?? [])
       .filter((unit) => unit.completed && !unit.claimed)
       .map((unit) => unit.id)
@@ -293,7 +301,8 @@ export const useTasksStore = defineStore("tasks", () => {
         }
       }
       accountTasks.handledIds = newHandled;
-      // 已下发的 ID 一律出队（对齐原项目 pending.difference_update(auto_task_ids)）
+      // 已下发的 ID 一律出队：它们要么已成功、要么已记入 handledIds，
+      // 留着会让 pendingIds 永久占位、挡住后续重试。
       accountTasks.pendingIds = new Set(
         [...accountTasks.pendingIds].filter((id) => !requested.has(id))
       );

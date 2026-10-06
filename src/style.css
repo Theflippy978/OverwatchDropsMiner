@@ -1,11 +1,10 @@
 @import "tailwindcss";
 
-/* 弹层进出场动画。七个 ui 组件（DialogContent / DialogScrollContent /
-   DropdownMenuContent / DropdownMenuSubContent / SelectContent /
-   TooltipContent 等）都声明了 animate-in / fade-in-0 / zoom-in-95 /
-   slide-in-from-* 这些类，此前从未安装对应插件，产物里一个 @keyframes 都没有
-   —— 结果所有弹层瞬时出现、瞬时消失，DialogContent 上那句孤零零的
-   duration-200 也因无对应 animation 而完全无作用。
+/* 弹层进出场动画。四个 ui 组件（DialogContent / DialogScrollContent /
+   DropdownMenuContent / DropdownMenuSubContent）都声明了 animate-in /
+   fade-in-0 / zoom-in-95 / slide-in-from-* 这些类，此前从未安装对应插件，
+   产物里一个 @keyframes 都没有 —— 结果所有弹层瞬时出现、瞬时消失，
+   DialogContent 上那句孤零零的 duration-200 也因无对应 animation 而完全无作用。
    tw-animate-css 是 TailwindCSS v4 对 tailwindcss-animate 的官方替代。
 
    注意必须用 @import 而非 @plugin：该包的 exports 只声明了 "style" 条件
@@ -22,10 +21,10 @@
 :root {
   --radius: 0.5rem;
 
-  /* 配置卡的标签列宽（问题 #8/#9，以及第十二轮追记 A2）。
+  /* 配置卡的标签列宽。
      六个标签行（房间号 / 任务 ID / 通知 URL / 线程数 / 重连延迟(s) / 查询间隔(s)）
      必须共用同一个宽度，否则标签左边缘会随字数多少参差 —— 「线程数」只有
-     3 个字，被 `text-right` 推到 92px 列的右端后比上方缩进约 40px。
+     3 个字，被推到 92px 列的右端后比上方缩进约 40px。
 
      74px 的来历：`查询间隔(s)` 与 `重连延迟(s)` 是最长标签，
      4 个汉字 + `(s)` 在 text-sm(14px) 下实测 ≈72px，只留 2px 余量。
@@ -96,7 +95,7 @@
 
   /* 缓动。ease-out 用于「元素进入」（快起慢收，衔接自然）；
      ease-in 用于「元素退出」；ease 用于原地变化（颜色/透明度）。
-     linear 只给持续循环的指示性动效（虚线环、进度条），它们没有起止。 */
+     linear 只给持续循环的指示性动效，它们没有起止。 */
   --ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-exit: cubic-bezier(0.4, 0, 1, 1);
   --ease-inout: cubic-bezier(0.4, 0, 0.2, 1);

@@ -8,7 +8,11 @@ __pycache__/
 build/
 dist/
 # PyInstaller 生成的 .spec 会带上本机绝对路径，属机器特定文件
-*.spec.venv/
+*.spec
+# Python 虚拟环境（各工具链命名不一）
+.venv/
+venv/
+*.venv/
 # 浏览器抓包产物，含 Cookie 与 token，绝不能入库
 *.har
 
@@ -62,8 +66,13 @@ tests/
 # 一旦有人往里写临时文件就会污染工作区）
 .ptmp/
 tmp/
+tmp*/
 ktmp_*/
 probe_*/
+# browser_sniffer 用 tempfile.mkdtemp(prefix="bili_sniff_") 建扩展目录。
+# 它默认落系统 TEMP，但 TEMP 不可用时（沙箱/受限权限）会落到**当前目录**，
+# 且清理失败时残留 —— 实测一次 pytest 就在仓库根留下 20+ 个此类目录。
+bili_sniff_*/
 
 
 # --- VS ---

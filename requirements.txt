@@ -1,12 +1,3 @@
-# Python 依赖（PyInstaller sidecar 运行时 + 本地门禁，单文件）
-# 安装：python -m pip install -r requirements.txt
-#
-# 每条必须能回答「谁在用它」；代码里再无引用的依赖必须移除。
-# 反向检查是硬性的：PyInstaller 会静态收集函数体内的 import，
-# 留一个永不调用的函数就足以把整棵依赖树拖进 sidecar 产物。
-# （`backend/paths.py` 曾因一个无调用者的 `create_qsettings` 把整个 PySide6
-#   ——116 项、含 Qt6Core.dll——打进了产物，删掉后体积从 60.7MB 降到 44.7MB。）
-
 # --- 运行时（进入 PyInstaller 产物）---
 
 httpx>=0.27,<1

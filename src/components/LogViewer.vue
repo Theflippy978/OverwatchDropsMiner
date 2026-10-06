@@ -78,7 +78,7 @@ const FIELD_LABELS = [
  * `房间号：%s 当前状态非开播 直播状态：%s，计时可能不会增长`，
  * `0` 后面紧跟全角「，」而没有空格，旧的 `(\S+)` 会把后半整句
  * 当成「直播状态」的值涂成蓝色 —— 用户看到的是「，计时可能不会增长」
- * 被错误高亮（2026-10-05 第三次手动验收）。
+ * 被错误高亮。
  *
  * **半角 `,` 必须保留**：房间号是 `utils.format_room_ids` 输出的
  * `[23612045,21452505]`，紧凑形态里的分隔符就是半角逗号。
@@ -98,7 +98,7 @@ const FREE_TEXT_LABELS = new Set(["账号", "返回消息"]);
  * 不能写成 `(?:标签)：(值)` 之外还指望 `match[1]`：
  * 正则的组号是按**模式里的位置**编号的，命中第 3 个分支时它的值在
  * `match[3]`，`match[1]` 是 `undefined` —— 界面上会渲染成
- * 「undefined：」+ 丢掉整个值（2026-10-05 第四次手动验收）。
+ * 「undefined：」+ 丢掉整个值。
  * 所以取值必须用 `match.slice(1).find(...)` 拿「实际参与了匹配的那个组」。
  */
 const FIELD_RE = new RegExp(
@@ -116,7 +116,7 @@ const FIELD_RE = new RegExp(
  * 这里**只有 `账号`**。曾经还放过 `直播间`，那是错的：
  * `直播间：` 后面跟的是房间号（miner.py / x25kn_worker.py 的旧用词，
  * 已统一改成 `房间号`），把它当身份染成绿色会让同一个房间号
- * 在两条日志里出现两种颜色（2026-10-05 第三次手动验收）。
+ * 在两条日志里出现两种颜色。
  */
 const ACCOUNT_KEYS = new Set(["账号"]);
 
@@ -280,10 +280,10 @@ function handleClear() {
         class="log-panel min-h-0 flex-1 overflow-y-auto rounded-md border border-input bg-input/40"
       >
         <!-- 空态用 absolute inset-0 撑满面板再 flex 居中。
-             原先靠 `py-8` 撑高度：内容 84px 被折叠态的 56px max-height
-             从底部裁掉，看起来既没水平居中也没垂直居中。
-             面板高度现在由 CSS 的 min-height 兜底（见 style.css 的
-             .log-panel），这里不再需要任何 py-*。 -->
+             面板的高度来自 flex 链（Card flex-col → CardContent flex-1 →
+             .log-panel 的 flex-1 + min-h-0），没有 min-height 兜底，
+             所以这里也不需要任何 py-* 去撑高度。
+             .log-panel 的 position: relative 是这段 absolute 的定位祖先。 -->
         <div
           v-if="logsStore.filteredLogs.length === 0"
           class="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground"

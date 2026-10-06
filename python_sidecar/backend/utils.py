@@ -195,8 +195,8 @@ def _partition_task_group_indexes(
 
     blocks: list[list[int]] = []
     for index in range(len(task_groups)):
-    # index=0 时取 max(index-1, 0)：负索引会静默读到末元素，
-    # 当前因 blocks 为空而短路无害，但属易碎写法
+        # index=0 时取 max(index-1, 0)：负索引会静默读到末元素，
+        # 当前因 blocks 为空而短路无害，但属易碎写法
         prev_position = _task_group_position(
             position_boxes, max(index - 1, 0) if index > 0 else 0
         )

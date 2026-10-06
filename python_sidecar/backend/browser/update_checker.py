@@ -39,21 +39,39 @@ def _is_newer_version(latest: str, current: str) -> bool:
     return latest_key != current_key
 
 
+def is_comparable_version(value: str) -> bool:
+    """版本号是否可用于「有没有新版」的数值比较。
+
+    判定标准是**能不能解析成纯数字点分**，而不是「里面有没有 dev 字样」：
+    后者把「渠道」与「版本号」两件事混在一起 —— ``dev`` 渠道的版本号
+    （如 ``1.1.0``）本来是完全可以比较的，却会被误判成不可比较，
+    导致手动检查也直接返回、按钮变空操作。
+
+    不可比较的例子：``dev-abcdef``（含短 SHA）、``0.0.0+dev``（含本地段）。
+    这类值拿去比远端 tag 只会得到「有新版」这种无意义结论，故仍应拒绝。
+    """
+    normalized = normalize_version(value)
+    if not normalized:
+        return False
+    return all(part.isdigit() for part in normalized.split("."))
+
+
 def should_check_update(
     app_version: str, update_channel: str, *, force: bool = False
 ) -> bool:
     """是否应该发起更新检查。
 
-    ``force`` 只跳过 update_channel 这道门禁，**不**跳过版本号本身的校验：
-    手动点「检查更新」时必须真的去查远端（否则本地包里这个按钮是死的），
-    但形如 ``dev-abcdef`` / ``0.0.0+dev`` 的开发版版本号在任何模式下都不参与
-    比较 —— 拿它去比远端 release 只会得到「有新版」这种无意义的结论。
+    ``force``（手动点「检查更新」）**只**跳过 ``update_channel`` 这道门禁，
+    不跳过版本号可比较性校验：渠道是「要不要打扰 GitHub」的策略问题，
+    而版本号能不能比较是「这个判断有没有意义」的正确性问题。
+
+    两者分开之后，dev 渠道 + 真实版本号（``1.1.0``）手动检查会真的发请求；
+    而 ``dev-abcdef`` 这类占位版本号无论手动还是自动都不查 —— 那才是
+    真正无意义的比较。
     """
     if not force and update_channel != "release":
         return False
-    current_version = normalize_version(app_version)
-    # 用包含判断：形如 "0.0.0+dev" 的版本串 normalize 后不以 dev 开头，startswith 会失效
-    return bool(current_version) and "dev" not in current_version
+    return is_comparable_version(app_version)
 
 
 def parse_update_payload(

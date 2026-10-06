@@ -372,10 +372,15 @@ watch(
  * 更新检查。
  *
  * 两条调用路径，只有 force 不同：
- * - 启动 3s 后自动检查（force=false）：仍受 sidecar 侧 update_channel
- *   门禁约束，dev 包不去打扰 GitHub API；无更新时完全静默。
- * - 标题栏按钮手动检查（force=true）：绕过门禁真去查一次，否则本地包里
- *   这个按钮是死的；结果一律给用户可见反馈。
+ * - 启动 3s 后自动检查（force=false）：受 sidecar 侧 update_channel 门禁约束，
+ *   dev 渠道不去打扰 GitHub API（未认证限流 60 次/小时）；无更新时完全静默。
+ * - 标题栏按钮手动检查（force=true）：绕过**渠道**门禁真去查一次；结果一律
+ *   给用户可见反馈。
+ *
+ * 注意 force 绕的只是渠道，不是「版本号能不能比较」：版本号必须是可数值比较的
+ * 真实版本（`_version.py` 的 `APP_VERSION`，与 tauri.conf.json 同源）。若把它
+ * 写成 `0.0.0+dev` 这类占位串，手动检查会被判为无意义比较而直接返回 ——
+ * 按钮的菊花与 3 秒提示都正常，却永远显示「已是最新版本」，无从察觉。
  *
  * 单飞行：checkingUpdate 兼作锁。GitHub 未认证 API 限流是 60 次/小时，
  * 连点几下就会开始返回 403，而 403 与「没有新版本」在响应里长得一样，
@@ -412,7 +417,7 @@ async function checkUpdate(force = false) {
     // 自动检查保持静默：启动阶段弹错误只会干扰用户点账号
     if (force) announce = () => showUpdateNotice(`检查失败：${e}`, true);
   } finally {
-// 本地开发包的版本号带 dev 标识，后端按「不拿 dev 版去比 release」
+    // 本地开发包的版本号带 dev 标识，后端按「不拿 dev 版去比 release」
     // 的设计直接返回、不发网络请求。整个 invoke 在 1~2ms 内结束，
     // 标题栏胶囊的进出动画没有可作用的过程。补足到 CHECK_MIN_VISIBLE_MS
     // 再显示结果，按钮的菊花与禁用态也一并多亮这段时间。

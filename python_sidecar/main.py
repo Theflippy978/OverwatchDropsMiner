@@ -341,7 +341,10 @@ class PythonSidecar:
             from python_sidecar.backend.browser.config_io import save_config_data
             save_config_data(self._config_file, payload)
         except Exception as e:
+            # 不再静默吞掉：调用方（_save_config）要据此判定本次保存是否真的
+            # 落了盘。吞掉异常会让前端拿到一份「看起来保存成功」的回包。
             print(f"[Sidecar] 保存配置文件失败: {e}", file=sys.stderr)
+            raise
 
     def _build_config(self, cookie: str):
         """构建 miner 配置"""
@@ -681,8 +684,13 @@ class PythonSidecar:
             }
         # 勾选后必须立即生效，不能等下次启动
         self._apply_verbose(verbose)
+        # 落盘失败必须让调用方知道：_save_config_file 原先吞掉一切异常只打
+        # stderr，而本命令的返回值会被前端当成「已落盘的真实值」整体替换
+        # Pinia 里的 config —— 那等于把一次失败的配置保存谎报成成功，
+        # 用户关掉窗口后编辑全丢且毫无提示。这里改成向上抛，由 handle_command
+        # 统一转成 {"error": ...}。
         self._save_config_file()
-        # 直接返回**落盘后的真实值**，而不是让前端再发一次 load_config 回读。
+        # 直接返回落盘后的真实值，而不是让前端再发一次 load_config 回读。
         # 原实现是 save → load 两趟，且前端用回读结果整体替换本地配置：
         # 中间任何一次后端钳制/归一化都会静默改掉用户刚填的内容
         # （实测「自动获取」到的任务 ID 点一次保存就被重排，用户以为配置被换）。

@@ -55,9 +55,9 @@ from python_sidecar.backend.client_parts.profile import (
     validate_nav_payload,
 )
 from python_sidecar.backend.client_parts.rewards import (
-        MISSION_RETRY_DELAYS,
-        REWARD_CLAIM_BATCH_SIZE,
-        REWARD_CLAIM_INTERVAL_SECONDS,
+    MISSION_RETRY_DELAYS,
+    REWARD_CLAIM_BATCH_SIZE,
+    REWARD_CLAIM_INTERVAL_SECONDS,
     build_reward_receive_body,
     failed_reward_claim_result,
     normalize_task_id,

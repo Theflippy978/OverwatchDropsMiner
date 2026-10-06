@@ -202,14 +202,20 @@ pub struct SidecarManager {
     /// Job 内的 sidecar 进程会被操作系统自动终止，杜绝残留。
     /// 生命周期 = 进程生命周期，**故意不 CloseHandle**，否则会提前触发
     /// KILL_ON_JOB_CLOSE 把 sidecar 杀掉。
-    kill_job: Mutex<Option<isize>>,
+    ///
+    /// 用 Arc 包裹：克隆体必须能读到**同一个**句柄。若克隆时新建空锁，
+    /// 由克隆体 spawn 出的 sidecar 就挂不上 Job Object
+    /// （assign_child_to_kill_job 会静默 early-return），孤儿进程防护随之中断。
+    kill_job: Arc<Mutex<Option<isize>>>,
 }
 
 /// 共享进程与通信表，让命令体能在 `spawn_blocking` 的闭包里使用。
 ///
-/// `kill_job` 故意不共享：它是 Job Object 句柄，生命周期绑进程
-/// （原注释已说明**故意不 CloseHandle**）。克隆体不需要它，也不该
-/// 有权释放它 —— 交给原实例继续持有。
+/// `kill_job` 必须在克隆之间共享：async 命令都用克隆体调用 `call()` →
+/// `start()`，而 start() 里的 assign_child_to_kill_job 读的是 self.kill_job。
+/// 克隆体若拿不到句柄，它拉起的 sidecar 就永远进不了 Job Object —— 例如
+/// sidecar 崩溃后由某个 async 命令重新拉起时，防护会静默失效。
+/// 共享的是句柄值而非所有权：本进程全程不 CloseHandle，故无克隆体误释放之虞。
 impl Clone for SidecarManager {
     fn clone(&self) -> Self {
         Self {
@@ -219,7 +225,7 @@ impl Clone for SidecarManager {
             alive: self.alive.clone(),
             epoch: self.epoch.clone(),
             app_handle: self.app_handle.clone(),
-            kill_job: Mutex::new(None),
+            kill_job: self.kill_job.clone(),
         }
     }
 }
@@ -256,7 +262,7 @@ impl SidecarManager {
             alive: Arc::new(AtomicBool::new(false)),
             epoch: Arc::new(AtomicU64::new(0)),
             app_handle,
-            kill_job: Mutex::new(Self::create_kill_job()),
+            kill_job: Arc::new(Mutex::new(Self::create_kill_job())),
         }
     }
 
@@ -269,6 +275,12 @@ impl SidecarManager {
 
     fn lock_pending(&self) -> std::sync::MutexGuard<'_, PendingTable> {
         self.pending.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 与 lock_child/lock_pending 同一套中毒兜底：kill_job 被毒化后若在这里
+    /// unwrap，spawn 路径会连带 panic，表现为「sidecar 起不来」而非锁问题。
+    fn lock_kill_job(&self) -> std::sync::MutexGuard<'_, Option<isize>> {
+        self.kill_job.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// 创建 KILL_ON_JOB_CLOSE 的 Job Object；失败返回 None（降级，不影响启动）
@@ -301,7 +313,7 @@ impl SidecarManager {
     /// 把刚 spawn 的 sidecar 挂进 Job；失败仅记日志（保留启动能力，双保险中的一环）
     #[cfg(windows)]
     fn assign_child_to_kill_job(&self, raw_handle: std::os::windows::raw::HANDLE) {
-        let guard = self.kill_job.lock().unwrap();
+        let guard = self.lock_kill_job();
         let Some(job) = *guard else { return };
         unsafe {
             let job = HANDLE(job as *mut std::ffi::c_void);

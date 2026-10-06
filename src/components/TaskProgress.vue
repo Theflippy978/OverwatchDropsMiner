@@ -29,7 +29,7 @@ const EMPTY_TASKS = {
   pendingIds: new Set<string>(),
   refreshing: false,
   refreshQueued: false,
-  queuedManual: false,
+  refreshSettled: null,
   claiming: false,
   claimQueued: false,
   taskIdsKey: "",
@@ -135,16 +135,22 @@ const statusBadgeText = computed(() => {
   return `${name}（待机）`;
 });
 
+/** 任务级百分比。**必须截断而非四舍五入**：后端
+    `browser/task_presenter.py` 的 `_progress_percent` 用 `int()` 截断，
+    前端若用 Math.round，999/1000 会显示成「100%」并画满进度条，
+    而任务其实还没完成（后端同一行文字仍是 99%）。两端口径必须一致，
+    否则用户会看到「已 100% 却没自动领取」的矛盾。 */
 function percentOf(task: TaskItem) {
   if (task.target <= 0) return 0;
-  return Math.min(100, Math.round((task.progress / task.target) * 100));
+  return Math.min(100, Math.floor((task.progress / task.target) * 100));
 }
 
 /** 检查点进度百分比。limit_value 为 0 时返回 0，避免除零得到 NaN
-    —— NaN 会被模板渲染成「NaN%」，而后台不报错。 */
+    —— NaN 会被模板渲染成「NaN%」，而后台不报错。
+    截断口径同 percentOf（对齐后端 `_progress_percent` 的 `int()`）。 */
 function percentOfCheckpoint(cp: CheckPoint) {
   if (cp.limit_value <= 0) return 0;
-  return Math.min(100, Math.round((cp.cur_value / cp.limit_value) * 100));
+  return Math.min(100, Math.floor((cp.cur_value / cp.limit_value) * 100));
 }
 
 /** 进度条的已填充段（`#`），宽度与后端 BAR_WIDTH 同源 */
@@ -306,6 +312,9 @@ async function fetchStatus() {
     statusLine.value = status.status_line;
     progressPercent.value = status.progress ? status.progress.percent : 0;
     loginInvalidated.value = status.login_invalidated;
+    // 成功即清零：这个计数器要表达的是「**连续**失败」，只加不减会让
+    // 几小时里分散的三次偶发失败凑成一次「账号可能已被外部删除」的误报。
+    statusFailures = 0;
   } catch {
     // 状态查询失败：保留上次数据，但累计失败后给出降级提示
     if (props.accountId !== accountId) return;
@@ -503,7 +512,7 @@ onUnmounted(() => {
              占位文案必须与后端四段结构一致：原实现在无账号分支用了
              已废弃的「本次有效观看」三段式，与有账号时字段结构不一致。
              刻意不加 title：整行文字已在四个格子里可见，悬浮重复一遍
-             只会遮挡内容（需求 21）。 -->
+             只会遮挡内容。 -->
         <div
           class="grid grid-cols-2 gap-1.5 sm:grid-cols-4"
         >

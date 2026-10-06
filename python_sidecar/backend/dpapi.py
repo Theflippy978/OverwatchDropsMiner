@@ -10,7 +10,7 @@ LOGGER = logging.getLogger(__name__)
 
 # use_last_error=True：调用前后由 ctypes 保存线程 last error，
 # 配合 ctypes.get_last_error() 取值，避免中间 Python 字节码改写错误码
-    # 导致 DPAPI 失败诊断信息失真
+# 导致 DPAPI 失败诊断信息失真
 _crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 # 显式声明参数与返回类型，避免 64 位下指针被截断

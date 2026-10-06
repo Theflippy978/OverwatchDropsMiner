@@ -131,8 +131,8 @@ const capsuleText = computed(() => props.updateNotice || statusText.value);
 
     **不要给文字加 `truncate`**：宽度既然够宽，切字只会在超长异常文案时
     发生，那时应该看到完整的错误信息而不是被切掉一半。
-    改尺寸前先用 `probe_capsule_width.py` / `probe_capsule_height.py`
-    （canvas measureText 与 getBoundingClientRect 实测）核对，别凭感觉调。 */
+    改尺寸前用 canvas measureText 量最宽一档文案、再用
+    getBoundingClientRect 核对实际渲染宽度，别凭感觉调。 */
 
 /**
  * 结果态图标：出错用警示三角，成功用对勾，检查中用旋转箭头。
