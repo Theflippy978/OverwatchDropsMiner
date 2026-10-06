@@ -102,6 +102,10 @@ pub struct ClaimRewardItem {
     pub reward_name: String,
     pub success: bool,
     pub skipped: bool,
+    /// B站任务状态。领取成功为 6（已领取）。sidecar 不缓存检查点状态，
+    /// 下次 refresh_tasks 返回的仍是 3（已完成），前端靠这个字段当场
+    /// 把徽标改成「已领取」。
+    pub status: i32,
     pub message: String,
 }
 
@@ -157,7 +161,7 @@ pub struct GuiConfigValues {
 }
 
 // Python sidecar 进程管理
-// 并发模型（S4）：
+// 并发模型：
 //   * 写 stdin 只在极短的锁内完成，锁不跨命令等待，命令之间不再互相阻塞；
 //   * 每个请求带自增 id，独立 reader 线程按 id 把响应投递给对应等待者；
 //   * 事件行（无 id 的 {"type":"event"}）由 reader 线程直接转发给前端；
@@ -165,7 +169,14 @@ pub struct GuiConfigValues {
 //     超时后从挂起表移除，不会污染后续请求。
 const CALL_TIMEOUT: Duration = Duration::from_secs(300);
 
-type PendingMap = Arc<Mutex<HashMap<u64, (u64, Sender<Result<serde_json::Value, String>>)>>>;
+/// 单个在途请求：`(进程代次, 响应投递通道)`。
+///
+/// 代次存在的理由见 `SidecarManager::epoch` 的注释 —— reader_loop 退出时
+/// 只能清理自己那一代，否则会把新一代进程的在途请求一并判死。
+type PendingEntry = (u64, Sender<Result<serde_json::Value, String>>);
+/// 请求序号 → 在途请求。序号是 `SidecarManager::call` 的 `next_id` 自增值。
+type PendingTable = HashMap<u64, PendingEntry>;
+type PendingMap = Arc<Mutex<PendingTable>>;
 
 struct SidecarProcess {
     process: Child,
@@ -194,6 +205,48 @@ pub struct SidecarManager {
     kill_job: Mutex<Option<isize>>,
 }
 
+/// 共享进程与通信表，让命令体能在 `spawn_blocking` 的闭包里使用。
+///
+/// `kill_job` 故意不共享：它是 Job Object 句柄，生命周期绑进程
+/// （原注释已说明**故意不 CloseHandle**）。克隆体不需要它，也不该
+/// 有权释放它 —— 交给原实例继续持有。
+impl Clone for SidecarManager {
+    fn clone(&self) -> Self {
+        Self {
+            child: self.child.clone(),
+            pending: self.pending.clone(),
+            next_id: self.next_id.clone(),
+            alive: self.alive.clone(),
+            epoch: self.epoch.clone(),
+            app_handle: self.app_handle.clone(),
+            kill_job: Mutex::new(None),
+        }
+    }
+}
+
+/// 把阻塞式 sidecar 调用挪到专用阻塞线程池执行。
+///
+/// 为什么不直接给命令加 `#[tauri::command(async)]`：该属性对**同步**函数
+/// 只是把函数体包进 `async move { ... }`（见 tauri-macros 的 `body_async`），
+/// 而 `ResponseTag::future()` 只是 `Ok(value.body()?)` —— 全程**没有**
+/// `spawn_blocking`。结果是同步代码在首次 poll 时于 **tokio worker 线程**
+/// 上执行：主线程解冻了（窗口不再「未响应」），但一个 worker 被
+/// `recv_timeout(300s)` 占死。领奖 180s + 浏览器嗅探 120s 同时来就占死两个，
+/// 而 tokio 默认 worker 数 = CPU 核数，核少的机器上剩余命令全部排队。
+///
+/// `spawn_blocking` 走 tokio 独立的阻塞池（上限 512），不占 worker。
+/// 代价是每次调用一次线程调度，故只用于**确有长等待**的命令；
+/// load_config 这类纯本地读仍保持同步直调。
+async fn call_blocking<T, F>(task: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(task)
+        .await
+        .map_err(|e| format!("sidecar 调用线程异常: {}", e))?
+}
+
 impl SidecarManager {
     pub fn new(app_handle: tauri::AppHandle) -> Self {
         SidecarManager {
@@ -214,10 +267,7 @@ impl SidecarManager {
         self.child.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn lock_pending(
-        &self,
-    ) -> std::sync::MutexGuard<'_, HashMap<u64, (u64, Sender<Result<serde_json::Value, String>>)>>
-    {
+    fn lock_pending(&self) -> std::sync::MutexGuard<'_, PendingTable> {
         self.pending.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -327,7 +377,8 @@ impl SidecarManager {
                     .parent()
                     .ok_or("无法获取项目根目录")?
                     .join("python_sidecar");
-                let python_exe = std::env::var("PYTHON_EXE").unwrap_or_else(|_| "python".to_string());
+                let python_exe =
+                    std::env::var("PYTHON_EXE").unwrap_or_else(|_| "python".to_string());
                 let mut cmd = Command::new(&python_exe);
                 cmd.arg(sidecar_path.join("main.py"));
                 cmd
@@ -337,7 +388,18 @@ impl SidecarManager {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::inherit())
+            // stdio 是 UTF-8 协议通道（见下方 writeln!），而 Windows 上 Python
+            // 默认按系统区域设置取编码。中文 Windows 上实测 stdin 为
+            // gbk + surrogateescape，UTF-8 字节被它解码时：
+            //   "乐子"     → 静默乱码（不报错，最难发现）
+            //   "古风小生" → 非法序列被兜底成 U+DCA3 代理字符
+            // 代理字符一路存活到账号库 strict UTF-8 落盘才炸，报错信息里
+            // 出现 \udca3 而真正的输入是正常中文，极难定位。
+            // 这里显式声明，与 main.py 里的 reconfigure 构成双保险：
+            // 覆盖那些不经过 main() 入口、直接运行 main.py 的场景。
+            .env("PYTHONIOENCODING", "utf-8")
+            .env("PYTHONUTF8", "1");
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -443,7 +505,11 @@ impl SidecarManager {
         Ok(closed)
     }
 
-    pub fn call(&self, command: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+    pub fn call(
+        &self,
+        command: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         self.start()?;
 
         // 上一轮进程已退出：清掉残留并重启
@@ -457,8 +523,11 @@ impl SidecarManager {
         let (tx, rx) = mpsc::channel();
         self.lock_pending().insert(id, (epoch, tx));
 
+        // 信封键是 rid 而非 id：id 是业务字段（add_account / rename_account
+        // 都返回账号 id），若用 id 当信封键，Python 侧回带请求序号时会把
+        // 业务 id 覆盖掉，调用方 as_str() 落空 → 「响应缺少 id 字段」。
         let request = serde_json::json!({
-            "id": id,
+            "rid": id,
             "command": command,
             "params": params,
         });
@@ -508,8 +577,15 @@ fn safe_log_line(raw: &str) -> String {
     const MAX: usize = 200;
     let mut out = raw.to_string();
     for key in [
-        "cookie", "sessdata", "bili_jct", "csrf", "token", "benchmark",
-        "access_key", "corpsecret", "secret_key",
+        "cookie",
+        "sessdata",
+        "bili_jct",
+        "csrf",
+        "token",
+        "benchmark",
+        "access_key",
+        "corpsecret",
+        "secret_key",
     ] {
         out = redact_key(&out, key);
     }
@@ -595,8 +671,13 @@ fn redact_key(text: &str, key: &str) -> String {
             let mut j = i;
             while j < bytes.len() {
                 let c = bytes[j];
-                if c == b'"' || c == b'\'' || c == b',' || c == b'}' || c == b'&'
-                    || c == b'?' || (c as char).is_whitespace()
+                if c == b'"'
+                    || c == b'\''
+                    || c == b','
+                    || c == b'}'
+                    || c == b'&'
+                    || c == b'?'
+                    || (c as char).is_whitespace()
                 {
                     break;
                 }
@@ -665,15 +746,20 @@ fn reader_loop(
                 .get("event")
                 .and_then(|v| v.as_str())
                 .unwrap_or("sidecar-event");
-            let data = value.get("data").cloned().unwrap_or(serde_json::Value::Null);
+            let data = value
+                .get("data")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             if let Err(e) = app_handle.emit(event_name, &data) {
                 eprintln!("转发 sidecar 事件失败: {}", e);
             }
             continue;
         }
 
-        // 先把 id 取成 u64（Copy），再决定把 value 当成功值还是错误值
-        let id = value.get("id").and_then(|v| v.as_u64());
+        // 先把请求序号取成 u64（Copy），再决定把 value 当成功值还是错误值。
+        // 读 rid 而非 id：响应里的 id 是业务字段（账号 id），拿它当路由键
+        // 会把响应派给错误的等待者，或根本派不出去。
+        let id = value.get("rid").and_then(|v| v.as_u64());
 
         let result = match value.get("error") {
             Some(error) if !error.is_null() => {
@@ -701,7 +787,7 @@ fn reader_loop(
                     None => eprintln!("收到未知 id 的 sidecar 响应: {}", id),
                 }
             }
-            None => eprintln!("缺少 id 的 sidecar 响应: {}", safe_log_line(trimmed)),
+            None => eprintln!("缺少 rid 的 sidecar 响应: {}", safe_log_line(trimmed)),
         }
     }
 
@@ -729,35 +815,74 @@ fn reader_loop(
 #[tauri::command]
 pub fn get_accounts(sidecar: tauri::State<'_, SidecarManager>) -> Result<Vec<Account>, String> {
     let resp = sidecar.call("get_accounts", serde_json::json!({}))?;
-    let accounts = resp.get("accounts")
+    let accounts = resp
+        .get("accounts")
         .and_then(|v| v.as_array())
         .ok_or("无效的响应")?;
-    
-    let result: Vec<Account> = accounts.iter()
-        .map(|a| Account {
-            id: a.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            remark: a.get("remark").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            running: a.get("running").and_then(|v| v.as_bool()).unwrap_or(false),
+
+    let result: Vec<Account> = accounts
+        .iter()
+        // id 缺失必须硬失败，不能 unwrap_or("") 降级成空串：
+        // 前端拿空 id 去比对选中态必然失配，选中会被重置到首行，
+        // 而底部「备注 / 删除」按钮会指向一个不存在的账号。
+        // 宁可整个列表加载失败并报错，也不要交出看似正常的错误数据。
+        // remark 为空是合法的（前端会回退到 id 前 8 位），故仍用默认值。
+        .map(|a| {
+            Ok(Account {
+                id: a
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or("账号响应缺少 id 字段")?
+                    .to_string(),
+                remark: a
+                    .get("remark")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                running: a.get("running").and_then(|v| v.as_bool()).unwrap_or(false),
+            })
         })
-        .collect();
-    
+        .collect::<Result<Vec<_>, String>>()?;
+
     Ok(result)
 }
 
 #[tauri::command]
-pub fn add_account(cookie: String, sidecar: tauri::State<'_, SidecarManager>) -> Result<Account, String> {
-    let resp = sidecar.call("add_account", serde_json::json!({ "cookie": cookie }))?;
-    
-    Ok(Account {
-        id: resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        remark: resp.get("remark").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        running: false,
+pub async fn add_account(
+    cookie: String,
+    sidecar: tauri::State<'_, SidecarManager>,
+) -> Result<Account, String> {
+    let mgr = sidecar.inner().clone();
+    call_blocking(move || {
+        let resp = mgr.call("add_account", serde_json::json!({ "cookie": cookie }))?;
+
+        Ok(Account {
+            // 理由同 get_accounts：空 id 会破坏前端选中态
+            id: resp
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("添加账号响应缺少 id 字段")?
+                .to_string(),
+            remark: resp
+                .get("remark")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            running: false,
+        })
     })
+    .await
 }
 
 #[tauri::command]
-pub fn remove_account(account_id: String, sidecar: tauri::State<'_, SidecarManager>) -> Result<(), String> {
-    sidecar.call("remove_account", serde_json::json!({ "account_id": account_id }))?;
+pub fn remove_account(
+    account_id: String,
+    sidecar: tauri::State<'_, SidecarManager>,
+) -> Result<(), String> {
+    sidecar.call(
+        "remove_account",
+        serde_json::json!({ "account_id": account_id }),
+    )?;
     Ok(())
 }
 
@@ -767,35 +892,75 @@ pub fn rename_account(
     remark: String,
     sidecar: tauri::State<'_, SidecarManager>,
 ) -> Result<Account, String> {
-    let resp = sidecar.call("rename_account", serde_json::json!({
-        "account_id": account_id,
-        "remark": remark,
-    }))?;
+    let resp = sidecar.call(
+        "rename_account",
+        serde_json::json!({
+            "account_id": account_id,
+            "remark": remark,
+        }),
+    )?;
 
     Ok(Account {
-        id: resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        remark: resp.get("remark").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        running: resp.get("running").and_then(|v| v.as_bool()).unwrap_or(false),
+        id: resp
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("重命名响应缺少 id 字段")?
+            .to_string(),
+        remark: resp
+            .get("remark")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        running: resp
+            .get("running")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     })
 }
 
 #[tauri::command]
-pub fn start_miner(account_id: String, sidecar: tauri::State<'_, SidecarManager>) -> Result<(), String> {
-    sidecar.call("start_miner", serde_json::json!({
-        "account_id": account_id,
-    }))?;
-    Ok(())
+pub async fn start_miner(
+    account_id: String,
+    sidecar: tauri::State<'_, SidecarManager>,
+) -> Result<(), String> {
+    let mgr = sidecar.inner().clone();
+    call_blocking(move || {
+        mgr.call(
+            "start_miner",
+            serde_json::json!({
+                "account_id": account_id,
+            }),
+        )?;
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn stop_miner(account_id: String, sidecar: tauri::State<'_, SidecarManager>) -> Result<(), String> {
-    sidecar.call("stop_miner", serde_json::json!({ "account_id": account_id }))?;
-    Ok(())
+pub async fn stop_miner(
+    account_id: String,
+    sidecar: tauri::State<'_, SidecarManager>,
+) -> Result<(), String> {
+    let mgr = sidecar.inner().clone();
+    call_blocking(move || {
+        mgr.call(
+            "stop_miner",
+            serde_json::json!({ "account_id": account_id }),
+        )?;
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn get_account_status(account_id: String, sidecar: tauri::State<'_, SidecarManager>) -> Result<AccountStatus, String> {
-    let resp = sidecar.call("get_account_status", serde_json::json!({ "account_id": account_id }))?;
+pub fn get_account_status(
+    account_id: String,
+    sidecar: tauri::State<'_, SidecarManager>,
+) -> Result<AccountStatus, String> {
+    let resp = sidecar.call(
+        "get_account_status",
+        serde_json::json!({ "account_id": account_id }),
+    )?;
 
     let progress = resp.get("progress").and_then(|v| {
         if v.is_null() {
@@ -805,12 +970,12 @@ pub fn get_account_status(account_id: String, sidecar: tauri::State<'_, SidecarM
             cur: v.get("cur").and_then(|x| x.as_f64()).unwrap_or(0.0),
             limit: v.get("limit").and_then(|x| x.as_f64()).unwrap_or(0.0),
             // sidecar 可能返回浮点百分比，as_i64() 对 JSON 浮点会返回 None
-        // 从而静默变 0（进度条显示 0%）。用 as_f64 + round 更稳。
-        percent: v
-            .get("percent")
-            .and_then(|x| x.as_f64())
-            .map(|f| f.round() as i32)
-            .unwrap_or(0),
+            // 从而静默变 0（进度条显示 0%）。用 as_f64 + round 更稳。
+            percent: v
+                .get("percent")
+                .and_then(|x| x.as_f64())
+                .map(|f| f.round() as i32)
+                .unwrap_or(0),
         })
     });
 
@@ -824,31 +989,41 @@ pub fn get_account_status(account_id: String, sidecar: tauri::State<'_, SidecarM
         .map_err(|e| format!("解析任务进度失败: {}", e))?;
 
     Ok(AccountStatus {
-        account_id: resp.get("account_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        running: resp.get("running").and_then(|v| v.as_bool()).unwrap_or(false),
-        watch_time_seconds: resp.get("watch_time_seconds").and_then(|v| v.as_u64()).unwrap_or(0),
-        status_line: resp.get("status_line").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        account_id: resp
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        running: resp
+            .get("running")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        watch_time_seconds: resp
+            .get("watch_time_seconds")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        status_line: resp
+            .get("status_line")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         task_progress,
         progress,
-        login_invalidated: resp.get("login_invalidated").and_then(|v| v.as_bool()).unwrap_or(false),
+        login_invalidated: resp
+            .get("login_invalidated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     })
 }
 
-#[tauri::command]
-pub fn save_config(config: GuiConfigValues, sidecar: tauri::State<'_, SidecarManager>) -> Result<(), String> {
-    sidecar.call("save_config", serde_json::json!({ "config": config }))?;
-    Ok(())
-}
-
-#[tauri::command]
-pub fn load_config(sidecar: tauri::State<'_, SidecarManager>) -> Result<GuiConfigValues, String> {
-    let resp = sidecar.call("load_config", serde_json::json!({}))?;
-
-    // 严格解析：load_config 是配置的唯一真值来源，前端会用返回值整体替换
-    // Pinia 里的 config，并在关窗时 save() 回写。若这里用 unwrap_or 兜底，
-    // sidecar 返回结构不符（如版本不匹配返回 {}）时 GUI 会静默显示
-    // 60 线程/8 秒重连/开启通知，关窗后把用户真实配置覆盖成默认值且无任何提示。
-    // 只有确实可选的字段（cookie、task_ids）才允许缺失。
+/// 把 sidecar 的配置响应解析成 `GuiConfigValues`。
+///
+/// 严格解析：配置是唯一真值来源，前端会用返回值整体替换 Pinia 里的
+/// config，并在关窗时 save() 回写。若这里用 unwrap_or 兜底，sidecar 返回
+/// 结构不符（如版本不匹配返回 {}）时 GUI 会静默显示 60 线程/8 秒重连/
+/// 开启通知，关窗后把用户真实配置覆盖成默认值且无任何提示。
+/// 只有确实可选的字段（cookie、task_ids）才允许缺失。
+fn parse_config_values(resp: &serde_json::Value) -> Result<GuiConfigValues, String> {
     let text = |key: &str, fallback: &str| -> String {
         match resp.get(key) {
             Some(serde_json::Value::String(s)) => s.clone(),
@@ -865,7 +1040,7 @@ pub fn load_config(sidecar: tauri::State<'_, SidecarManager>) -> Result<GuiConfi
     };
 
     if !resp.is_object() {
-        return Err("sidecar 返回的 load_config 不是对象，配置未加载".to_string());
+        return Err("sidecar 返回的配置不是对象，配置未加载".to_string());
     }
 
     Ok(GuiConfigValues {
@@ -883,29 +1058,55 @@ pub fn load_config(sidecar: tauri::State<'_, SidecarManager>) -> Result<GuiConfi
 }
 
 #[tauri::command]
-pub fn qr_login(sidecar: tauri::State<'_, SidecarManager>) -> Result<QrChallenge, String> {
-    let resp = sidecar.call("qr_login", serde_json::json!({}))?;
-    serde_json::from_value(resp).map_err(|e| format!("解析二维码响应失败: {}", e))
+pub fn save_config(
+    config: GuiConfigValues,
+    sidecar: tauri::State<'_, SidecarManager>,
+) -> Result<GuiConfigValues, String> {
+    // sidecar 直接回带落盘后的真实值，前端不必再发一次 load_config。
+    // 两趟往返之间任何一次后端钳制都可能静默改掉用户刚填的内容
+    // （实测：自动获取到的任务 ID 点一次保存就被重排）。
+    let resp = sidecar.call("save_config", serde_json::json!({ "config": config }))?;
+    parse_config_values(&resp)
 }
 
 #[tauri::command]
-pub fn qr_poll(
+pub fn load_config(sidecar: tauri::State<'_, SidecarManager>) -> Result<GuiConfigValues, String> {
+    let resp = sidecar.call("load_config", serde_json::json!({}))?;
+    parse_config_values(&resp)
+}
+
+#[tauri::command]
+pub async fn qr_login(sidecar: tauri::State<'_, SidecarManager>) -> Result<QrChallenge, String> {
+    let mgr = sidecar.inner().clone();
+    call_blocking(move || {
+        let resp = mgr.call("qr_login", serde_json::json!({}))?;
+        serde_json::from_value(resp).map_err(|e| format!("解析二维码响应失败: {}", e))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn qr_poll(
     qr_key: String,
     sidecar: tauri::State<'_, SidecarManager>,
 ) -> Result<QrPollResult, String> {
-    let resp = sidecar.call("qr_poll", serde_json::json!({ "qr_key": qr_key }))?;
-    Ok(QrPollResult {
-        status: resp
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unscanned")
-            .to_string(),
-        cookie: resp
-            .get("cookie")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+    let mgr = sidecar.inner().clone();
+    call_blocking(move || {
+        let resp = mgr.call("qr_poll", serde_json::json!({ "qr_key": qr_key }))?;
+        Ok(QrPollResult {
+            status: resp
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unscanned")
+                .to_string(),
+            cookie: resp
+                .get("cookie")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
     })
+    .await
 }
 
 #[tauri::command]
@@ -915,114 +1116,164 @@ pub fn qr_cancel(sidecar: tauri::State<'_, SidecarManager>) -> Result<(), String
 }
 
 #[tauri::command]
-pub fn browser_capture(
+pub async fn browser_capture(
     sidecar: tauri::State<'_, SidecarManager>,
     browser: Option<String>,
 ) -> Result<String, String> {
-    let resp = sidecar.call("browser_capture", serde_json::json!({ "browser": browser }))?;
-    Ok(resp.get("cookie").and_then(|v| v.as_str()).unwrap_or("").to_string())
+    let mgr = sidecar.inner().clone();
+    call_blocking(move || {
+        let resp = mgr.call("browser_capture", serde_json::json!({ "browser": browser }))?;
+        Ok(resp
+            .get("cookie")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn send_notification(
+pub async fn send_notification(
     title: String,
     body: String,
     notify_urls: Option<Vec<String>>,
-    sidecar: tauri::State<'_, SidecarManager>
+    sidecar: tauri::State<'_, SidecarManager>,
 ) -> Result<bool, String> {
     // 必须透传 notify_urls：缺省时 sidecar 会回落到 _config_data 里
     // 上次 save_config 落盘的 URL（该字典只在 save/import 时更新），
     // 于是「测试通知」测的不是用户输入框里刚填的内容。
-    let resp = sidecar.call("send_notification", serde_json::json!({
-        "title": title,
-        "body": body,
-        "notify_urls": notify_urls,
-    }))?;
-    Ok(resp.get("success").and_then(|v| v.as_bool()).unwrap_or(false))
+    let mgr = sidecar.inner().clone();
+    call_blocking(move || {
+        let resp = mgr.call(
+            "send_notification",
+            serde_json::json!({
+                "title": title,
+                "body": body,
+                "notify_urls": notify_urls,
+            }),
+        )?;
+        Ok(resp
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn claim_rewards(
+pub async fn claim_rewards(
     account_id: String,
     sidecar: tauri::State<'_, SidecarManager>,
 ) -> Result<ClaimRewardsResult, String> {
-    let resp = sidecar.call("claim_rewards", serde_json::json!({ "account_id": account_id }))?;
-    let results = resp
-        .get("results")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|e| format!("解析领取结果失败: {}", e))?
-        .unwrap_or_default();
+    let mgr = sidecar.inner().clone();
+    call_blocking(move || {
+        let resp = mgr.call(
+            "claim_rewards",
+            serde_json::json!({ "account_id": account_id }),
+        )?;
+        let results = resp
+            .get("results")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| format!("解析领取结果失败: {}", e))?
+            .unwrap_or_default();
 
-    Ok(ClaimRewardsResult {
-        success: resp.get("success").and_then(|v| v.as_bool()).unwrap_or(false),
-        results,
-        text: resp
-            .get("text")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+        Ok(ClaimRewardsResult {
+            success: resp
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            results,
+            text: resp
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
     })
+    .await
 }
 
 #[tauri::command]
-pub fn refresh_tasks(
+pub async fn refresh_tasks(
     account_id: String,
     sidecar: tauri::State<'_, SidecarManager>,
 ) -> Result<RefreshTasksResult, String> {
-    let resp = sidecar.call("refresh_tasks", serde_json::json!({ "account_id": account_id }))?;
-    let tasks = resp
-        .get("tasks")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|e| format!("解析任务进度失败: {}", e))?
-        .unwrap_or_default();
+    let mgr = sidecar.inner().clone();
+    call_blocking(move || {
+        let resp = mgr.call(
+            "refresh_tasks",
+            serde_json::json!({ "account_id": account_id }),
+        )?;
+        let tasks = resp
+            .get("tasks")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| format!("解析任务进度失败: {}", e))?
+            .unwrap_or_default();
 
-    Ok(RefreshTasksResult {
-        tasks,
-        text: resp
-            .get("text")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+        Ok(RefreshTasksResult {
+            tasks,
+            text: resp
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
     })
+    .await
 }
 
 #[tauri::command]
-pub fn auto_fetch_room_id(
+pub async fn auto_fetch_room_id(
     sidecar: tauri::State<'_, SidecarManager>,
     browser: Option<String>,
 ) -> Result<FetchRoomIdResult, String> {
-    let resp = sidecar.call("auto_fetch_room_id", serde_json::json!({ "browser": browser }))?;
-    serde_json::from_value(resp).map_err(|e| format!("解析房间号失败: {}", e))
+    let mgr = sidecar.inner().clone();
+    call_blocking(move || {
+        let resp = mgr.call(
+            "auto_fetch_room_id",
+            serde_json::json!({ "browser": browser }),
+        )?;
+        serde_json::from_value(resp).map_err(|e| format!("解析房间号失败: {}", e))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn auto_fetch_task_ids(
+pub async fn auto_fetch_task_ids(
     room_id: i64,
     sidecar: tauri::State<'_, SidecarManager>,
     browser: Option<String>,
 ) -> Result<FetchTaskIdsResult, String> {
-    let resp = sidecar.call(
-        "auto_fetch_task_ids",
-        serde_json::json!({ "room_id": room_id, "browser": browser }),
-    )?;
-    serde_json::from_value(resp).map_err(|e| format!("解析任务组失败: {}", e))
+    let mgr = sidecar.inner().clone();
+    call_blocking(move || {
+        let resp = mgr.call(
+            "auto_fetch_task_ids",
+            serde_json::json!({ "room_id": room_id, "browser": browser }),
+        )?;
+        serde_json::from_value(resp).map_err(|e| format!("解析任务组失败: {}", e))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn auto_fetch_task_ids_mode2(
+pub async fn auto_fetch_task_ids_mode2(
     room_id: Option<i64>,
     sidecar: tauri::State<'_, SidecarManager>,
     browser: Option<String>,
 ) -> Result<FetchTaskIdsMode2Result, String> {
-    let resp = sidecar.call(
-        "auto_fetch_task_ids_mode2",
-        serde_json::json!({ "room_id": room_id, "browser": browser }),
-    )?;
-    serde_json::from_value(resp).map_err(|e| format!("解析任务组失败: {}", e))
+    let mgr = sidecar.inner().clone();
+    call_blocking(move || {
+        let resp = mgr.call(
+            "auto_fetch_task_ids_mode2",
+            serde_json::json!({ "room_id": room_id, "browser": browser }),
+        )?;
+        serde_json::from_value(resp).map_err(|e| format!("解析任务组失败: {}", e))
+    })
+    .await
 }
 
 /// 校验配置导入/导出的路径：Rust 侧才是信任边界，IPC 参数可由 WebView
@@ -1062,7 +1313,11 @@ pub fn export_config(
 ) -> Result<String, String> {
     validate_config_path(&path)?;
     let resp = sidecar.call("export_config", serde_json::json!({ "path": path }))?;
-    Ok(resp.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string())
+    Ok(resp
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string())
 }
 
 #[tauri::command]
@@ -1076,9 +1331,7 @@ pub fn import_config(
 }
 
 #[tauri::command]
-pub fn sync_config_to_miners(
-    sidecar: tauri::State<'_, SidecarManager>,
-) -> Result<(), String> {
+pub fn sync_config_to_miners(sidecar: tauri::State<'_, SidecarManager>) -> Result<(), String> {
     sidecar.call("sync_config_to_miners", serde_json::json!({}))?;
     Ok(())
 }
@@ -1113,9 +1366,14 @@ const RELEASE_URL_ALLOWED_PREFIXES: &[&str] = &[
     "https://api.github.com/",
 ];
 
+/// `force` 供前端的手动「检查更新」按钮使用：启动时的自动检查不传，
+/// 仍受 sidecar 侧的 update_channel 门禁约束（dev 包不去打扰 GitHub API）。
 #[tauri::command]
-pub fn check_update(sidecar: tauri::State<'_, SidecarManager>) -> Result<UpdateCheckResult, String> {
-    let resp = sidecar.call("check_update", serde_json::json!({}))?;
+pub fn check_update(
+    force: Option<bool>,
+    sidecar: tauri::State<'_, SidecarManager>,
+) -> Result<UpdateCheckResult, String> {
+    let resp = sidecar.call("check_update", serde_json::json!({ "force": force }))?;
     let raw = resp
         .get("release_url")
         .and_then(|v| v.as_str())
@@ -1125,8 +1383,15 @@ pub fn check_update(sidecar: tauri::State<'_, SidecarManager>) -> Result<UpdateC
         .iter()
         .any(|p| raw.starts_with(p));
     Ok(UpdateCheckResult {
-        update_available: resp.get("update_available").and_then(|v| v.as_bool()).unwrap_or(false),
-        latest_version: resp.get("latest_version").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        update_available: resp
+            .get("update_available")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        latest_version: resp
+            .get("latest_version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         release_url: if safe { raw } else { String::new() },
     })
 }
@@ -1139,15 +1404,27 @@ pub struct BrowserDetection {
 }
 
 #[tauri::command]
-pub fn detect_browsers(sidecar: tauri::State<'_, SidecarManager>) -> Result<BrowserDetection, String> {
+pub fn detect_browsers(
+    sidecar: tauri::State<'_, SidecarManager>,
+) -> Result<BrowserDetection, String> {
     let resp = sidecar.call("detect_browsers", serde_json::json!({}))?;
     Ok(BrowserDetection {
-        available: resp.get("available")
+        available: resp
+            .get("available")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default(),
-        default: resp.get("default").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        labels: resp.get("labels")
+        default: resp
+            .get("default")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        labels: resp
+            .get("labels")
             .and_then(|v| v.as_object())
             .map(|obj| {
                 obj.iter()
@@ -1158,8 +1435,74 @@ pub fn detect_browsers(sidecar: tauri::State<'_, SidecarManager>) -> Result<Brow
     })
 }
 
+/// 切换详细日志级别（勾选即生效，不必等「保存配置」）。
+///
+/// 同步直调即可：sidecar 侧只是 `logging.getLogger(...).setLevel()`，
+/// 纯本地无 IO，不会占住 IPC 接收线程。
+#[tauri::command]
+pub fn set_verbose(verbose: bool, sidecar: tauri::State<'_, SidecarManager>) -> Result<(), String> {
+    sidecar.call("set_verbose", serde_json::json!({ "verbose": verbose }))?;
+    Ok(())
+}
 
+#[cfg(test)]
+mod response_envelope_tests {
+    use super::parse_config_values;
+    use serde_json::json;
 
+    /// 信封 rid 与业务 id 同处一个对象时，必须各自完好。
+    ///
+    /// 这就是 rename_account / add_account 报「响应缺少 id 字段」的根因：
+    /// 两侧曾共用 `id` 作信封键，Python 侧回带请求序号时把业务 id 覆盖成数字。
+    /// 回归锁：任何时候协议都不得让两者互相污染。
+    #[test]
+    fn envelope_rid_does_not_clobber_business_id() {
+        let line = json!({
+            "rid": 42u64,
+            "id": "b34547f0e1a2",
+            "remark": "古风小生",
+            "running": false,
+        });
+        assert_eq!(line.get("rid").and_then(|v| v.as_u64()), Some(42));
+        assert_eq!(
+            line.get("id").and_then(|v| v.as_str()),
+            Some("b34547f0e1a2"),
+            "业务 id 必须仍是字符串"
+        );
+    }
+
+    /// save_config 的回包必须能被 load_config 的解析器接受：
+    /// 两者共用 parse_config_values，语义漂移会立刻在这里暴露。
+    #[test]
+    fn saved_config_round_trips_through_shared_parser() {
+        let saved = json!({
+            "rid": 7u64,
+            "cookie": "",
+            "rooms_text": "23612045",
+            "thread_count_text": "60",
+            "reconnect_delay_text": "8",
+            // 保序：不得被排序打乱（B站 ID 无语义序，排序只会破坏用户看到的顺序）
+            "task_ids_text": "6ERAcwloghvp4i00,6ERAcwloghvaa000",
+            "task_query_interval_text": "30",
+            "notify_urls_text": "",
+            "notify_on_task_complete": true,
+            "verbose": false,
+            "auto_claim_rewards": false,
+        });
+        let parsed = parse_config_values(&saved).expect("回包应可解析");
+        assert_eq!(parsed.task_ids_text, "6ERAcwloghvp4i00,6ERAcwloghvaa000");
+        assert_eq!(parsed.rooms_text, "23612045");
+    }
+
+    #[test]
+    fn rejects_non_object_config_response() {
+        let bad = json!([1, 2, 3]);
+        assert!(
+            parse_config_values(&bad).is_err(),
+            "非对象必须硬失败而不是静默兜底"
+        );
+    }
+}
 
 #[cfg(test)]
 mod log_redaction_tests {
@@ -1180,7 +1523,8 @@ mod log_redaction_tests {
     #[test]
     fn redacts_benchmark_query_param() {
         // x25Kn 的 HMAC 根密钥走 benchmark 查询参数
-        let raw = "GET https://api.live.bilibili.com/xlive/x25kn?benchmark=SECRET123&room=123 HTTP/1.1";
+        let raw =
+            "GET https://api.live.bilibili.com/xlive/x25kn?benchmark=SECRET123&room=123 HTTP/1.1";
         let out = safe_log_line(raw);
         assert!(!out.contains("SECRET123"), "benchmark 根密钥泄漏: {}", out);
         assert!(out.contains("room=123"), "非敏感参数应保留: {}", out);
@@ -1198,14 +1542,22 @@ mod log_redaction_tests {
         let raw = "x".repeat(5000);
         let out = safe_log_line(&raw);
         assert!(out.contains("已截断"), "长行未标注截断");
-        assert!(out.chars().count() < 300, "截断后仍过长: {}", out.chars().count());
+        assert!(
+            out.chars().count() < 300,
+            "截断后仍过长: {}",
+            out.chars().count()
+        );
     }
 
     #[test]
     fn does_not_match_substrings_of_other_keys() {
         // tokenize 不应被当成 token
         let out = redact_key(r#"{"tokenize":"abcdef"}"#, "token");
-        assert!(out.contains("abcdef"), "键边界判断错误，误伤了别的键: {}", out);
+        assert!(
+            out.contains("abcdef"),
+            "键边界判断错误，误伤了别的键: {}",
+            out
+        );
     }
 
     #[test]

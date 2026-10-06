@@ -7,6 +7,63 @@ import re
 COOKIE_PATTERN = re.compile(r"\s*([^=;\s]+)\s*=\s*([^;\r\n]*)")
 
 
+def format_room_ids(room_ids: object) -> str:
+    """房间号列表 → 日志/展示用的紧凑文本，如 ``[23612045,21452505]``。
+
+    不能直接用 ``str(list)``：Python 的 repr 会在逗号后加空格
+    （``[23612045, 21452505]``），而前端的字段着色按 ``标签：(\\S+)`` 取值，
+    值里出现空白就会在那里截断 —— 第二个房间号既丢失也不着色，
+    表现为「日志里只显示第一个房间」。
+    """
+    return "[" + ",".join(str(r) for r in (room_ids or [])) + "]"
+
+
+def dedupe_task_ids(value: object) -> str:
+    """任务 ID 文本去重，**保留原有顺序**。
+
+    顺序本身是有意义的：B站掉宝任务页按时长升序展示（60分 → 120分 → …），
+    而任务 ID 是不透明字符串（实测形如 ``6ERAcwloghvp4i00``，base36、
+    不含日期），对它们做字典序排序得不到任何有用结果，只会把用户刚拿到的
+    一批 ID 打乱成另一个顺序 —— 用户看到列表变了就以为配置被改了。
+
+    因此**排序只允许出现在指纹里**（:func:`task_ids_fingerprint`），
+    落盘与回显一律走本函数。
+    """
+    if value is None:
+        return ""
+    parts = [p.strip() for p in str(value).split(",") if p.strip()]
+    return ",".join(dict.fromkeys(parts))
+
+
+def normalize_task_ids(value: object) -> str:
+    """任务 ID 的**指纹规范形**：去重 + 排序，仅用于判断「是不是同一批任务」。
+
+    排序在这里是必要的：``a,b`` 与 ``b,a``、``a,a,b`` 与 ``a,b``
+    指向同一批任务，若按原始文本比较，顺序一变就被误判成换了任务，
+    连带把「已领奖记账」清空，导致重复领取。
+
+    不要把它用在任何会显示或落盘的路径上 —— 见 :func:`dedupe_task_ids`
+    对「排序会打乱用户看到的顺序」的说明。
+
+    放在 utils 而非 main：worker 需要同一套口径做任务选择指纹，
+    从 main 导入会形成循环依赖。前端 `src/stores/config.ts` 的
+    `taskIdsFingerprint` 必须与此保持一致。
+    """
+    deduped = dedupe_task_ids(value)
+    return ",".join(sorted(deduped.split(","))) if deduped else ""
+
+
+def task_ids_fingerprint(task_ids: object) -> tuple[str, ...]:
+    """任务 ID 列表的指纹，用于「这批任务是否换了」的判定。
+
+    与 :func:`normalize_task_ids` 同口径；返回 tuple 便于直接比较，
+    且不会被调用方的后续修改影响。
+    """
+    if isinstance(task_ids, str):
+        return tuple(p for p in normalize_task_ids(task_ids).split(",") if p)
+    return tuple(sorted({str(t).strip() for t in (task_ids or []) if str(t).strip()}))
+
+
 def parse_room_ids(raw: str) -> list[int]:
     room_ids: list[int] = []
     for token in raw.replace("\n", ",").split(","):
@@ -138,8 +195,8 @@ def _partition_task_group_indexes(
 
     blocks: list[list[int]] = []
     for index in range(len(task_groups)):
-        # index=0 时取 max(index-1, 0)：负索引会静默读到末元素，
-        # 当前因 blocks 为空而短路无害，但属易碎写法（B-1）
+    # index=0 时取 max(index-1, 0)：负索引会静默读到末元素，
+    # 当前因 blocks 为空而短路无害，但属易碎写法
         prev_position = _task_group_position(
             position_boxes, max(index - 1, 0) if index > 0 else 0
         )
@@ -396,7 +453,7 @@ def extract_bili_live_task_groups(page_html: str) -> list[dict[str, object]]:
     try:
         return _extract_bili_live_task_groups_impl(page_html)
     except RecursionError:
-        # 异常构造的超深嵌套活动页可能令递归解析触底（D-5）：
+        # 异常构造的超深嵌套活动页可能令递归解析触底：
         # 按"无法解析"处理返回空列表，避免异常传播打断调用线程。
         return []
 

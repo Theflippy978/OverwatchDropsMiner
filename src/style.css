@@ -1,17 +1,41 @@
 @import "tailwindcss";
 
+/* 弹层进出场动画。七个 ui 组件（DialogContent / DialogScrollContent /
+   DropdownMenuContent / DropdownMenuSubContent / SelectContent /
+   TooltipContent 等）都声明了 animate-in / fade-in-0 / zoom-in-95 /
+   slide-in-from-* 这些类，此前从未安装对应插件，产物里一个 @keyframes 都没有
+   —— 结果所有弹层瞬时出现、瞬时消失，DialogContent 上那句孤零零的
+   duration-200 也因无对应 animation 而完全无作用。
+   tw-animate-css 是 TailwindCSS v4 对 tailwindcss-animate 的官方替代。
+
+   注意必须用 @import 而非 @plugin：该包的 exports 只声明了 "style" 条件
+   （没有 default/import），而 @plugin 走模块解析，在 Vite 8 下会报
+   '"." is not exported under the conditions [... "import"]'。@import 走 CSS
+   解析路径，能命中 "style" 条件。 */
+@import "tw-animate-css";
+
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* 圆角基数。@theme 里��� --radius-sm/md/lg/xl 全部由它派生，若此处缺失，
+/* 圆角基数。@theme 里的 --radius-sm/md/lg/xl 全部由它派生，若此处缺失，
    var(--radius) 在计算值阶段即无效 → 所有 rounded-* 工具类退化为 0
    （表现为「全项目直角」且无任何控制台线索）。必须保留。 */
 :root {
   --radius: 0.5rem;
-  --color-signal-success: oklch(0.52 0.15 145);
-  --color-signal-info: oklch(0.48 0.16 255);
-  --color-signal-warning: oklch(0.52 0.14 75);
-  --color-signal-danger: oklch(0.52 0.2 25);
-  --color-running: oklch(0.72 0.17 145);
+
+  /* 配置卡的标签列宽（问题 #8/#9，以及第十二轮追记 A2）。
+     六个标签行（房间号 / 任务 ID / 通知 URL / 线程数 / 重连延迟(s) / 查询间隔(s)）
+     必须共用同一个宽度，否则标签左边缘会随字数多少参差 —— 「线程数」只有
+     3 个字，被 `text-right` 推到 92px 列的右端后比上方缩进约 40px。
+
+     74px 的来历：`查询间隔(s)` 与 `重连延迟(s)` 是最长标签，
+     4 个汉字 + `(s)` 在 text-sm(14px) 下实测 ≈72px，只留 2px 余量。
+     这是从 84px 收下来的：84px 会让「房间号」（≈42px）右侧空出 32px，
+     六个行里空白大小差三倍，扫读时明显参差。用户要「左对齐 + 空白尽量小」，
+     故取最紧值。
+
+     写成 token 而不是各写各的字面量：三处 grid 模板引用同一变量，
+     改一处必然同步另外两处。 */
+  --cfg-label-w: 74px;
 }
 
 @theme {
@@ -34,10 +58,48 @@
   --color-border: oklch(0.922 0 0);
   --color-input: oklch(0.922 0 0);
   --color-ring: oklch(0.708 0 0);
+
+  /* 语义色。必须声明在 @theme 内 —— Tailwind v4 只为 @theme 里的 --color-*
+     生成工具类，写在 :root 里则 text-signal-danger / bg-signal-success 等
+     25 处使用全部不生成，静默退化成继承色（错误提示、成功反馈、日志等级
+     配色、运行中圆点全都失去颜色区分，且控制台无任何线索）。 */
+  --color-signal-success: oklch(0.52 0.15 145);
+  --color-signal-info: oklch(0.48 0.16 255);
+  --color-signal-warning: oklch(0.52 0.14 75);
+  --color-signal-danger: oklch(0.52 0.2 25);
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+
+  /* 动效 token。此前各处直接写魔法数字（150/180/200/300/500ms 散落全项目），
+     同一个「颜色变化」在不同文件用不同时长，改主题时无法统一调快慢。
+     这里按「动效性质」而非「具体毫秒」分组：
+       --duration-instant  状态即时反馈（按下、选中），必须感觉不到延迟
+       --duration-fast     悬停/焦点等高频微交互
+       --duration-normal   面板展开、弹层进出场
+       --duration-slow     进度条这类表达「过程」的动效
+     时长不是越长越好：小元素上超过 300ms 会显得迟钝，大面积变化
+     低于 150ms 又会闪得看不清。 */
+  --duration-instant: 80ms;
+  --duration-fast: 150ms;
+  --duration-normal: 220ms;
+  --duration-slow: 400ms;
+
+  /* 日志行的确定高度。
+     折叠态已于 2026-10-05 取消，日志面板常驻满高可滚动；
+     这个高度仍然要固定，否则换行的长消息会把行高撑大、
+     同一屏能看到的日志行数变得不可预测。
+     用 min-height 而非 height：消息折行时仍能撑开，不会截断文字。 */
+  --log-row-h: 22px;
+
+  /* 缓动。ease-out 用于「元素进入」（快起慢收，衔接自然）；
+     ease-in 用于「元素退出」；ease 用于原地变化（颜色/透明度）。
+     linear 只给持续循环的指示性动效（虚线环、进度条），它们没有起止。 */
+  --ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --ease-inout: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* 暗色令牌：必须是普通 .dark 规则（写在 @theme 内会被 Tailwind v4 忽略，
@@ -67,7 +129,6 @@
   --color-signal-info: oklch(0.75 0.14 255);
   --color-signal-warning: oklch(0.82 0.15 75);
   --color-signal-danger: oklch(0.72 0.18 25);
-  --color-running: oklch(0.78 0.17 145);
 }
 
 @layer base {
@@ -93,105 +154,44 @@
   animation: progress-indeterminate 1.2s ease-in-out infinite;
 }
 
-/* ---- 运行中账号行的「流动虚线环」 ----
-   ::before 静态细实线底衬（挖空中心，只留 1px 边框环），垫在虚线下方，
-            让虚线间隙透出淡边框而不是白底。
-   ::after  四条边各自一条 repeating-linear-gradient 虚线，靠 background-size
-            把每层裁到对应的那条边（top/bottom 用 100%×2px，left/right 用
-            2px×100%），再用 background-position 做平移形成流动。
-
-   为什么不用 conic-gradient 做虚线（实测失败，勿改回）：repeating-conic-gradient
-   是**等角**放射条纹，而矩形周长在边中部与角部差异巨大 —— 同样 10deg 在左右边
-   （离中心最远）被拉成 30px 长的实线，在上下边又密成碎点。实测左右边整条变实线、
-   上下边虚线过密，完全不像虚线。linear-gradient 的间距沿边长线性分布，四边均匀。
-   流动也不靠旋转 conic：旋转会把虚线图案甩离边框，必须平移。 */
-@keyframes account-ring-flow {
-  from {
-    background-position: 0 0, 0 100%, 0 0, 100% 0;
-  }
-  to {
-    /* 位移一个虚线周期（dash 7px + gap 7px = 14px），首尾无缝衔接 */
-    background-position: 14px 0, -14px 100%, 0 -14px, 0 14px;
-  }
-}
-
-.account-row-running {
-  position: relative;
-  border-color: transparent;
-}
-
-.account-row-running::before,
-.account-row-running::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-}
-
-.account-row-running::before {
-  padding: 1px;
-  background: var(--color-border);
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  mask-composite: exclude;
-}
-
-.account-row-running::after {
-  /* 虚线图案直接铺在边框环上（伪元素已在 inset:0 + 无 padding，
-     用 background-size 限制每层只画一条边），不再需要 mask 挖空中心 */
-  background-image:
-    repeating-linear-gradient(90deg, var(--color-running) 0 7px, transparent 7px 14px),
-    repeating-linear-gradient(90deg, var(--color-running) 0 7px, transparent 7px 14px),
-    repeating-linear-gradient(0deg, var(--color-running) 0 7px, transparent 7px 14px),
-    repeating-linear-gradient(0deg, var(--color-running) 0 7px, transparent 7px 14px);
-  background-repeat: no-repeat;
-  background-size:
-    100% 2px,
-    100% 2px,
-    2px 100%,
-    2px 100%;
-  background-position: 0 0, 0 100%, 0 0, 100% 0;
-  animation: account-ring-flow 1.1s linear infinite;
-}
-
-/* ---- 全局过渡动效（2026-10-02 第六轮） ----
-   只覆盖背景/边框/透明度/阴影/尺寸，不触发布局抖动。 */
+/* ---- 全局过渡动效 ----
+   只覆盖背景/边框/透明度/阴影/尺寸，不触发布局抖动。
+   时长与缓动统一引用 @theme 里的动效 token，不再各写魔法数字。 */
 @layer base {
   body,
   button,
   input,
   select {
     transition:
-      background-color 150ms ease,
-      border-color 150ms ease,
-      color 150ms ease,
-      box-shadow 150ms ease;
+      background-color var(--duration-fast) var(--ease-inout),
+      border-color var(--duration-fast) var(--ease-inout),
+      color var(--duration-fast) var(--ease-inout),
+      box-shadow var(--duration-fast) var(--ease-inout);
   }
 }
 
 .card-hover {
   transition:
-    background-color 150ms ease,
-    border-color 150ms ease,
-    box-shadow 150ms ease;
+    background-color var(--duration-fast) var(--ease-inout),
+    border-color var(--duration-fast) var(--ease-inout),
+    box-shadow var(--duration-fast) var(--ease-inout);
 }
 
 .card-hover:hover {
   border-color: var(--color-ring);
 }
 
-/* 账号列表条目增删的进入/离开过渡 */
-.account-list-enter-active,
+/* 账号列表条目增删的进入/离开过渡。离开比进入略快：
+   元素消失时用户注意力已转移，慢速退场只会显得拖沓。 */
+.account-list-enter-active {
+  transition:
+    opacity var(--duration-normal) var(--ease-enter),
+    transform var(--duration-normal) var(--ease-enter);
+}
 .account-list-leave-active {
   transition:
-    opacity 180ms ease,
-    transform 180ms ease;
+    opacity var(--duration-fast) var(--ease-exit),
+    transform var(--duration-fast) var(--ease-exit);
 }
 
 .account-list-enter-from,
@@ -200,14 +200,79 @@
   transform: translateY(-4px);
 }
 
-/* 日志折叠/展开：高度过渡 */
-.log-panel {
-  transition:
-    height 300ms ease,
-    min-height 300ms ease,
-    padding 300ms ease,
-    opacity 200ms ease;
+/* ---- 滚动条：全局隐藏但保留滚动能力 ----
+   scrollbar-width 给标准实现、::-webkit-scrollbar 给 Chromium/WebView2，
+   两者必须双写。只写前者时 WebView2 仍会画出 15px 宽的竖条。 */
+.scroll-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
+
+.scroll-hidden::-webkit-scrollbar {
+  display: none;
+}
+
+/* ---- 任务区（挂宝进度胶囊）的例外滚动条 ----
+   全局隐藏滚动条的规则不适用于这里：胶囊区内容可能远超卡片高度，
+   用户需要一个明确的「下面还有」的信号，否则只能盲滚试错。
+   常态 6px / 50% 不透明度，hover 加粗到 10px / 80% —— 平时不抢注意力，
+   需要时又足够醒目。 */
+.scroll-subtle {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--color-muted-foreground) 50%, transparent)
+    transparent;
+}
+
+.scroll-subtle::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.scroll-subtle::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scroll-subtle::-webkit-scrollbar-thumb {
+  background-color: color-mix(in oklab, var(--color-muted-foreground) 50%, transparent);
+  border-radius: 9999px;
+}
+
+.scroll-subtle:hover::-webkit-scrollbar {
+  width: 10px;
+}
+
+.scroll-subtle:hover::-webkit-scrollbar-thumb {
+  background-color: color-mix(in oklab, var(--color-muted-foreground) 80%, transparent);
+}
+
+/* 日志面板：吃掉日志卡的全部剩余高度，常驻可滚动。
+   折叠态已于 2026-10-05 取消 —— 右列网格把窗口的剩余高度给了日志面板
+   （第 3 行 `1fr`），「只有两行高」的折叠语义会让空白重新落到卡外，
+   而满高可滚动的日志区在任何窗口高度下都没有空白。
+
+   高度只由 flex 链决定（Card flex-col → CardContent flex-1 → 本面板
+   flex-1 + min-h-0），**不要**再写 max-height / min-height：
+   两套高度来源会互相覆盖，且 max-height 会把面板重新压回固定高度。
+   `min-h-0` 是必须的：flex 项目的 `min-height: auto` 会解析成内容高度，
+   不写它超长日志就不内部滚动、而是把整张卡顶高（与 TaskProgress 同理）。
+
+   position: relative：给空态的 `absolute inset-0` 当定位祖先，
+   「暂无日志」才能在任意高度下真正居中。
+   overscroll-behavior: contain：滚到顶/底时不要把滚动传递给右列容器。
+
+   滚动条仍然隐藏（scrollbar-width / ::-webkit-scrollbar），
+   与右列一致：翻页能力保留（滚轮/触控板），但不吃宽度。 */
+.log-panel {
+  position: relative;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.log-panel::-webkit-scrollbar {
+  display: none;
+}
+
 
 /* 无障碍降级：系统开启「减少动态效果」时停止所有动画 */
 @media (prefers-reduced-motion: reduce) {

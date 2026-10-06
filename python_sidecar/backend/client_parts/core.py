@@ -55,8 +55,9 @@ from python_sidecar.backend.client_parts.profile import (
     validate_nav_payload,
 )
 from python_sidecar.backend.client_parts.rewards import (
-    MISSION_RETRY_DELAYS,
-    REWARD_CLAIM_INTERVAL_SECONDS,
+        MISSION_RETRY_DELAYS,
+        REWARD_CLAIM_BATCH_SIZE,
+        REWARD_CLAIM_INTERVAL_SECONDS,
     build_reward_receive_body,
     failed_reward_claim_result,
     normalize_task_id,
@@ -100,7 +101,7 @@ class BilibiliClient:
         self._wbi_cache: tuple[str, str] | None = None
         # WBI 缓存并发 miss 单飞锁：client 绑定单一事件循环，无跨循环问题
         self._wbi_lock = asyncio.Lock()
-        # 离线房间告警去重：每次重连都会走 live_trace_enter，仅首见警告（J-7）
+        # 离线房间告警去重：每次重连都会走 live_trace_enter，仅首见警告
         self._offline_warned_rooms: set[int] = set()
 
         self._http = httpx.AsyncClient(
@@ -321,7 +322,7 @@ class BilibiliClient:
         )
         if payload.get("code") != 0:
             raise ValueError(
-                f"roomEntryAction 失败 room_id={room_id}: {payload.get('message')}"
+                f"roomEntryAction 失败 房间号：{room_id}，{payload.get('message')}"
             )
 
     @staticmethod
@@ -362,11 +363,11 @@ class BilibiliClient:
         room = await self.get_live_room_info(room_id)
         if room.live_status != 1:
             # 离线房间每次重连都会走到这里：按房间只告警一次，
-            # 防止重连循环把日志刷满（J-7）
+            # 防止重连循环把日志刷满
             if room.room_id not in self._offline_warned_rooms:
                 self._offline_warned_rooms.add(room.room_id)
                 LOGGER.warning(
-                    "room=%s 当前状态非开播 live_status=%s，计时可能不会增长",
+                    "房间号：%s 当前状态非开播 直播状态：%s，计时可能不会增长",
                     room.room_id,
                     room.live_status,
                 )
@@ -387,7 +388,7 @@ class BilibiliClient:
         )
         if payload.get("code") != 0:
             raise ValueError(
-                f"x25Kn/E 失败 room_id={room.room_id}: {payload.get('message')}"
+                f"x25Kn/E 失败 房间号：{room.room_id}，{payload.get('message')}"
             )
         return live_trace_session_from_enter_payload(payload, room=room)
 
@@ -440,8 +441,9 @@ class BilibiliClient:
         if payload.get("code") != 0:
             raise ValueError(
                 "x25Kn/X 失败 "
-                f"room_id={session.room_id}: {payload.get('message')} "
-                f"(duration={duration_used}, expected={expected_interval}, elapsed={actual_elapsed})"
+                f"房间号：{session.room_id}，{payload.get('message')} "
+                f"(已用时长：{duration_used}, 期望间隔：{expected_interval}, "
+                f"实际间隔：{actual_elapsed})"
             )
 
         return apply_live_trace_heartbeat_payload(
@@ -491,14 +493,14 @@ class BilibiliClient:
                 break
             if attempt < len(MISSION_RETRY_DELAYS):
                 LOGGER.warning(
-                    "查询领奖信息触发限频 task_id=%s attempt=%s/%s，稍后重试",
+                    "查询领奖信息触发限频 任务ID：%s 第 %s/%s 次，稍后重试",
                     normalized_id,
                     attempt,
                     len(MISSION_RETRY_DELAYS),
                 )
             else:
                 LOGGER.warning(
-                    "查询领奖信息持续限频 task_id=%s attempt=%s/%s，停止重试",
+                    "查询领奖信息持续限频 任务ID：%s 第 %s/%s 次，停止重试",
                     normalized_id,
                     attempt,
                     len(MISSION_RETRY_DELAYS),
@@ -534,14 +536,14 @@ class BilibiliClient:
                 break
             if attempt < len(MISSION_RETRY_DELAYS):
                 LOGGER.warning(
-                    "领取奖励触发限频 task_id=%s attempt=%s/%s，稍后重试",
+                    "领取奖励触发限频 任务ID：%s 第 %s/%s 次，稍后重试",
                     info.task_id,
                     attempt,
                     len(MISSION_RETRY_DELAYS),
                 )
             else:
                 LOGGER.warning(
-                    "领取奖励持续限频 task_id=%s attempt=%s/%s，停止重试",
+                    "领取奖励持续限频 任务ID：%s 第 %s/%s 次，停止重试",
                     info.task_id,
                     attempt,
                     len(MISSION_RETRY_DELAYS),
@@ -559,7 +561,7 @@ class BilibiliClient:
             progresses = await self.get_task_progress(normalized_ids)
         except Exception as exc:
             LOGGER.warning(
-                "领取前查询子任务失败，将使用原任务 ID: %s",
+                "领取前查询子任务失败，将使用原任务 ID %s",
                 sanitize_exception_text(exc),
             )
             reward_task_ids = resolve_reward_task_ids(normalized_ids, [])
@@ -567,18 +569,35 @@ class BilibiliClient:
             reward_task_ids = resolve_reward_task_ids(normalized_ids, progresses)
             if reward_task_ids != normalized_ids:
                 LOGGER.info(
-                    "领奖任务已展开 parent_count=%s reward_task_count=%s",
+                    "领奖任务已展开 任务组数：%s 领奖任务数：%s",
                     len(normalized_ids),
                     len(reward_task_ids),
                 )
 
-        results: list[MissionRewardClaimResult] = []
-        for index, task_id in enumerate(reward_task_ids):
+        # 限频只作用于「发起领取请求」这一刻，不占用后面的等待时间：
+        # 原实现每个子任务之间无条件 sleep(1.2s)，N 个子任务就是 N×1.2s
+        # 的纯空转，与各子任务自身要等的网络时间（退避 0/1.5/3.0s +
+        # WBI 签名 + 20s 超时）串行叠加，很容易顶穿 180s 预算。
+        # 限频改成按批次节流：批次内并发，只保证相邻批次的起点间隔不小于
+        # REWARD_CLAIM_INTERVAL_SECONDS。请求总数与节流语义都不变。
+        #
+        # 用局部闭包而非方法：receive_all_mission_rewards 允许以鸭子类型
+        # 的假客户端被 unbound 调用（只要求有 get_mission_reward_info 与
+        # receive_mission_reward），抽成 self 上的方法会在那些调用方上
+        # 抛 AttributeError。
+        async def claim_one(task_id: str) -> MissionRewardClaimResult:
+            """领取单个子任务；异常收敛成一条失败结果，不影响同批其他任务。"""
             try:
                 info = await self.get_mission_reward_info(task_id)
-                results.append(await self.receive_mission_reward(info))
+                return await self.receive_mission_reward(info)
             except Exception as exc:
-                results.append(failed_reward_claim_result(task_id, exc))
-            if index < len(reward_task_ids) - 1:
+                return failed_reward_claim_result(task_id, exc)
+
+        results: list[MissionRewardClaimResult] = []
+        total = len(reward_task_ids)
+        for start in range(0, total, REWARD_CLAIM_BATCH_SIZE):
+            batch = reward_task_ids[start : start + REWARD_CLAIM_BATCH_SIZE]
+            results.extend(await asyncio.gather(*(claim_one(tid) for tid in batch)))
+            if start + REWARD_CLAIM_BATCH_SIZE < total:
                 await asyncio.sleep(REWARD_CLAIM_INTERVAL_SECONDS)
         return results

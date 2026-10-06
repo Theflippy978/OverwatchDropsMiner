@@ -5,8 +5,10 @@ import threading
 from typing import Callable
 
 from python_sidecar.backend.accounts import Account
+from python_sidecar.backend.account_log_context import account_scope
 from python_sidecar.backend.config import MinerConfig
 from python_sidecar.backend.browser.worker_controller import WorkerController
+from python_sidecar.backend.utils import format_room_ids
 from python_sidecar.backend.watch_time_tracker import WatchTimeTracker
 
 LOGGER = logging.getLogger(__name__)
@@ -63,7 +65,7 @@ class AccountMinerManager:
         log = logger or LOGGER
         cookie = account.cookie()
         if not cookie.strip():
-            log.warning("账号 %s Cookie 为空，无法启动", account.remark or account.id)
+            log.warning("账号：%s Cookie 为空，无法启动", account.remark or account.id)
             return False
         with self._lock:
             session = self._sessions.get(account.id)
@@ -88,12 +90,23 @@ class AccountMinerManager:
             watch_tracker=session.tracker,
         )
         if started:
-            log.info(
-                "账号 [%s] 挂宝已启动（房间 %s，线程 %s）",
-                account.remark or account.id[:8],
-                config.room_ids,
-                config.thread_count,
-            )
+            # 补账号上下文：这条日志在 IPC 处理线程里发出，而账号身份
+            # 只在 miner 自己的线程（run/_thread_entry）里绑定过。
+            # 不补的话它的 account_id 是 None，前端按账号过滤时看不到
+            # 「挂宝已启动」这一行，用户会以为该账号启动失败。
+            with account_scope(account.id):
+                # 字段用「中文标签：值」输出，供前端按语义着色（见 LogViewer
+                # 的 FIELD_RE）。标签逐个列举而不是用宽松正则：Cookie、URL、
+                # base64 都含「=」，宽松匹配会把整段凭据涂成高亮色。
+                # 各条日志的字段数量与含义都不同（登录行是账号+UID，
+                # 房间行是房间号+连接数），前端无法从位置反推含义，
+                # 文案一改就会错位 —— 所以标签本身就是稳定契约。
+                log.info(
+                    "挂宝已启动 账号：%s 房间号：%s 线程数：%s",
+                    account.remark or account.id[:8],
+                    format_room_ids(config.room_ids),
+                    config.thread_count,
+                )
             self._notify(account.id, True)
         return started
 
@@ -123,8 +136,8 @@ class AccountMinerManager:
         return result
 
     def discard_session(self, account_id: str) -> None:
-        """回收已删除账号的会话资源（J-6）：_sessions 此前只增不减，
-        删除账号后 controller/tracker 常驻内存。仅在会话完全停止时移除。"""
+        """回收已删除账号的会话资源：_sessions 只增不减时，
+        删除账号后 controller/tracker 会常驻内存。仅在会话完全停止时移除。"""
         with self._lock:
             session = self._sessions.get(account_id)
             if session is None:

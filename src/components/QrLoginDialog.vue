@@ -24,6 +24,10 @@ interface QrPollResult {
 
 const props = defineProps<{
   open: boolean;
+  /** 添加账号失败的原因，由父组件传入。渲染在框内而非父组件页面上：
+      弹窗打开时 Dialog 的全屏遮罩会盖住页面上的任何错误提示，
+      用户只会看到「点了没反应」。 */
+  addError?: string;
 }>();
 
 const emit = defineEmits<{
@@ -235,6 +239,13 @@ function handleCancel() {
         <!-- aria-live：扫码流程的关键反馈（请扫码→已扫码→已过期），
              读屏用户在把注意力转向手机 App 时回来必须能知道状态变了。
              倒计时刻意不加 aria-live（每秒播报会刷屏）。 -->
+        <p
+          v-if="addError"
+          class="break-all text-center text-sm text-signal-danger"
+          role="alert"
+        >
+          {{ addError }}
+        </p>
         <p
           v-if="statusText"
           class="text-center text-sm text-muted-foreground"

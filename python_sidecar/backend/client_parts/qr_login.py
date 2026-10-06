@@ -100,17 +100,18 @@ def build_login_cookie_string(
     response_cookies: httpx.Cookies,
     client_cookies: httpx.Cookies,
 ) -> str:
-    """Select the safe login cookies obtained by the successful poll request."""
+    """取出登录必需的 Cookie，且必须是本轮成功轮询认可的那一份。"""
 
     selected: dict[str, str] = {}
-    # The client jar contains cookies accepted from this session, while the
-    # response jar lets the successful poll response take precedence.
+    # 先遍历 client jar（本会话此前已被服务端接受的 Cookie），
+    # 再遍历 response jar —— 后写入的会覆盖前者，
+    # 因此成功轮询响应带回的 Cookie 优先级最高。
     for cookie_jar in (client_cookies.jar, response_cookies.jar):
         for cookie in cookie_jar:
             if cookie.name not in LOGIN_COOKIE_NAMES or not cookie.value:
                 continue
             # 仅取 B 站主域的未过期 Cookie，避免同名异域/过期项污染登录态；
-            # 精确匹配主域或其子域，防止 xbilibili.com 类同形后缀域（J-3）
+            # 精确匹配主域或其子域，防止 xbilibili.com 类同形后缀域
             domain = (cookie.domain or "").lstrip(".")
             if domain != "bilibili.com" and not domain.endswith(".bilibili.com"):
                 continue
@@ -129,7 +130,7 @@ def build_login_cookie_string(
 class QrLoginApi:
     """One Bilibili QR login session backed by one HTTP client/cookie jar."""
 
-    # 与 http.py 的 GET 瞬时异常口径一致（J-4）：扫码
+    # 与 http.py 的 GET 瞬时异常口径一致：扫码
     # 「确认中」轮询遇读超时不应终止整轮登录。
     _TRANSIENT_ERRORS = (
         httpx.ConnectTimeout,

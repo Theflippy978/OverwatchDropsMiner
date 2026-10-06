@@ -2,7 +2,7 @@
 name = "overwatch-drops-miner"
 version = "1.1.0"
 description = "守望先锋直播掉宝助手"
-authors = ["You"]
+authors = ["Theflippy978"]
 edition = "2021"
 
 [lib]

@@ -51,7 +51,7 @@ class _NativeNotifyTarget:
             # 必须脱敏：httpx 异常消息携带完整 URL（gotify token /
             # serverchan key / 企业微信 corpsecret 都在里面），而这条日志会经
             # FrontendLogHandler 推给前端 LogViewer 明文显示。
-            LOGGER.warning("通知发送失败: %s", sanitize_exception_text(exc))
+            LOGGER.warning("通知发送失败，%s", sanitize_exception_text(exc))
         return False
 
     def _notify_gotify(self, title: str, body: str) -> bool:
@@ -151,7 +151,7 @@ class _NativeNotifyTarget:
             payload = None
         if isinstance(payload, dict) and str(payload.get("errcode")) == "40014":
             # access_token 已失效（secret 更换/账号被踢等）：清缓存重取并
-            # 重试一次，避免在缓存到期前通知持续失败（修复 D-3）。
+            # 重试一次，避免在缓存到期前通知持续失败。
             self._wxwork_access_token = None
             self._wxwork_token_fetched_at = 0.0
             access_token = self._get_wxwork_access_token(corpid, secret)
@@ -208,7 +208,7 @@ class _NativeNotifyTarget:
     @staticmethod
     def _is_success_response(response: httpx.Response) -> bool:
         if not response.is_success:
-            LOGGER.warning("通知发送失败，HTTP 状态码: %s", response.status_code)
+            LOGGER.warning("通知发送失败，HTTP 状态码 %s", response.status_code)
             return False
         try:
             payload = response.json()
@@ -232,11 +232,11 @@ class _NativeNotifyTarget:
             # float() 中转兼容字符串 "0"、浮点 0.0 等形式后再取整
             error_code = int(float(raw_code))
         except (TypeError, ValueError):
-            LOGGER.warning("通知发送失败，无法识别的状态码: %s", payload)
+            LOGGER.warning("通知发送失败，无法识别的状态码 %s", payload)
             return False
 
         if error_code != 0:
-            LOGGER.warning("通知发送失败，响应: %s", payload)
+            LOGGER.warning("通知发送失败，响应 %s", payload)
             return False
         return True
 
@@ -255,8 +255,8 @@ class MultiPlatformNotifier:
         线程安全约定（务必保持）：先在局部变量上完整构建新目标集，
         最后一次性整体替换实例字段。notify() 可能在 daemon 线程并发执行，
         整体换引用保证它读到的 _native_targets/_apprise/_enabled 永远
-        自洽；切勿改成原地 append/clear（会引入竞态，B-3）。
-        单条坏 URL 只跳过自身，不再连累其余通知目标（修复 D-4）。
+        自洽；切勿改成原地 append/clear（会引入竞态）。
+        单条坏 URL 只跳过自身，不再连累其余通知目标。
         """
         cleaned = [url.strip() for url in (service_urls or []) if url.strip()]
         native_targets: list[_NativeNotifyTarget] = []
@@ -296,7 +296,7 @@ class MultiPlatformNotifier:
                 )
             except Exception as exc:
                 LOGGER.warning(
-                    "apprise 通知组件初始化失败: %s", sanitize_exception_text(exc)
+                    "apprise 通知组件初始化失败，%s", sanitize_exception_text(exc)
                 )
 
         enabled = bool(native_targets) or apprise_app is not None
@@ -321,5 +321,5 @@ class MultiPlatformNotifier:
             if self._apprise is not None:
                 sent = bool(self._apprise.notify(title=title, body=body)) or sent
         except Exception as exc:
-            LOGGER.warning("通知发送失败: %s", sanitize_exception_text(exc))
+            LOGGER.warning("通知发送失败，%s", sanitize_exception_text(exc))
         return sent

@@ -13,12 +13,14 @@
       {
         "title": "守望先锋直播掉宝助手",
         "width": 1240,
-        "height": 780,
-        "minWidth": 700,
-        "minHeight": 480,
+        "height": 900,
+        "minWidth": 1030,
+        "minHeight": 860,
         "resizable": true,
         "fullscreen": false,
-        "visible": false
+        "visible": false,
+        "decorations": false,
+        "shadow": true
       }
     ],
     "security": {

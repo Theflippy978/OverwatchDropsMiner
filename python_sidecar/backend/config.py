@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+# 线程数 / 总连接数上限。四处必须同源：
+#   本文件的 validate()、python_sidecar/main.py 的 MAX_THREAD_COUNT（_clamp_int 用）、
+#   src/stores/config.ts 的 MAX_THREAD_COUNT、ConfigForm.vue 输入框的 max 属性。
+# 历史上四处出现过 128/256 不一致，后果是「前端允许填 256、保存也成功，
+# 启动时才被 validate() 拒」，而错误文案来自深层调用，用户无法关联因果
+# （默认 60 线程 × 3 房间 = 180，正好落在两者之间）。
+MAX_TOTAL_CONNECTIONS = 256
+
 
 @dataclass(slots=True)
 class MinerConfig:
@@ -23,10 +31,12 @@ class MinerConfig:
             raise ValueError("room_ids 中存在非法房间号")
         if self.thread_count <= 0:
             raise ValueError("thread_count 必须大于 0")
-        if self.thread_count > 128:
-            raise ValueError("线程数不能超过 128")
-        if len(self.room_ids) * self.thread_count > 128:
-            raise ValueError("总连接数（房间数 × 线程数）不能超过 128")
+        if self.thread_count > MAX_TOTAL_CONNECTIONS:
+            raise ValueError(f"线程数不能超过 {MAX_TOTAL_CONNECTIONS}")
+        if len(self.room_ids) * self.thread_count > MAX_TOTAL_CONNECTIONS:
+            raise ValueError(
+                f"总连接数（房间数 × 线程数）不能超过 {MAX_TOTAL_CONNECTIONS}"
+            )
         if self.reconnect_delay_seconds <= 0:
             raise ValueError("reconnect_delay_seconds 必须大于 0")
         if self.reconnect_delay_seconds > 3600:

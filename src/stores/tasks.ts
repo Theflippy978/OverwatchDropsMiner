@@ -1,7 +1,8 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { useConfigStore } from "@/stores/config";
+import { useConfigStore, taskIdsFingerprint } from "@/stores/config";
+import { TASK_STATUS_CLAIMED } from "@/lib/types";
 import type { TaskItem } from "@/lib/types";
 
 interface AccountTasks {
@@ -16,16 +17,27 @@ interface AccountTasks {
   pendingIds: Set<string>;
   refreshing: boolean;
   refreshQueued: boolean;
+  /** 本轮（含排队轮）真正结束时 resolve。调用方靠它保证后续同步跑在新数据上 */
+  refreshSettled: Promise<void> | null;
   /** 排队的那次刷新是否来自手动点击（累积意图，防自动刷新吞掉手动刷新） */
   queuedManual: boolean;
   claiming: boolean;
   claimQueued: boolean;
+  /**
+   * 上次重算记账时所用的任务 ID 集合（已归一化）。
+   *
+   * 掉宝任务 ID **每日不变、只有进度归零**。所以「昨天领过的 sid」
+   * 今天会以同一个 id 再次出现，而服务端此时尚未把 status 置为已领取，
+   * 于是今天完成的任务被 `handledIds.has(id)` 判成已处理 → 当天不再自动领取。
+   * 指纹变了就说明换了一批任务，此时旧的记账全部作废。
+   */
+  taskIdsKey: string;
 }
 
 /** 具体奖励任务（check_point.sid 优先，缺失时回落到 task_id） */
 interface ClaimUnit {
   id: string;
-  /** 服务端已领取（check_point.status === 6） */
+  /** 服务端已领取（TASK_STATUS_CLAIMED） */
   claimed: boolean;
   /** 已完成、可领取 */
   completed: boolean;
@@ -44,7 +56,11 @@ function collectClaimUnits(tasks: TaskItem[]): ClaimUnit[] {
       .filter((entry) => entry.id.length > 0);
     if (concrete.length > 0) {
       for (const { id, point } of concrete) {
-        units.push({ id, claimed: point.status === 6, completed: !!point.is_completed });
+        units.push({
+          id,
+          claimed: point.status === TASK_STATUS_CLAIMED,
+          completed: !!point.is_completed,
+        });
       }
       continue;
     }
@@ -79,9 +95,11 @@ export const useTasksStore = defineStore("tasks", () => {
       pendingIds: new Set(),
       refreshing: false,
       refreshQueued: false,
+      refreshSettled: null,
       queuedManual: false,
       claiming: false,
       claimQueued: false,
+      taskIdsKey: "",
     };
   }
 
@@ -103,7 +121,15 @@ export const useTasksStore = defineStore("tasks", () => {
     return accountTasksMap.value[accountId];
   }
 
-  async function refreshTasks(accountId: string, manual = true) {
+  /**
+   * 刷新任务进度。返回的 Promise 在**本轮（含排队轮）真正结束**后才 resolve。
+   *
+   * 必须返回可等待的完成信号：调用方（TaskProgress.handleRefresh）拿到结果后
+   * 紧接着要拉一次 get_account_status 来同步顶部四字段与掉宝进度条。
+   * 原实现「已在刷新就直接 return」，于是那次同步跑在**旧数据**上 ——
+   * 用户点手动刷新，看到的仍是刷新前的进度。
+   */
+  async function refreshTasks(accountId: string, manual = true): Promise<void> {
     if (deletedIds.has(accountId)) return;
     const accountTasks = getAccountTasks(accountId);
     if (accountTasks.refreshing) {
@@ -115,8 +141,14 @@ export const useTasksStore = defineStore("tasks", () => {
         accountTasks.queuedManual = true;
         accountTasks.text = "已有刷新进行中，已排队下一次刷新...";
       }
+      // 排队轮完成后由下面的 finally 兑现；这里等它，不另起一轮。
+      await accountTasks.refreshSettled;
       return;
     }
+    let settle!: () => void;
+    accountTasks.refreshSettled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
     accountTasks.refreshing = true;
     accountTasks.error = "";
     try {
@@ -136,6 +168,19 @@ export const useTasksStore = defineStore("tasks", () => {
         const best = result.tasks.reduce((a, b) => (a.target > b.target ? a : b));
         accountTasks.cur = best.progress;
         accountTasks.limit = best.target;
+      }
+
+      // 任务 ID 指纹比对。必须在 handledIds 重算**之前**，且两个集合一起清：
+      // 昨日残留的 pendingIds 会把新任务挡在 toClaim 之外。
+      // 必须是「清空后重算」而非「合并」—— 合并的话昨日 id 依然在集合里，
+      // 今天完成时仍被判为已处理，等于没修。
+      // 用 taskIdsFingerprint（去重+排序）而非展示用的去重函数：顺序不参与
+      // 「是不是同一批任务」的判定，`a,b` 改成 `b,a` 不该清空记账。
+      const currentKey = taskIdsFingerprint(configStore.config.task_ids_text);
+      if (accountTasks.taskIdsKey !== currentKey) {
+        accountTasks.taskIdsKey = currentKey;
+        accountTasks.handledIds = new Set();
+        accountTasks.pendingIds = new Set();
       }
 
       // 按 sid 维度重算 handled/pending（对齐原项目 difference_update(incomplete)）
@@ -172,6 +217,10 @@ export const useTasksStore = defineStore("tasks", () => {
         const rerunManual = accountTasks.queuedManual;
         accountTasks.queuedManual = false;
         void refreshTasks(accountId, rerunManual);
+      } else {
+        // 没有排队轮才是真的结束；有排队轮时保持 pending，
+        // 由排队轮自己的 finally 兑现，否则等待方会在数据仍旧时醒来。
+        settle();
       }
     }
   }
@@ -182,7 +231,7 @@ export const useTasksStore = defineStore("tasks", () => {
     if (accountTasks.claiming) return;
 
     // 关键：必须同时排除 claimed。
-    // 后端 models.py:48 的 is_completed 把 status===6（已领取）也算作完成，
+    // 后端 client_parts/models.py 的 is_completed 把 status===6（已领取）也算作完成，
     // 所以已领取的奖励同时满足 claimed 与 completed；若只过滤 completed，
     // 冷启动时 handledIds 为空，会对全部历史已领奖励下发一次无效 claim。
     // 上游原项目 classify_auto_claim_task_ids 用 status==6 优先归入 claimed，正是为此。
@@ -204,6 +253,9 @@ export const useTasksStore = defineStore("tasks", () => {
     if (deletedIds.has(accountId)) return;
     const accountTasks = getAccountTasks(accountId);
     if (accountTasks.claiming) {
+      // 只排队一次：领取一轮动辄十几秒，用户会连点。claimQueued 是布尔，
+      // 连点 N 次与点 1 次等价 —— 否则 N 次点击排成 N 轮领取，
+      // 每轮都重新下发一遍 request，多账号时足以压垮 sidecar。
       accountTasks.claimQueued = true;
       return;
     }
@@ -219,17 +271,24 @@ export const useTasksStore = defineStore("tasks", () => {
           reward_name: string;
           success: boolean;
           skipped: boolean;
+          /** B站任务状态，领取成功为 TASK_STATUS_CLAIMED。
+              sidecar 不缓存检查点状态，随后的 refresh_tasks 拿回来的仍是
+              TASK_STATUS_COMPLETED，UI 要显示「已领取」只能靠这里。 */
+          status: number;
           message: string;
         }>;
         text: string;
       }>("claim_rewards", { accountId });
 
+      // handledIds 是「本会话已领取」的权威集合，与 refreshTasks 里的
+      // 服务端字段取并集而非互相覆盖：B站接口对已领检查点仍可能返回 3，
+      // 若每次刷新都以服务端为准，本地刚领取成功的事实立刻被抹掉。
       const newHandled = new Set(accountTasks.handledIds);
       for (const item of result.results) {
         const id = (item.task_id ?? "").trim();
         if (!id) continue;
         requested.add(id);
-        if (item.success || item.skipped) {
+        if (item.status === TASK_STATUS_CLAIMED || item.success || item.skipped) {
           newHandled.add(id);
         }
       }

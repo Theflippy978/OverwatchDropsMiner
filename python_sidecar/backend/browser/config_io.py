@@ -69,13 +69,17 @@ def save_config_data(path: str | Path, data: dict[str, Any]) -> None:
     """原子写入导出配置：临时文件 + os.replace（对齐 accounts 的落盘口径）。
 
     直接整文件覆盖在写入中途崩溃/断电时会留下截断 JSON，且导出文件常是
-    用户手动保存的唯一副本（修复 D-9）。
+    用户手动保存的唯一副本。
     """
     target = Path(path)
     payload = json.dumps(data, ensure_ascii=False, indent=2)
     tmp_path = target.with_name(target.name + f".tmp{os.getpid()}")
     try:
-        tmp_path.write_text(payload, encoding="utf-8")
+        # errors="replace" 与 accounts._save_locked 同口径：payload 里若混入
+        # 孤立代理字符（U+D800..DFFF），strict 编码会抛 UnicodeEncodeError。
+        # 那类字符无法显示也不影响语义，替换成 U+FFFD 远好于让整个
+        # 「保存配置」失败——用户的配置比那几个字符重要。
+        tmp_path.write_text(payload, encoding="utf-8", errors="replace")
         os.replace(tmp_path, target)
     except Exception:
         tmp_path.unlink(missing_ok=True)

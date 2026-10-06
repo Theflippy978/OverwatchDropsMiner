@@ -6,8 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { useTimedNotice } from "@/lib/notice";
 import ConfirmDialog from "@/components/ConfirmDialog.vue";
 
 const accountsStore = useAccountsStore();
@@ -30,6 +30,10 @@ const showRenameDialog = ref(false);
 const renameTargetId = ref("");
 const renameValue = ref("");
 const renaming = ref(false);
+/** 重命名失败的原因。必须留在 Dialog 内部：Dialog 打开时全屏遮罩会吃掉
+    指针事件，页面底部的错误条既看不见也点不到，用户只会认为程序卡死。
+    同时保证失败后对话框不自动关闭——自动关闭会让用户丢掉刚输入的内容。 */
+const renameError = ref("");
 
 const showCaptureConfirm = ref(false);
 const captureError = ref("");
@@ -38,29 +42,38 @@ const showRemoveConfirm = ref(false);
 const removeTargetId = ref("");
 const removeTargetRemark = ref("");
 const removing = ref(false);
+/** 正在进行中的操作，元素形如 `${accountId}:start` / `${accountId}:stop`。
+    用 Set 而不是单个字符串：禁用范围收窄到「当前操作行」之后，
+    单值会被后一次操作覆盖掉前一个（同时启停两个账号时按错的行禁用）。
+    Vue 3 的 ref 会把 Set 变成响应式集合，add/delete 本身即触发更新。 */
+const pendingActions = ref(new Set<string>());
 
-const pendingAction = ref("");
-/** 统一的操作错误提示区。
-    原实现用原生 alert()，与 App.vue:60-61 已确立的「不用阻塞 WebView 的
-    原生弹窗」决策冲突（alert 在 WebView2 里是阻塞式 modal）。 */
-const actionError = ref("");
-
-function showError(prefix: string, e: unknown) {
-  actionError.value = `${prefix}: ${e}`;
+/** 该账号是否有操作在途。禁用只针对这一个账号，
+    早期实现是 `pendingAction !== ''` —— 一行在操作，全部账号行一起变灰。 */
+function isPending(accountId: string): boolean {
+  return (
+    pendingActions.value.has(`${accountId}:start`) ||
+    pendingActions.value.has(`${accountId}:stop`)
+  );
 }
 
-function clearError() {
-  actionError.value = "";
-}
-
-function pendingLabel(accountId: string, idle: string) {
-  if (!pendingAction.value.startsWith(`${accountId}:`)) return idle;
-  return pendingAction.value.endsWith(":start") ? "启动中..." : "停止中...";
-}
+/** 页内错误提示，只用于不涉及弹窗的操作（启动/停止），3 秒自动消失。
+    凡是在 Dialog / ConfirmDialog 内失败的操作，提示必须放进那个框里**且
+    绝不能自动消失**：弹窗打开时全屏遮罩会吃掉指针事件并盖住页面上的任何提示，
+    用户既看不到错误也点不掉弹窗，只会认为程序卡死。
+    （`addError` / `renameError` / `captureError` / `removeError` 四处保持常驻。） */
+const {
+  text: actionError,
+  show: showActionError,
+  clear: clearActionError,
+} = useTimedNotice();
+const addError = ref("");
+const removeError = ref("");
 
 function openRenameDialog(accountId: string, currentRemark: string) {
   renameTargetId.value = accountId;
   renameValue.value = currentRemark;
+  renameError.value = "";
   showRenameDialog.value = true;
 }
 
@@ -68,12 +81,12 @@ async function handleRenameAccount() {
   const remark = renameValue.value.trim();
   if (!remark || !renameTargetId.value) return;
   renaming.value = true;
-  clearError();
+  renameError.value = "";
   try {
     await accountsStore.renameAccount(renameTargetId.value, remark);
     showRenameDialog.value = false;
   } catch (e) {
-    showError("重命名失败", e);
+    renameError.value = `${e}`;
   } finally {
     renaming.value = false;
   }
@@ -82,14 +95,14 @@ async function handleRenameAccount() {
 async function handleAddAccount() {
   if (!newCookie.value.trim()) return;
   adding.value = true;
-  clearError();
+  addError.value = "";
   try {
     const account = await accountsStore.addAccount(newCookie.value.trim());
     newCookie.value = "";
     showAddDialog.value = false;
     if (account) emit("select", account.id);
   } catch (e) {
-    showError("添加账号失败", e);
+    addError.value = `添加账号失败: ${e}`;
   } finally {
     adding.value = false;
   }
@@ -99,21 +112,24 @@ function handleRemoveAccount(accountId: string) {
   const account = accountsStore.accounts.find((a) => a.id === accountId);
   removeTargetId.value = accountId;
   removeTargetRemark.value = account?.remark || accountId.slice(0, 8);
+  removeError.value = "";
   showRemoveConfirm.value = true;
 }
 
 async function confirmRemoveAccount() {
   if (!removeTargetId.value) return;
   removing.value = true;
-  clearError();
+  removeError.value = "";
   try {
     await accountsStore.removeAccount(removeTargetId.value);
     showRemoveConfirm.value = false;
+    removeTargetId.value = "";
   } catch (e) {
-    showError("删除账号失败", e);
+    // 失败时保留 removeTargetId：清空它会让框内的错误提示无法重试，
+    // 用户只能关掉重来。
+    removeError.value = `删除账号失败: ${e}`;
   } finally {
     removing.value = false;
-    removeTargetId.value = "";
   }
 }
 
@@ -122,31 +138,38 @@ function cancelRemoveAccount() {
   removeTargetId.value = "";
 }
 
+/** 启停的等待期只靠 disabled 表达，按钮文案必须恒为「启动」/「停止」。
+    早前会把文案换成「启动中...」「停止中...」，而按钮只有 px-3 没有固定宽，
+    文案一变宽就变 —— 整行跟着左右抖，在多账号列表里尤其明显。
+    换成图标（旋转 spinner）能兼顾两者，但那样 disabled 的半透明会把图标一起
+    淡掉，等待感反而更弱；文案恒定是最省事也最不容易出错的形态。 */
 async function handleStart(accountId: string) {
-  if (pendingAction.value) return;
-  pendingAction.value = `${accountId}:start`;
-  clearError();
+  if (isPending(accountId)) return;
+  const token = `${accountId}:start`;
+  pendingActions.value.add(token);
+  clearActionError();
   try {
     await accountsStore.startMiner(accountId);
     // 对齐原 _finish_account_started：启动后自动选中该账号
     emit("select", accountId);
   } catch (e) {
-    showError("启动失败", e);
+    showActionError(`启动失败: ${e}`, true);
   } finally {
-    pendingAction.value = "";
+    pendingActions.value.delete(token);
   }
 }
 
 async function handleStop(accountId: string) {
-  if (pendingAction.value) return;
-  pendingAction.value = `${accountId}:stop`;
-  clearError();
+  if (isPending(accountId)) return;
+  const token = `${accountId}:stop`;
+  pendingActions.value.add(token);
+  clearActionError();
   try {
     await accountsStore.stopMiner(accountId);
   } catch (e) {
-    showError("停止失败", e);
+    showActionError(`停止失败: ${e}`, true);
   } finally {
-    pendingAction.value = "";
+    pendingActions.value.delete(token);
   }
 }
 
@@ -195,14 +218,20 @@ function handleBottomRemove() {
 </script>
 
 <template>
-  <!-- 卡片内边距对齐旧版 account_panel.py:45 的 setContentsMargins(14, 12, 14, 14)、
-       间距 10px；h-full 拉满左栏：列表区弹性伸缩，操作按钮固定在卡底 -->
-  <Card class="card-hover flex h-full flex-col">
-    <CardHeader class="px-3.5 pb-2.5 pt-3">
-        <div class="flex items-center justify-between">
-          <CardTitle class="text-[11pt] font-semibold">账号</CardTitle>
-          <span class="text-xs text-muted-foreground">{{ accountsStore.accounts.length }} 个</span>
-        </div>
+  <!-- 卡片内边距 14/12/14/14、间距 10px，对齐 Qt 时代的账号面板；
+       h-full 拉满左栏：列表区弹性伸缩，操作按钮固定在卡底。
+       rounded-none：账号栏紧贴窗口左右边缘，圆角会在窗口边界与卡片
+       之间露出一小块背景色，看起来像「卡片没贴满」。
+       card-hover 的 hover 边框变化保留，它不影响圆角。
+       图标条模式已删除，这里不再有 collapsed 分支。 -->
+    <Card class="card-hover flex h-full flex-col rounded-none">
+      <CardHeader class="px-3.5 pb-2.5 pt-3">
+      <div class="flex items-center justify-between">
+        <CardTitle class="text-[11pt] font-semibold">账号</CardTitle>
+        <span class="text-xs text-muted-foreground">
+          {{ accountsStore.accounts.length }} 个
+        </span>
+      </div>
 
         <Dialog v-model:open="showAddDialog">
           <DialogContent class="sm:max-w-md">
@@ -213,6 +242,13 @@ function handleBottomRemove() {
               </DialogDescription>
             </DialogHeader>
             <div class="space-y-4 py-4">
+              <p
+                v-if="addError"
+                class="break-all text-xs text-signal-danger"
+                role="alert"
+              >
+                {{ addError }}
+              </p>
               <div class="space-y-2">
                 <Label for="new-cookie" class="text-sm font-medium">Cookie</Label>
                 <Input
@@ -257,6 +293,13 @@ function handleBottomRemove() {
               </DialogDescription>
             </DialogHeader>
             <div class="space-y-4 py-4">
+              <p
+                v-if="renameError"
+                class="break-all text-xs text-signal-danger"
+                role="alert"
+              >
+                {{ renameError }}
+              </p>
               <div class="space-y-2">
                 <Label for="rename-value" class="text-sm font-medium">备注名称</Label>
                 <Input
@@ -281,10 +324,16 @@ function handleBottomRemove() {
         </Dialog>
     </CardHeader>
     <CardContent class="min-h-0 flex-1 px-3.5 pt-0">
-      <!-- 列表容器对齐旧版 QListWidget QSS（theme.py:226-233）：
-           输入框底色 + 1px 边框 + radius 8px + 内 padding 4px -->
-      <ScrollArea class="h-full rounded-lg border border-input bg-input/40 p-1">
-        <div v-if="accountsStore.loading" class="py-8 text-center text-sm text-muted-foreground">
+      <!-- 列表容器沿用 Qt 时代 QListWidget 的观感：
+           输入框底色 + 1px 边框 + radius 8px + 内 padding 4px。
+           用原生 overflow-y-auto 而不是项目的 ScrollArea：后者靠reka 渲染
+           一条独立的隐藏式滚动条组件，CSS 的 ::-webkit-scrollbar 盖不住它，
+           而全局隐藏滚动条是本轮的统一要求。 -->
+      <div class="scroll-hidden h-full overflow-y-auto rounded-lg border border-input bg-input/40 p-1">
+        <div
+          v-if="accountsStore.loading"
+          class="py-8 text-center text-sm text-muted-foreground"
+        >
           加载中...
         </div>
         <!-- 错误态：缺了它，sidecar 起不来时 accounts 保持 []，
@@ -294,12 +343,17 @@ function handleBottomRemove() {
           class="space-y-2 py-8 text-center"
           role="alert"
         >
-          <p class="break-all text-sm text-signal-danger">{{ accountsStore.error }}</p>
+          <p class="break-all text-sm text-signal-danger">
+            {{ accountsStore.error }}
+          </p>
           <Button size="sm" variant="outline" @click="accountsStore.fetchAccounts()">
             重试
           </Button>
         </div>
-        <div v-else-if="accountsStore.accounts.length === 0" class="py-8 text-center text-sm text-muted-foreground">
+        <div
+          v-else-if="accountsStore.accounts.length === 0"
+          class="py-8 text-center text-sm text-muted-foreground"
+        >
           暂无账号，点击下方按钮添加
         </div>
         <TransitionGroup
@@ -317,9 +371,11 @@ function handleBottomRemove() {
             tabindex="0"
             :aria-selected="account.id === selectedId"
             :aria-label="`${account.remark}，${account.running ? '运行中' : '未运行'}`"
-            class="mx-px flex cursor-pointer items-center justify-between rounded-md border px-2.5 py-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            class="mx-px flex cursor-pointer items-center justify-between rounded-md border border-border px-2.5 py-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             :class="[
-              account.running ? 'account-row-running' : 'border-border',
+              // 运行态只由行内的状态圆点与文字颜色表达，不再叠一层边框动画：
+              // 原实现在四边各铺一条独立 background-image 并各自流动，
+              // 四个方向互不相同，视觉上就是「扫描线」而不是流动虚线框。
               account.id === selectedId
                 ? 'bg-accent shadow-[inset_0_0_0_1px_var(--color-primary)]'
                 : 'hover:bg-accent/50',
@@ -332,44 +388,40 @@ function handleBottomRemove() {
               <!-- 运行状态由行级 aria-label 提供，圆点本身对读屏隐藏 -->
               <span
                 aria-hidden="true"
-                class="h-2.5 w-2.5 shrink-0 rounded-full"
+                class="h-2 w-2 shrink-0 rounded-full"
                 :class="account.running ? 'bg-signal-success' : 'bg-muted'"
               />
               <p
-                class="truncate text-sm font-medium"
+                class="truncate text-sm leading-tight font-medium"
                 :class="account.running ? 'text-signal-success' : 'text-foreground'"
               >
                 {{ account.remark }}
               </p>
             </div>
             <div class="flex shrink-0 items-center gap-1">
+              <!-- 启停合为一个按钮，variant 动态绑定。
+                   早前用 v-if / v-else 写两个 Button：点「停止」时
+                   account.running 翻 false，旧按钮被销毁、新按钮被创建，
+                   而 transition-colors 只在同一 DOM 节点上生效 —— 节点替换
+                   不产生过渡，加上 variant 从 destructive（红底白字）跳到
+                   outline（白底描边）整套配色突变，视觉上就是「闪一下」。
+                   单按钮后 variant 只是 class 变化，过渡正常生效。 -->
               <Button
-                v-if="!account.running"
                 size="sm"
-                variant="outline"
-                class="h-7 rounded-md px-3 text-xs"
-                :disabled="pendingAction !== ''"
-                @click.stop="handleStart(account.id)"
+                :variant="account.running ? 'destructive' : 'outline'"
+                class="h-7 w-16 rounded-md px-0 text-xs"
+                :disabled="isPending(account.id)"
+                @click.stop="account.running ? handleStop(account.id) : handleStart(account.id)"
               >
-                {{ pendingLabel(account.id, "启动") }}
-              </Button>
-              <Button
-                v-else
-                size="sm"
-                variant="destructive"
-                class="h-7 rounded-md px-3 text-xs"
-                :disabled="pendingAction !== ''"
-                @click.stop="handleStop(account.id)"
-              >
-                {{ pendingLabel(account.id, "停止") }}
+                {{ account.running ? "停止" : "启动" }}
               </Button>
             </div>
           </div>
         </TransitionGroup>
-      </ScrollArea>
+      </div>
     </CardContent>
 
-    <!-- 底部操作区（对齐旧版 account_panel.py:62-71）：添加账号全宽 + 备注/删除对半 -->
+    <!-- 底部操作区：添加账号全宽 + 备注/删除对半 -->
     <div class="flex flex-col gap-2.5 px-3.5 pb-3.5 pt-2.5">
       <p
         v-if="actionError"
@@ -383,7 +435,8 @@ function handleBottomRemove() {
         <DropdownMenuTrigger as-child>
           <Button class="w-full rounded-md">添加账号</Button>
         </DropdownMenuTrigger>
-        <!-- 旧版弹到按钮正上方（account_panel.py:136-140，注释：避免被窗口底部截断） -->
+        <!-- 必须 side="top"：菜单挂在按钮正下方会被窗口底部截断，
+             而这个按钮就在左栏最下缘。 -->
         <DropdownMenuContent align="center" side="top" class="w-40">
           <DropdownMenuItem @select="emit('qr-login')">扫码登录</DropdownMenuItem>
           <DropdownMenuItem @select="showAddDialog = true">手动粘贴 Cookie</DropdownMenuItem>
@@ -399,10 +452,13 @@ function handleBottomRemove() {
         >
           备注
         </Button>
+        <!-- 「删除」保留全局禁用（pendingActions 非空即禁用），
+             与行内启停的按行禁用不同：删除会连带 stop_miner + 清缓存 + 删库，
+             在任何一个账号启停在途时做这件事，失败原因极难归到正确的操作上。 -->
         <Button
           variant="outline"
           class="rounded-md text-destructive hover:bg-destructive/10"
-          :disabled="!selectedId || pendingAction !== ''"
+          :disabled="!selectedId || pendingActions.size > 0"
           @click="handleBottomRemove"
         >
           删除
@@ -441,6 +497,7 @@ function handleBottomRemove() {
     :open="showRemoveConfirm"
     title="删除账号"
     :message="`确定要删除账号「${removeTargetRemark}」吗？该操作不可撤销。`"
+    :error="removeError"
     confirm-text="删除"
     variant="destructive"
     :loading="removing"

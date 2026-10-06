@@ -14,8 +14,7 @@ from pathlib import Path
 from typing import Any
 
 # 把**仓库根**加入 Python 路径，使 `import python_sidecar.backend.*` 可解析。
-# 本文件在 python_sidecar/main.py，故 parents[1] 即仓库根 —— 这与 2026-10-02
-# 之前的布局一致（当时业务代码在仓库根下的 overwatch_drops_miner/）。
+# 本文件在 python_sidecar/main.py，故 parents[1] 即仓库根。
 # PyInstaller 打包后本文件位于冻结的 sys._MEIPASS 根下，parent 逻辑同样成立
 # （onefile 会把整个包打进去并以绝对导入方式解析）。
 _project_root = Path(__file__).resolve().parents[1]
@@ -23,16 +22,24 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 
-# 线程数 / 总连接数上限。与 python_sidecar/backend/config.py 的 validate()
-# （128）以及前端 stores/config.ts 的 MAX_THREAD_COUNT 保持同源。
-# 此前 sidecar 的 _clamp_int 是 256、config.py 是 128、前端是 256：
-# 60 线程 × 3 房间 = 180 能保存成功，启动时才被 validate 拒绝。
-MAX_THREAD_COUNT = 128
+# 线程数 / 总连接数上限（用户决策值 256）。
+# 必须与 python_sidecar/backend/config.py 的 MAX_TOTAL_CONNECTIONS、
+# 前端 stores/config.ts 的 MAX_THREAD_COUNT、ConfigForm.vue 输入框的 max 属性同源。
+# 历史上这四处出现过 128/256 不一致：前端允许填 256、保存也成功，启动时才被
+# config.validate() 拒，而错误文案来自深层调用，用户无法关联因果
+#（默认 60 线程 × 3 房间 = 180，正好落在 128 与 256 之间，最容易触发）。
+# 改这里必须同步另外三处。
+from python_sidecar.backend.config import MAX_TOTAL_CONNECTIONS as MAX_THREAD_COUNT
 
 # 浏览器嗅探会话的用户可见等待上限（秒）。用户在弹出的浏览器里手动登录 /
 # 进直播间，机器做不了，只能等；120s 是 UX 与"来不及操作"之间的折中。
 # Cookie 捕获、房间号、任务ID 三种模式共用，由 _drive_sniff_session 统一使用。
 SNIFF_TIMEOUT_SECONDS = 120.0
+
+# 「自动跳转房间号」打开的起始页：守望先锋电竞 UP 主的空间页。
+# 目标直播间挂在这个空间页上，从这里进直播间比从 B 站主站少好几步点击。
+# 只用于 kind="room"；模式2 从已知房间号直连live.bilibili.com/{room_id}。
+BROWSER_SNIFF_ROOM_START_URL = "https://space.bilibili.com/365902357/"
 
 # 模块级 logger。此前 _add_account 等处用的是函数内的
 # logging.getLogger(__name__) 局部变量，模块并无同名全局 ——
@@ -99,12 +106,21 @@ def _clamp_int(value: Any, default: int, min_val: int, max_val: int) -> int:
         return default
 
 
-def _normalize_task_ids_text(value: Any) -> str:
-    """任务 ID 文本去重 + 稳定排序（用于判断“输入是否真的变了”）"""
-    if value is None:
-        return ""
-    parts = [p.strip() for p in str(value).split(",") if p.strip()]
-    return ",".join(sorted(dict.fromkeys(parts)))
+def _clean_task_ids_text(value: Any) -> str:
+    """任务 ID 文本去重，**保留顺序**。
+
+    绝不能在这里排序：B站掉宝任务 ID 是不透明字符串（实测形如
+    ``6ERAcwloghvp4i00``），字典序排序对它们没有语义，却会把用户刚
+    「自动获取」到的顺序整个打乱 —— 用户点一次「保存配置」就发现 ID 列表
+    变了，误以为配置被换掉。实测 save_config → load_config 往返正是如此：
+    集合相等、顺序被重排。
+
+    排序只允许存在于指纹：后端 utils.task_ids_fingerprint 与前端
+    config.ts 的 taskIdsFingerprint 各自排序，用于判断「是不是同一批任务」。
+    """
+    from python_sidecar.backend.utils import dedupe_task_ids
+
+    return dedupe_task_ids(value)
 
 
 def _safe_error(exc: BaseException) -> str:
@@ -112,8 +128,8 @@ def _safe_error(exc: BaseException) -> str:
 
     两个必须处理的问题：
     1. ``str(TimeoutError())`` 是空串 —— 直接 f-string 进错误消息会让用户
-       看到一个空白提示（第五轮已在 browser_capture 修过同类问题，
-       _refresh_tasks / _claim_rewards 的超时却漏修）。
+       看到一个空白提示（`_browser_capture` 已按此显式给出文案，
+       `_refresh_tasks` / `_claim_rewards` 的超时却漏修）。
     2. httpx 的异常消息常携带完整请求 URL，query 里可能含 csrf/bili_jct
        等会话凭据。仓库已有 client_parts.http.sanitize_exception_text，
        这里统一走它而不是裸 str(e)。
@@ -181,7 +197,7 @@ class PythonSidecar:
         self._event_callbacks = []
         # stdout 是 JSON 协议通道：日志线程与响应线程并发写入必须串行化
         self._stdout_lock = threading.Lock()
-        # S4：命令协程之间、以及与轮询线程之间共享以下状态，逐个加锁
+        # 命令协程之间、以及与轮询线程之间共享以下状态，逐个加锁
         #   _config_lock     _config_data（RLock：保存路径里会嵌套取锁）
         #   _qr_lock         扫码会话 _qr_api/_qr_key
         #   _sniff_lock      浏览器嗅探单会话守卫与线程引用
@@ -191,17 +207,14 @@ class PythonSidecar:
         self._sniff_lock = threading.Lock()
         self._progress_lock = threading.Lock()
         self._init_backend()
-        # 扫码登录会话（跨命令保持一个 HTTP client）
         self._qr_api: Any | None = None
         self._qr_key = ""
-        # 浏览器嗅探会话守卫（Cookie 捕获 / 房间号 / 任务ID 模式2 共用，单会话）
+        # 嗅探守卫是**单会话**的：Cookie 捕获 / 房间号 / 任务ID 模式2
+        # 三者共用，任一进行中时其余都必须被拒
         self._sniff_busy = False
-        # 嗅探会话引用（供 shutdown 时 join）
         self._sniff_cancel_event: threading.Event | None = None
         self._sniff_thread_ref: Any | None = None
-        # 进度值缓存（account_id -> (cur, limit)）
         self._progress_values: dict[str, tuple[float, float]] = {}
-        # 上次已推送的运行状态，用于 account-state-changed 去重
         self._last_running_state: dict[str, bool] = {}
         self._config_file = self._get_config_file()
         self._load_config_file()
@@ -221,11 +234,14 @@ class PythonSidecar:
             print(f"[Sidecar] 后端初始化失败: {e}", file=sys.stderr)
             logger.warning("命令执行失败", exc_info=True)
         finally:
-            # 日志统一走 stderr（stdout 是 JSON IPC 通道，不能被污染）
             self._setup_logging(False)
 
     def _setup_logging(self, verbose: bool) -> None:
-        """初始化/重建日志输出到 stderr，并附带转发到前端的事件 handler"""
+        """初始化/重建日志输出，并附带转发到前端的事件 handler。
+
+        走 stderr 而非 stdout：stdout 是 JSON IPC 通道，日志混进去会让
+        Rust 侧的响应解析错乱。
+        """
         try:
             from python_sidecar.backend.logging_utils import setup_logging
             setup_logging(verbose=verbose, no_color=True)
@@ -259,6 +275,7 @@ class PythonSidecar:
                     room_ids = data.get("room_ids", [])
                     if not room_ids and data.get("rooms_text"):
                         from python_sidecar.backend.utils import parse_room_ids
+
                         try:
                             room_ids = parse_room_ids(str(data.get("rooms_text", "")))
                         except ValueError:
@@ -402,6 +419,7 @@ class PythonSidecar:
             "get_account_status": self._get_account_status,
             "save_config": self._save_config,
             "load_config": self._load_config,
+            "set_verbose": self._set_verbose,
             "qr_login": self._qr_login,
             "qr_poll": self._qr_poll,
             "qr_cancel": self._qr_cancel,
@@ -431,7 +449,7 @@ class PythonSidecar:
             # 里的 request）。写错会让「handler 抛异常」这条路径自身再抛
             # NameError —— 异常处理路径连续失败是最坏的失败模式，且因为
             # 只在异常分支可达而完全没有测试覆盖（由 ruff F821 抓到）。
-            logger.warning("命令处理失败: %s", command, exc_info=True)
+            logger.warning("命令处理失败，%s", command, exc_info=True)
             return {"error": _safe_error(e)}
     
     async def _get_accounts(self, params: dict) -> dict:
@@ -530,7 +548,6 @@ class PythonSidecar:
         if self.miner_manager.is_running(account_id):
             return {"error": "该账号已在挂宝运行中"}
 
-        # 构建配置并校验
         config = self._build_config(account.cookie())
         try:
             config.validate()
@@ -591,7 +608,7 @@ class PythonSidecar:
         if tracker:
             watch_time = int(tracker.elapsed_seconds())
 
-        # 从进度值缓存取 B 站进度（写者是刷新命令协程，读者是状态查询协程）
+        # 写者是刷新命令协程，读者是本状态查询协程，故必须持锁
         with self._progress_lock:
             progress_values = self._progress_values.get(account_id, (0.0, 0.0))
         cur_value, limit_value = progress_values
@@ -633,22 +650,19 @@ class PythonSidecar:
         config = params.get("config", {})
         verbose = bool(config.get("verbose", False))
 
-        # 解析房间号文本
         rooms_text = str(config.get("rooms_text", "")).strip()
         try:
             room_ids = parse_room_ids(rooms_text) if rooms_text else []
         except ValueError as e:
             return {"error": _safe_error(e)}
 
-        # 解析任务 ID 文本（去重 + 稳定排序，避免仅顺序不同的输入被当成变更）
-        task_ids_text = _normalize_task_ids_text(config.get("task_ids_text", ""))
+        # 任务 ID 去重但**保序**：排序只属于指纹，见 _clean_task_ids_text
+        task_ids_text = _clean_task_ids_text(config.get("task_ids_text", ""))
         task_ids = parse_task_ids(task_ids_text) if task_ids_text else []
 
-        # 解析通知 URL 文本
         notify_urls_text = str(config.get("notify_urls_text", "")).strip()
         notify_urls = parse_url_list(notify_urls_text) if notify_urls_text else []
 
-        # 数值字段解析与钳制（越界/非法输入一律回落到默认值）
         thread_count = _clamp_int(config.get("thread_count_text", "60"), 60, 1, MAX_THREAD_COUNT)
         reconnect_delay = _clamp_int(config.get("reconnect_delay_text", "8"), 8, 1, 3600)
         task_interval = _clamp_int(config.get("task_query_interval_text", "30"), 30, 10, 3600)
@@ -665,10 +679,15 @@ class PythonSidecar:
                 "auto_claim_rewards": bool(config.get("auto_claim_rewards", False)),
                 "verbose": verbose,
             }
-        # 详细日志开关保存后立即生效
+        # 勾选后必须立即生效，不能等下次启动
         self._apply_verbose(verbose)
         self._save_config_file()
-        return {}
+        # 直接返回**落盘后的真实值**，而不是让前端再发一次 load_config 回读。
+        # 原实现是 save → load 两趟，且前端用回读结果整体替换本地配置：
+        # 中间任何一次后端钳制/归一化都会静默改掉用户刚填的内容
+        # （实测「自动获取」到的任务 ID 点一次保存就被重排，用户以为配置被换）。
+        # 一趟往返 + 落盘值为唯一真值，从根上消除这个窗口。
+        return await self._load_config({})
 
     async def _load_config(self, params: dict) -> dict:
         """加载配置（含持久化文件）"""
@@ -686,6 +705,18 @@ class PythonSidecar:
             "verbose": data.get("verbose", False),
             "auto_claim_rewards": data.get("auto_claim_rewards", False),
         }
+
+    async def _set_verbose(self, params: dict) -> dict:
+        """即时切换详细日志级别（勾选即生效）。
+
+        此前唯一的生效路径是 save_config，用户勾完复选框看不到任何变化，
+        必须再点一次「保存配置」才知道有没有生效 —— 复选框的可视状态与
+        实际行为脱节，比没有这个开关更误导。这里只改日志级别，不落盘：
+        持久化仍由 save_config 负责，勾选与保存两条路都通向同一状态。
+        """
+        verbose = bool(params.get("verbose", False))
+        self._apply_verbose(verbose)
+        return {}
 
     async def _export_config(self, params: dict) -> dict:
         """导出配置到用户选择的 JSON 文件（含 task_ids）"""
@@ -727,7 +758,6 @@ class PythonSidecar:
             from python_sidecar.backend.browser.config_io import load_config_data, values_from_config_data
             data = load_config_data(path)
             values = values_from_config_data(data)
-            # 解析为内部结构化数据
             from python_sidecar.backend.utils import parse_room_ids, parse_task_ids, parse_url_list
             room_ids = parse_room_ids(values.rooms_text) if values.rooms_text else []
             task_ids = parse_task_ids(values.task_ids_text) if values.task_ids_text else []
@@ -801,7 +831,6 @@ class PythonSidecar:
         if result.status is QrLoginStatus.EXPIRED:
             self._qr_close()
             return {"status": "expired"}
-        # QrLoginStatus.SUCCESS：Cookie 已就绪，会话结束
         cookie = result.cookie
         self._qr_close()
         return {"status": "success", "cookie": cookie}
@@ -881,7 +910,7 @@ class PythonSidecar:
             )
         except (asyncio.TimeoutError, TimeoutError):
             # 必须显式捕获：str(TimeoutError()) 是空串，直接冒泡会让用户
-            # 看到空白错误提示。与第五轮已修的 _browser_capture 同类。
+            # 看到空白错误提示。与 _browser_capture 同类。
             return {"error": "查询任务进度超时（60 秒），请检查网络后重试"}
         finally:
             try:
@@ -889,7 +918,7 @@ class PythonSidecar:
             except Exception:
                 pass
 
-        # 缓存进度值（取 limit_value 最大者）
+        # 多任务 ID 时取目标时长最大的那个作为「整体进度」代表
         if progresses:
             try:
                 best = max(progresses, key=lambda t: float(getattr(t, "limit_value", 0)))
@@ -947,6 +976,12 @@ class PythonSidecar:
                 "reward_name": str(item.reward_name or item.task_name or ""),
                 "success": bool(item.success),
                 "skipped": bool(item.skipped),
+                # status 必须透传：领奖成功时 rewards.py 构造的是
+                # TASK_STATUS_CLAIMED（6），而任务进度缓存不保存检查点状态，
+                # 下次 refresh_tasks 拿回来的仍是「已完成」（3）。前端只能靠
+                # 这个字段当场把徽标改成「已领取」，否则用户领取成功后
+                # 刷新界面又变回「已完成」。
+                "status": int(getattr(item, "status", 0) or 0),
                 "message": str(item.message or ""),
             }
             for item in results
@@ -1080,7 +1115,6 @@ class PythonSidecar:
         if not self._acquire_sniff():
             return {"error": "已有另一个自动获取任务在运行，请稍后再试"}
         cancel_event = threading.Event()
-        # 注册嗅探会话取消事件，shutdown 时 join
         self._register_sniff(cancel_event)
         try:
             from python_sidecar.backend.browser.browser_sniffer import start_browser_sniff
@@ -1249,6 +1283,10 @@ class PythonSidecar:
                 "hint": "已打开浏览器，请在 2 分钟内进入目标直播间",
                 "on_page_url": on_room_url,
                 "finish_on_any": True,
+                # 起始页必须是这个 UP 主的空间页，不是 B站主站：
+                # 从主站出发要用户自己一层层点到直播间，而目标直播间就挂在他
+                # 的空间页上（用户指定）。sniffer 默认值是 www.bilibili.com。
+                "start_url": BROWSER_SNIFF_ROOM_START_URL,
             }
         else:
             from python_sidecar.backend.browser.browser_utils import (
@@ -1357,9 +1395,14 @@ class PythonSidecar:
                 miner.config.task_query_interval_seconds = task_interval
             miner.config.notify_on_task_complete = notify_on_task_complete
             if task_ids != miner.config.task_ids:
-                miner.config.task_ids = task_ids
+                # 必须逐账号复制：上游是单账号，共享 list 无害；本项目多账号
+                # 并行，共用同一个 list 对象时任何原地 append / extend / sort
+                # 都会同时污染所有运行中的 miner。当前全仓对这些字段只读，
+                # 所以还不是现行 bug，但没有任何机制阻止后来者踩。
+                # 代价是每 2s 一次、每账号两个短列表的拷贝，可忽略。
+                miner.config.task_ids = list(task_ids)
             if notify_urls != miner.config.notify_urls:
-                miner.update_notifier(notify_urls)
+                miner.update_notifier(list(notify_urls))
         return {}
 
     async def _detect_browsers(self, params: dict) -> dict:
@@ -1388,13 +1431,11 @@ class PythonSidecar:
                     time.sleep(0.2)
                     continue
 
-                # 全量轮询会话状态
                 states = self.miner_manager.shutdown_states()
                 if not states:
                     time.sleep(0.2)
                     continue
 
-                # 获取当前账号列表（用于判断账号是否已删除）
                 existing_ids = {acc.id for acc in self.account_store.list_accounts()}
 
                 for account_id, state in states.items():
@@ -1406,8 +1447,8 @@ class PythonSidecar:
                     running = state == "running"
                     if result == "stopped":
                         running = False
-                    # 只在状态真正变化时推送。注释说的是「状态变化事件」，但原实现
-                    # 无条件发：shutdown_states() 返回所有会话（含 idle 残留），
+                    # 只在状态真正变化时推送。事件名说的是「状态变化」，无条件发
+                    # 会怎样：shutdown_states() 返回所有会话（含 idle 残留），
                     # 每 200ms 一次 → 257 账号约 1285 事件/秒，每条都是一行
                     # stdout JSON + 一次跨进程 emit + 前端一次查找，纯浪费。
                     if self._last_running_state.get(account_id) == running:
@@ -1418,7 +1459,7 @@ class PythonSidecar:
                         "running": running,
                     })
 
-                # 清理已消失会话的状态记录
+                # 会话被回收后要去掉它的去重记录，否则该表只增不减
                 live = set(states.keys())
                 for gone in [k for k in self._last_running_state if k not in live]:
                     del self._last_running_state[gone]
@@ -1429,6 +1470,9 @@ class PythonSidecar:
             time.sleep(0.2)
 
     async def _check_update(self, params: dict) -> dict:
+        # force 由前端手动按钮传入：启动时的自动检查不传（仍受 update_channel
+        # 门禁，dev 包不去打扰 GitHub API），用户主动点才绕过。
+        force = bool(params.get("force", False))
         try:
             from python_sidecar.backend.browser.update_checker import check_latest_release
             from python_sidecar.backend._version import (
@@ -1439,8 +1483,8 @@ class PythonSidecar:
             )
             # 必须丢到线程里：check_latest_release 是同步 urllib（8s 超时），
             # 直接在事件循环里调会让这 8 秒内所有在途 IPC 都无法响应、
-            # 扫码轮询定时器也不触发。而 App.vue 启动后 3s 就调它，
-            # 正好和用户首次点击（加载配置、拉账号）重叠。
+            # 扫码轮询定时器也不触发。wait_for 的 10s 略大于 urllib 的 8s，
+            # 让「网络慢」表现为 None（无更新）而不是抛超时异常。
             result = await asyncio.wait_for(
                 asyncio.to_thread(
                     check_latest_release,
@@ -1449,6 +1493,7 @@ class PythonSidecar:
                     latest_release_api=LATEST_RELEASE_API,
                     releases_url=RELEASES_URL,
                     timeout=8,
+                    force=force,
                 ),
                 timeout=10.0,
             )
@@ -1467,10 +1512,8 @@ class PythonSidecar:
     async def _shutdown(self, params: dict) -> dict:
         """应用关闭时清理浏览器与 miner 资源"""
         closed = True
-        # 取消扫码会话
         self._qr_close()
-        # 停止所有 miner：原实现从不调 stop_all（该公开 API 在整个
-        # main.py 里零调用），miner 线程只能靠 Rust 的 force_kill 硬杀，
+        # 必须调 stop_all：否则 miner 线程只能靠 Rust 的 force_kill 硬杀，
         # 可能停在心跳中途。让它有机会优雅收尾。
         if self.miner_manager is not None:
             try:
@@ -1540,14 +1583,37 @@ class PythonSidecar:
 async def main():
     """Sidecar 主循环 - 通过 stdin/stdout 与 Tauri 通信
 
-    IPC 并发（S4）：慢命令（浏览器嗅探 120s、领奖 180s）不再阻塞其它命令。
+    IPC 并发：慢命令（浏览器嗅探 120s、领奖 180s）不再阻塞其它命令。
     - stdin 交给独立线程阻塞读取，再用 call_soon_threadsafe 投递回事件循环；
     - 每行请求 create_task 执行，响应回带请求里的 id，供 Rust 侧路由；
     - 仍然只有一个事件循环，扫码会话的 httpx 客户端不会被跨 loop 使用。
     """
-    # 修复 stderr/stdout 中文乱码（stdout 承载 JSON 协议，必须 UTF-8）
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
+    # stdio 编码。两侧都必须显式指定，不能依赖系统区域设置：
+    # Windows 上 Python 默认 stdio 为 gbk + surrogateescape（实测
+    # sys.stdin.encoding == "gbk"），而 Rust 侧用 writeln! 往
+    # stdin 写的是 UTF-8 字节 —— GBK 解码 UTF-8 会静默产生乱码：
+    #   "乐子"    e4 b9 90 e5 ad 90  → 涔愬瓙，不抛异常，无人察觉
+    #   "古风小生" e5 8f a4 e9 a3 8e … → position 4 的 0xa3 是 GBK 非法序列，
+    #                                  被 surrogateescape 兜底成 U+DCA3
+    # 随后 json.loads 忠实保留该代理字符，accounts.py 的 strict UTF-8 落盘
+    # 便抛 UnicodeEncodeError（用户现场日志里的 \udca3 即此字符）。
+    # 也就是说：中文重命名失败与账号库无关，是这条管道在解码时就已损坏。
+    #
+    # errors 必须显式写 "replace"：reconfigure 只改 encoding，
+    # errors 会保留原值 surrogateescape —— 那样代理字符反而能写出裸字节，
+    # Rust 侧按 UTF-8 解析同样失败，且错误更难定位。
+    #
+    # 顺序要求：reconfigure 对已被读取过的流抛 UnsupportedOperation，
+    # 故必须早于 main() 里的任何 stdin 读取。
+    for _stream in (sys.stdin, sys.stdout):
+        try:
+            if _stream is not None and hasattr(_stream, "reconfigure"):
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            # 嵌入式/测试场景下 stdin 可能已被读取（reconfigure 对已读流抛
+            # UnsupportedOperation）或为 None，此时协议通道由调用方保证，
+            # 编码兜底失败不该让 sidecar 起不来
+            pass
 
     # stderr 兜底：release 下主进程是 GUI 子系统（main.rs 的
     # windows_subsystem = "windows"）且 sidecar 以 CREATE_NO_WINDOW 启动，
@@ -1583,18 +1649,19 @@ async def main():
     try:
         await serve_requests(sidecar)
     finally:
-        # poll_stop 之前只创建、从不 set —— 「给轮询加 stop_event 以支持优雅退出」
-        # 这项改动只完成了参数，退出路径一直缺失。靠 daemon 兜底虽不致命，
-        # 但线程会活到进程结束。
+        # 主循环退出时必须 set：_account_poll_loop 的 while 只看 stop_event，
+        # 不 set 它就会一直转到进程结束。join 给 1s 预算而非无限等 ——
+        # 轮询里 poll_shutdown 会等 miner 线程收尾，无限 join 会把 Rust 侧
+        # 的强制回收一起拖住；超时残留由 daemon=True 兜底，不阻塞进程退出。
         poll_stop.set()
         poll_thread.join(timeout=1.0)
 
 
 async def serve_requests(sidecar: PythonSidecar) -> None:
-    """读取 stdin、并发执行命令、按 id 回写响应（S4）。
+    """读取 stdin、并发执行命令、按请求序号回写响应。
 
     - stdin 交给独立线程阻塞读取，再用 call_soon_threadsafe 投递回事件循环；
-    - 每行请求 create_task 执行，响应回带请求里的 id，供 Rust 侧路由；
+    - 每行请求 create_task 执行，响应回带请求里的 rid，供 Rust 侧路由；
     - 始终只有一个事件循环，扫码会话的 httpx 客户端不会被跨 loop 使用。
     """
     loop = asyncio.get_running_loop()
@@ -1608,9 +1675,12 @@ async def serve_requests(sidecar: PythonSidecar) -> None:
             )
         except Exception as e:
             response = {"error": _safe_error(e)}
-        # 回带请求 id，便于 Rust 侧把响应路由到等待中的调用
-        if "id" in request:
-            response = {**response, "id": request["id"]}
+        # 回带请求序号，供Rust 侧把响应路由到等待中的调用。
+        # 键名必须是 rid 而不是 id：id 是**业务字段**（add_account /
+        # rename_account 都返回账号 id），用 id 当信封键会被下面这行覆盖掉，
+        # 调用方拿到的是请求序号（数字）而非账号 id，as_str() 直接失败。
+        if "rid" in request:
+            response = {**response, "rid": request["rid"]}
         # 序列化必须兜底：任何 handler 返回不可序列化对象，或 stdout 已
         # broken pipe 导致 _write_line 抛异常，都会让这一行响应根本没写出去，
         # Rust 侧 rx.recv_timeout 会一直等到 300s 超时，而异常只进 asyncio
@@ -1620,8 +1690,8 @@ async def serve_requests(sidecar: PythonSidecar) -> None:
             sidecar._write_line(sidecar._dumps(response))
         except Exception as e:
             fallback = {"error": f"响应序列化/写出失败: {e}"}
-            if "id" in request:
-                fallback["id"] = request["id"]
+            if "rid" in request:
+                fallback["rid"] = request["rid"]
             try:
                 # allow_nan=False 自身也可能抛（值含 NaN），最后用默认参数兜底
                 sidecar._write_line(json.dumps(fallback, ensure_ascii=False))
@@ -1663,7 +1733,7 @@ async def serve_requests(sidecar: PythonSidecar) -> None:
         except Exception as e:
             print(f"[Sidecar] stdin 读取线程异常: {e}", file=sys.stderr)
         finally:
-            # stdin 关闭（Rust 侧退出）→ 结束主循环
+            # Rust 侧关闭 stdin 即表示它要退出，主循环随之结束
             loop.call_soon_threadsafe(stop_event.set)
 
     threading.Thread(target=reader, daemon=True, name="stdin-reader").start()

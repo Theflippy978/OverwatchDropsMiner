@@ -17,6 +17,7 @@ from python_sidecar.backend.client import (
 from python_sidecar.backend.client_parts.http import sanitize_exception_text
 from python_sidecar.backend.config import MinerConfig
 from python_sidecar.backend.notifier import MultiPlatformNotifier
+from python_sidecar.backend.utils import task_ids_fingerprint
 from python_sidecar.backend.watch_time_tracker import WatchTimeTracker
 
 LOGGER = logging.getLogger(__name__)
@@ -54,12 +55,21 @@ class X25KnWorker:
             str, tuple[int | float, int | float, int]
         ] = {}
         self._notified_completed_ids: set[str] = set()
+        # 当前生效的任务 ID 指纹（已去重排序）。指纹变化即意味着换了
+        # 一批任务，上面两个集合对旧 ID 的记录全部作废，必须清空。
+        self._task_ids_fingerprint: tuple[str, ...] = ()
 
     @property
     def _ctx(self) -> str:
+        """日志前缀。**必须用「中文标签：值」而不是 key=value**：
+        前端 `LogViewer.vue` 的 `FIELD_RE` 只按标签着色，写成
+        `room=23612045 session=xxx` 既不会被着色，也会破坏「标签是稳定
+        契约」这条约定 —— 各条日志的字段数量与含义都不同，前端无法从
+        位置反推含义，标签一改就整体错位。分隔符是全角冒号，值里不含空白。
+        """
         if self.session_id:
-            return f"room={self.room_id} session={self.session_id}"
-        return f"room={self.room_id}"
+            return f"房间号：{self.room_id} 会话：{self.session_id}"
+        return f"房间号：{self.room_id}"
 
     def _log_info(self, message: str, *args: Any, primary_only: bool = False) -> None:
         if primary_only and not self.primary_session:
@@ -91,7 +101,7 @@ class X25KnWorker:
                 # URL 里带 benchmark（服务端下发的 HMAC 根密钥）与 s。
                 # 服务端可控的 message 文本直接进日志还存在 Log Injection。
                 self._log_warning(
-                    "直播间 %s x25Kn 运行异常: %s",
+                    "房间号：%s x25Kn 运行异常，%s",
                     self.room_id,
                     sanitize_exception_text(exc) or repr(exc),
                     primary_only=True,
@@ -136,7 +146,7 @@ class X25KnWorker:
                     # exc_info=True 会让 logging 打出原始异常消息的 traceback，
                     # 因此必须配合 raise_for_status_sanitized 的 from None 才安全。
                     LOGGER.error(
-                        "%s 子任务异常退出: %s",
+                        "%s 子任务异常退出，%s",
                         self._ctx,
                         sanitize_exception_text(exc) or repr(exc),
                         exc_info=exc,
@@ -166,7 +176,7 @@ class X25KnWorker:
                     if self.watch_tracker is not None:
                         self.watch_tracker.resume()
                     self._log_info(
-                        "直播间 %s 观看时长上报已启动",
+                        "房间号：%s 观看时长上报已启动",
                         self.room_id,
                         primary_only=True,
                     )
@@ -176,10 +186,13 @@ class X25KnWorker:
                     if self.watch_tracker is not None:
                         # resume 幂等：多房间共享同一 tracker 时，任一房间的
                         # 一次失败会 pause 时钟，健康房间心跳成功即恢复，
-                        # 避免本地观看估算被无关房间长期冻结（Z-3）。
+                        # 避免本地观看估算被无关房间长期冻结。
                         self.watch_tracker.resume()
                     LOGGER.debug(
-                        "%s x25Kn heartbeat success seq=%s ets=%s interval=%s",
+                        # 中文标签而非 key=value：与 miner.py / miner_manager.py
+                        # 的启动日志同一套契约，前端 FIELD_RE 只认这一组标签。
+                        # seq / ets 是 x25Kn 心跳协议字段，名字不能改，只译标签。
+                        "%s x25Kn heartbeat success 序号：%s ETS：%s 间隔：%ss",
                         self._ctx,
                         session.seq_id,
                         session.ets,
@@ -193,7 +206,7 @@ class X25KnWorker:
                 if self.watch_tracker is not None:
                     self.watch_tracker.pause()
                 self._log_warning(
-                    "直播间 %s 观看时长上报失败[%s]: %s",
+                    "房间号：%s 观看时长上报失败[%s]，%s",
                     self.room_id,
                     type(exc).__name__,
                     detail,
@@ -213,6 +226,23 @@ class X25KnWorker:
         notified_completed_ids = self._notified_completed_ids
         while not self._stop_event.is_set():
             task_ids = self.config.task_ids
+            # 任务选择指纹。掉宝任务 ID 每日不变、只有进度归零，所以
+            # 换了 task_ids 后 Yesterday 的「已通知」集合与「上一帧」快照
+            # 对新的一批 ID 全部不适用；若不清空，当日任务完成时会被
+            # 判成已通知而**静默漏报**，用户只会在没收到通知时才可能察觉。
+            #
+            # 归一化成 tuple 比较：config.task_ids 的顺序与重复项对
+            # 「是不是同一批任务」没有意义，顺序一变就清空会白白丢记账。
+            fingerprint = task_ids_fingerprint(task_ids)
+            if fingerprint != self._task_ids_fingerprint:
+                self._task_ids_fingerprint = fingerprint
+                # 只能 .clear()，不能重新绑定 = {} / = set()：
+                # 上面 last_snapshot / notified_completed_ids 是局部别名，
+                # 重新绑定会让别名与实例字段脱钩，重连后的行为回退成
+                # 「首次见到已完成任务就重复通知」。
+                last_snapshot.clear()
+                notified_completed_ids.clear()
+
             wait_seconds = max(10, self.config.task_query_interval_seconds)
             if not task_ids:
                 try:
@@ -233,7 +263,7 @@ class X25KnWorker:
                         previous = last_snapshot.get(key)
                         # 周期任务（日/周）重置后 cur 归零、status 复位：
                         # 检测「上一帧完成、当前未完成」的迁移并清出去重
-                        # 集合，让第二个周期完成时能再次推送通知（Z-4）。
+                        # 集合，让第二个周期完成时能再次推送通知。
                         if (
                             previous is not None
                             and key in notified_completed_ids
@@ -242,7 +272,7 @@ class X25KnWorker:
                             notified_completed_ids.discard(key)
                         if previous != current:
                             self._log_info(
-                                "任务进度: %s %s/%s",
+                                "任务进度 %s %s/%s",
                                 task.task_name,
                                 task.cur_value,
                                 task.limit_value,
@@ -256,7 +286,7 @@ class X25KnWorker:
                         ):
                             notified_completed_ids.add(key)
                             self._log_info(
-                                "任务完成: %s (%s/%s)",
+                                "任务完成 %s (%s/%s)",
                                 task.task_name,
                                 task.cur_value,
                                 task.limit_value,
@@ -266,7 +296,7 @@ class X25KnWorker:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                LOGGER.debug("查询任务进度失败: %s", exc)
+                LOGGER.debug("查询任务进度失败，%s", exc)
                 wait_seconds = max(10, self.config.reconnect_delay_seconds)
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=wait_seconds)
@@ -279,22 +309,22 @@ class X25KnWorker:
             return
         title = "直播掉宝任务完成"
         body = (
-            f"直播间: {self.room_id}\n"
+            f"房间号：{self.room_id}\n"
             f"任务: {task.task_name}\n"
             f"进度: {task.cur_value}/{task.limit_value}"
         )
         sent = self.notifier.notify(title=title, body=body)
         if sent:
             self._log_info(
-                "已发送通知: %s",
+                "已发送通知，%s",
                 task.task_name,
                 primary_only=True,
             )
 
     def _dispatch_task_complete_notification(self, task: TaskProgress) -> None:
-        # Notification adapters are synchronous and may wait on network
-        # timeouts. A daemon thread keeps them outside the session event loop;
-        # unlike asyncio's default executor, it also cannot delay loop shutdown.
+        # 通知适配器是同步的，且可能一直等网络超时。
+        # 用 daemon 线程把它们挪出会话事件循环；与 asyncio 的默认 executor
+        # 不同，daemon 线程不会拖慢事件循环关闭。
         def deliver() -> None:
             set_current_account(self.account_id)
             try:

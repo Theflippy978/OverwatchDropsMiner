@@ -42,13 +42,29 @@ export interface ProgressValues {
   percent: number;
 }
 
+/**
+ * B站检查点与任务的 status 取值。镜像
+ * python_sidecar/backend/constants.py，改动必须两侧同步。
+ *
+ * 收集在模块顶层而非散落各处：此前 6 这个字面量出现在 4 个文件里，
+ * 任何一处漏改都会让「已完成」与「已领取」的判定漂移，且不会报错。
+ */
+export const TASK_STATUS_PENDING = 0;
+export const TASK_STATUS_COMPLETED = 3;
+export const TASK_STATUS_CLAIMED = 6;
+/** 已完成或已领取。is_completed 为 true 不代表未领取，判定待领必须
+     同时排除 TASK_STATUS_CLAIMED。 */
+export const TASK_STATUS_DONE: ReadonlySet<number> = new Set([
+  TASK_STATUS_COMPLETED,
+  TASK_STATUS_CLAIMED,
+]);
+
 export interface CheckPoint {
   sid: string;
   alias: string;
   status: number;
-  /** 注意：后端 models.py:48 的 status in (3, 6) 含「已领取」，
-      所以 is_completed 为 true 不代表未领取，判定待领必须同时排除
-      status === 6。 */
+  /** 后端按 TASK_STATUS_DONE 判定，即 status 为 3 或 6 都为 true，
+      所以它不代表未领取。 */
   is_completed: boolean;
   cur_value: number;
   limit_value: number;

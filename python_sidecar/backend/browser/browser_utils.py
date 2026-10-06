@@ -10,8 +10,8 @@ def find_browser_binary(name: str) -> str | None:
         paths = [
             r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
             r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-            # 用户级安装（无管理员权限安装时）此前缺失，导致显式
-            # binary_location 落空而可能匹配到架构不匹配的驱动（J-11）
+    # 用户级安装（无管理员权限安装时）此前缺失，导致显式
+    # binary_location 落空而可能匹配到架构不匹配的驱动
             os.path.expandvars(
                 r"%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe"
             ),

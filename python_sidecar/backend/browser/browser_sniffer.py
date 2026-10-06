@@ -212,7 +212,7 @@ def start_browser_sniff(
                     last_exc = exc
                     driver = None
                     browser_type = None
-                    logger.warning("浏览器 %s 启动失败: %s", browser, exc)
+                    logger.warning("浏览器 %s 启动失败，%s", browser, exc)
 
             if driver is None:
                 raise RuntimeError(
@@ -221,7 +221,7 @@ def start_browser_sniff(
                 )
 
             driver.get(start_url or "https://www.bilibili.com/")
-            logger.info("%s（浏览器: %s）", hint, browser_label(browser_type or ""))
+            logger.info("%s（浏览器 %s）", hint, browser_label(browser_type or ""))
 
             cookie_done = False
             net_done = False
@@ -338,7 +338,7 @@ def start_browser_sniff(
         except ImportError as exc:
             on_error("依赖缺失", f"缺少依赖库，请安装后重试: {exc}\n\n")
         except SniffAbortError as exc:
-            logger.error("自动获取终止: %s", exc)
+            logger.error("自动获取终止，%s", exc)
             on_error("错误", str(exc))
         except Exception as exc:
             logger.exception("自动获取失败")

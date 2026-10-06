@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import unicodedata
 
+from python_sidecar.backend.constants import TASK_STATUS_CLAIMED
 from python_sidecar.backend.watch_time_tracker import estimate_remaining_seconds
 
 
@@ -107,7 +108,7 @@ def _progress_bar(percent: int) -> str:
 
 
 def _status_text(item, percent: int) -> str:
-    if getattr(item, "status", None) == 6:
+    if getattr(item, "status", None) == TASK_STATUS_CLAIMED:
         return "✔ 已领取"
     if getattr(item, "is_completed", False):
         return "✔ 完成"
@@ -326,7 +327,7 @@ def format_reward_claim_results(results: list) -> str:
 
         message = clean_reward_message(item.message, item.skipped)
         if item.code is not None and item.code != 0:
-            message = f"{message} (code={item.code})"
+            message = f"{message} （错误码：{item.code}）"
         lines.append(f"[{prefix}] {name}{reward}: {message}")
     return "\n".join(lines)
 

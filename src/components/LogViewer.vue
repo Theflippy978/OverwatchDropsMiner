@@ -1,30 +1,186 @@
 <script setup lang="ts">
-import { ref, watch, nextTick } from "vue";
+import { ref, watch, nextTick, computed } from "vue";
 import { useLogsStore } from "@/stores/logs";
 import { useAccountsStore } from "@/stores/accounts";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
 const logsStore = useLogsStore();
 const accountsStore = useAccountsStore();
 const scrollRef = ref<HTMLElement | null>(null);
-const collapsed = ref(true);
 
+/** 账号 id → 备注名。
+ *
+ * 日志里原本显示 id 前 6 位（如 b34547），用户无法对应到具体账号；
+ * 改显示备注。回退到 id 前 8 位是因为 remark 允许为空。
+ */
+const remarkById = computed(() => {
+  const map = new Map<string, string>();
+  for (const account of accountsStore.accounts) {
+    map.set(account.id, account.remark.trim() || account.id.slice(0, 8));
+  }
+  return map;
+});
+
+function remarkOf(accountId: string): string {
+  return remarkById.value.get(accountId) ?? accountId.slice(0, 8);
+}
+
+/**
+ * 结构化字段的着色规则。
+ *
+ * 后端把关键字段写成「中文标签：值」（见 miner.py / miner_manager.py /
+ * x25kn_worker.py / client_parts/* 的各处日志），这里只按**标签**匹配，
+ * 不依赖句子的词序或标点 —— 后端调整文案时着色不会错位。
+ *
+ * 标签必须逐个列出而不是用 `.+?：` 这类宽松匹配：Cookie、URL、base64 都含
+ * 「=」，宽松匹配会把整段凭据涂成高亮色。
+ *
+ * 值默认在空白与**全角中文标点**处断开（见 VALUE_STOP_CHARS 的说明）：
+ * 旧的 `(\S+)` 只认空白，后端一句 `直播状态：0，计时可能不会增长`
+ * 会把后半句整段染蓝。半角逗号必须留在值里 —— 房间号是
+ * `[23612045,21452505]` 这种紧凑形态。
+ *
+ * 标签表是**跨文件契约**，两侧都有门禁（2026-10-05 起）：
+ * 后端侧 `tests/test_log_field_labels.py` 用 ast 扫全部 sidecar 源码，
+ * 既禁止 `key=value`，也要求「`标签：占位符`」里的标签必须出现在下面这张表里；
+ * 前端侧 `tests/test_ui_regressions.py` 断言本表不含已废弃的同义标签、
+ * 且身份色只给 `账号`。此前只有后端侧有门禁，所以「后端加了标签、
+ * 前端忘了加」会静默不着色，同一个房间号也会因标签不同而颜色不同。
+ */
+const FIELD_LABELS = [
+  "账号",
+  "UID",
+  "房间号",
+  "连接",
+  "线程数",
+  "间隔",
+  "序号",
+  "ETS",
+  "会话",
+  "直播状态",
+  "任务ID",
+  "分区",
+  "父分区",
+  "已用时长",
+  "期望间隔",
+  "实际间隔",
+  "错误码",
+  "任务组数",
+  "领奖任务数",
+  "返回消息",
+] as const;
+
+/**
+ * 值里可以合法出现的字符集：**排除全角中文标点**。
+ *
+ * 为什么不能只按空白断值：后端有一句告警是
+ * `房间号：%s 当前状态非开播 直播状态：%s，计时可能不会增长`，
+ * `0` 后面紧跟全角「，」而没有空格，旧的 `(\S+)` 会把后半整句
+ * 当成「直播状态」的值涂成蓝色 —— 用户看到的是「，计时可能不会增长」
+ * 被错误高亮（2026-10-05 第三次手动验收）。
+ *
+ * **半角 `,` 必须保留**：房间号是 `utils.format_room_ids` 输出的
+ * `[23612045,21452505]`，紧凑形态里的分隔符就是半角逗号。
+ */
+const VALUE_STOP_CHARS = "，。；、！？";
+
+/** 值本身是自由文本、允许含标点的标签。
+ *  `账号` 的值是 B 站昵称（用户起的名字，可能带逗号），
+ *  `返回消息` 的值是 B 站返回的整句话 —— 这两个用 `\S+` 到空白为止，
+ *  其余标签一律在中文标点处断开。 */
+const FREE_TEXT_LABELS = new Set(["账号", "返回消息"]);
+
+/**
+ * 逐标签生成 alternation。
+ *
+ * **每个分支各带一个捕获组**（值），标签本身用 `match[0]` 切出来。
+ * 不能写成 `(?:标签)：(值)` 之外还指望 `match[1]`：
+ * 正则的组号是按**模式里的位置**编号的，命中第 3 个分支时它的值在
+ * `match[3]`，`match[1]` 是 `undefined` —— 界面上会渲染成
+ * 「undefined：」+ 丢掉整个值（2026-10-05 第四次手动验收）。
+ * 所以取值必须用 `match.slice(1).find(...)` 拿「实际参与了匹配的那个组」。
+ */
+const FIELD_RE = new RegExp(
+  FIELD_LABELS.map((label) =>
+    FREE_TEXT_LABELS.has(label)
+      ? `${label}：(\\S+)`
+      : `${label}：([^\\s${VALUE_STOP_CHARS}]+)`,
+  ).join("|"),
+  "g",
+);
+
+/**
+ * 账号标识类标签：值用 success 绿。
+ *
+ * 这里**只有 `账号`**。曾经还放过 `直播间`，那是错的：
+ * `直播间：` 后面跟的是房间号（miner.py / x25kn_worker.py 的旧用词，
+ * 已统一改成 `房间号`），把它当身份染成绿色会让同一个房间号
+ * 在两条日志里出现两种颜色（2026-10-05 第三次手动验收）。
+ */
+const ACCOUNT_KEYS = new Set(["账号"]);
+
+interface LogSegment {
+  text: string;
+  kind: "plain" | "account" | "value";
+}
+
+function segmentMessage(message: string): LogSegment[] {
+  const segments: LogSegment[] = [];
+  let last = 0;
+  // 正则带 g 标志，必须用 matchAll 或每次重置 lastIndex；
+  // 直接 exec 循环在复用时会跳过匹配
+  for (const match of message.matchAll(FIELD_RE)) {
+    const start = match.index ?? 0;
+    if (start > last) {
+      segments.push({ text: message.slice(last, start), kind: "plain" });
+    }
+    // 标签从 match[0] 切出来，值取「实际参与了匹配的那个组」——
+    // 见 FIELD_RE 上方的注释：组号按模式位置编号，不是按命中的分支。
+    const value = match.slice(1).find((group) => group !== undefined) ?? "";
+    const key = match[0].slice(0, match[0].indexOf("："));
+    // 标签本身用普通色：它是结构提示不是数据，涂成高亮色会让整行都在闪。
+    segments.push({ text: `${key}：`, kind: "plain" });
+    segments.push({ text: value, kind: ACCOUNT_KEYS.has(key) ? "account" : "value" });
+    last = start + match[0].length;
+  }
+  if (last < message.length) {
+    segments.push({ text: message.slice(last), kind: "plain" });
+  }
+  return segments.length > 0 ? segments : [{ text: message, kind: "plain" }];
+}
+
+function segmentClass(kind: LogSegment["kind"]): string {
+  if (kind === "account") return "text-signal-success font-medium";
+  if (kind === "value") return "text-signal-info";
+  return "";
+}
+
+/**
+ * 新日志到达时滚到底。
+ *
+ * 折叠态已取消（2026-10-05），面板常驻可滚动，所以只剩一种情况：
+ * 用户手动往上翻阅历史时，不应该被新日志拽回底部 ——
+ * 靠 atBottom 判定（距底 30px 内才跟随）。
+ */
 watch(
   () => logsStore.filteredLogs.length,
   async () => {
     const el = scrollRef.value;
     if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 30;
-    if (!atBottom) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight > 30) return;
     await nextTick();
     el.scrollTop = el.scrollHeight;
-  }
+  },
 );
 
 function getLevelColor(level: string) {
   // 用语义令牌而非 Tailwind 默认调色板：默认色在浅色主题下白底对比度
   // 只有 1.9~3.8:1，全部不达 WCAG AA（4.5:1），且不随 .dark 变化。
+  //
+  // 这四个 signal-* 类此前根本没生效 —— --color-signal-* 被声明在 :root 而非
+  // @theme，Tailwind v4 不为 :root 里的 --color-* 生成工具类，于是全部静默
+  // 退化成继承色，上面这段对比度结论在当前构建下是假的。已移入 @theme 修好。
   switch (level) {
     case "error":
       return "text-signal-danger";
@@ -34,6 +190,20 @@ function getLevelColor(level: string) {
       return "text-muted-foreground";
     default:
       return "text-foreground";
+  }
+}
+
+/** 等级圆点：给非颜色通道一个快速定位点，长日志里扫读更快 */
+function levelDotClass(level: string) {
+  switch (level) {
+    case "error":
+      return "bg-signal-danger";
+    case "warning":
+      return "bg-signal-warning";
+    case "debug":
+      return "bg-muted-foreground/40";
+    default:
+      return "bg-signal-info/70";
   }
 }
 
@@ -52,20 +222,19 @@ function handleClear() {
 </script>
 
 <template>
-  <!-- 卡片内边距对齐旧版 main_layout.py:268 的 setContentsMargins(18, 8, 18, 14)；
-       不要加 h-full：本卡在右列滚动容器内，height:100% 会向下冲出 main 造成底部空白 -->
-  <Card class="card-hover">
-    <CardHeader class="px-[18px] pb-2 pt-2">
+  <!-- 卡片内边距 18/8/18/14，对齐 Qt 时代的日志面板。
+       Card 是 `flex flex-col`、CardContent 是 `flex-1` 的列容器 ——
+       右列网格第 3 行是 `1fr`，日志卡必须自己把高度撑满，
+       日志面板才能吃到窗口的全部剩余高度（否则空白留在卡外）。
+       这与「不要加 h-full」不矛盾：h-full 是相对 main 全文高度（会冲出
+       main），这里要的是「占满本卡被分配到的高度」，由 flex 链给出。 -->
+  <Card class="card-hover flex min-h-0 flex-col">
+    <!-- 卡头是 shrink-0：高度固定，日志面板的伸缩全部由下方内容区承担。
+         面板此前的 translateY(-8px) 已删，那个 transform 会与卡头下内边距
+         抵消成「零间距」，让「全部账号」的下边框与面板上边框叠在一起。 -->
+    <CardHeader class="shrink-0 px-[18px] pb-2 pt-2">
       <div class="flex items-center justify-between gap-2">
-        <!-- 标题即折叠开关（对齐旧版左上角折叠按钮） -->
-        <button
-          :aria-expanded="!collapsed"
-          aria-controls="log-panel"
-          class="text-left text-[11pt] font-bold text-foreground transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          @click="collapsed = !collapsed"
-        >
-          {{ collapsed ? "展开运行日志" : "收起运行日志" }}
-        </button>
+        <CardTitle class="text-[11pt] font-bold">运行日志</CardTitle>
         <div class="flex items-center gap-2">
           <select
             id="log-account-filter"
@@ -94,42 +263,60 @@ function handleClear() {
         </div>
       </div>
     </CardHeader>
-    <CardContent class="px-[18px] pb-3.5 pt-0">
-      <!-- 展开高度对齐旧版 log_text（main_layout.py:286-287）：min-height 140 + 固定可视高度。
-           边框/底色/内边距只放在展开态：border-box 下 height:0 仍会被 padding 撑到
-           padding 之和（实测 12px），折叠时必须连 padding 一起清零。
-           折叠用 hidden（display:none）而非 opacity-0：后者只影响视觉，DOM 里
-           最多 5000 条日志仍在无障碍树中，折叠后读屏会继续逐条朗读。
+    <!-- min-h-0：flex 项目的 `min-height: auto` 会解析成内容高度，
+         不写它日志面板就拿不到 flex 高度，超长时不内部滚动而是把卡片顶高
+         （与 TaskProgress 的 CardContent 同一个道理）。 -->
+    <CardContent class="flex min-h-0 flex-1 flex-col px-[18px] pb-3.5 pt-0">
+      <!-- 日志面板吃掉卡内全部剩余高度（`.log-panel` 的 flex: 1），
+           始终可滚动。折叠态已在 2026-10-05 取消：右列把剩余高度给了日志，
+           「只有两行高」的折叠语义会让空白重新出现在卡外，
+           而满高可滚动的日志区在任何窗口高度下都没有空白。
 
-           高度用 min(220px, 30vh) 而非固定 220px：日志卡在右列 flex 流里与
-           TaskProgress 争抢空间，固定高度在小窗口下会把挂宝进度压到 min-h 之下，
-           连带把「自动领取 / 领取奖励 / 手动刷新」那一行挤出去。vh 下限保证
-           窗口再小也留得住上方卡片。 -->
+           不要加 h-full：那是相对 main 全文高度、会向下冲出 main。
+           高度来源唯一是 `.log-panel` 的 flex 链，Tailwind 不再参与。 -->
       <div
-        v-show="!collapsed"
         id="log-panel"
         ref="scrollRef"
-        class="log-panel overflow-y-auto rounded-md border border-input bg-input/40 p-1.5"
-        :class="collapsed ? 'h-0 min-h-0' : 'h-[min(220px,30vh)] min-h-[120px]'"
+        class="log-panel min-h-0 flex-1 overflow-y-auto rounded-md border border-input bg-input/40"
       >
-        <div v-if="logsStore.filteredLogs.length === 0" class="py-8 text-center text-sm text-muted-foreground">
+        <!-- 空态用 absolute inset-0 撑满面板再 flex 居中。
+             原先靠 `py-8` 撑高度：内容 84px 被折叠态的 56px max-height
+             从底部裁掉，看起来既没水平居中也没垂直居中。
+             面板高度现在由 CSS 的 min-height 兜底（见 style.css 的
+             .log-panel），这里不再需要任何 py-*。 -->
+        <div
+          v-if="logsStore.filteredLogs.length === 0"
+          class="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground"
+        >
           暂无日志
         </div>
-        <div v-else class="space-y-1 font-mono text-xs">
+        <div v-else class="space-y-0.5 p-1.5 font-mono text-xs">
           <div
             v-for="log in logsStore.filteredLogs"
             :key="log.seq"
-            class="flex gap-2"
+            class="flex min-h-[var(--log-row-h)] items-center gap-2 rounded px-1
+                   leading-[var(--log-row-h)] hover:bg-accent/40"
           >
-            <span class="shrink-0 text-muted-foreground">{{ formatTime(log.timestamp) }}</span>
+            <span class="shrink-0 tabular-nums text-muted-foreground/80">
+              {{ formatTime(log.timestamp) }}
+            </span>
             <span
               v-if="log.account_id"
-              class="shrink-0 text-signal-info"
+              class="shrink-0 font-medium text-signal-success"
             >
-              [{{ log.account_id.slice(0, 6) }}]
+              {{ remarkOf(log.account_id) }}
             </span>
-            <span :class="getLevelColor(log.level)">
-              {{ log.message }}
+            <!-- 等级用色块而不是纯文字色：等级信息不该只靠颜色传达，
+                 但色块本身也提供了非颜色的视觉锚点 -->
+            <span
+              class="h-1.5 w-1.5 shrink-0 rounded-full"
+              :class="levelDotClass(log.level)"
+              aria-hidden="true"
+            />
+            <span :class="getLevelColor(log.level)" class="min-w-0 break-all">
+              <template v-for="(seg, i) in segmentMessage(log.message)" :key="i">
+                <span :class="segmentClass(seg.kind)">{{ seg.text }}</span>
+              </template>
             </span>
           </div>
         </div>

@@ -39,8 +39,17 @@ def _is_newer_version(latest: str, current: str) -> bool:
     return latest_key != current_key
 
 
-def should_check_update(app_version: str, update_channel: str) -> bool:
-    if update_channel != "release":
+def should_check_update(
+    app_version: str, update_channel: str, *, force: bool = False
+) -> bool:
+    """是否应该发起更新检查。
+
+    ``force`` 只跳过 update_channel 这道门禁，**不**跳过版本号本身的校验：
+    手动点「检查更新」时必须真的去查远端（否则本地包里这个按钮是死的），
+    但形如 ``dev-abcdef`` / ``0.0.0+dev`` 的开发版版本号在任何模式下都不参与
+    比较 —— 拿它去比远端 release 只会得到「有新版」这种无意义的结论。
+    """
+    if not force and update_channel != "release":
         return False
     current_version = normalize_version(app_version)
     # 用包含判断：形如 "0.0.0+dev" 的版本串 normalize 后不以 dev 开头，startswith 会失效
@@ -69,8 +78,9 @@ def check_latest_release(
     latest_release_api: str,
     releases_url: str,
     timeout: float = 8,
+    force: bool = False,
 ) -> UpdateCheckResult | None:
-    if not should_check_update(app_version, update_channel):
+    if not should_check_update(app_version, update_channel, force=force):
         return None
 
     try:

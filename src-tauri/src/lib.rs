@@ -52,6 +52,7 @@ pub fn run() {
             commands::get_account_status,
             commands::save_config,
             commands::load_config,
+            commands::set_verbose,
             commands::qr_login,
             commands::qr_poll,
             commands::qr_cancel,

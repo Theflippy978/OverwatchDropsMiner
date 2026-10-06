@@ -20,6 +20,10 @@ const props = defineProps<{
   loading?: boolean;
   /** 单按钮提示场景可隐藏取消按钮（例如“无法关闭”提示） */
   showCancel?: boolean;
+  /** 操作失败的原因。确认类操作失败时提示必须显示在框内：
+      弹窗打开期间页面上的错误条被全屏遮罩盖住，用户看不到任何反馈，
+      只会认为程序卡死或按钮没生效。 */
+  error?: string;
 }>();
 
 const emit = defineEmits<{
@@ -52,6 +56,14 @@ const confirmButtonVariant = computed(() => props.variant ?? "default");
         <DialogTitle>{{ title }}</DialogTitle>
         <DialogDescription>{{ message }}</DialogDescription>
       </DialogHeader>
+
+      <p
+        v-if="error"
+        class="break-all text-sm text-signal-danger"
+        role="alert"
+      >
+        {{ error }}
+      </p>
 
       <DialogFooter>
         <Button

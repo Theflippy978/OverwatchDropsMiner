@@ -35,11 +35,15 @@ LEVEL_LABEL = {
 
 class PrettyFormatter(logging.Formatter):
     def __init__(self, *, verbose: bool, use_color: bool) -> None:
+        # 不带 %(asctime)s：前端 LogViewer 已为每条日志渲染时间戳，
+        # 两边都带会让每行出现两个时间（"13:58:33 [b34547] 13:58:33 | ..."），
+        # 读起来像重复刷屏。时间统一由前端渲染，Rust 侧事件与 sidecar 日志
+        # 因此格式一致。代价是复制粘贴的日志不再含时间戳（用户已确认接受）。
         if verbose:
-            fmt = "%(asctime)s | %(levelname)s | %(threadName)-18s | %(name)s:%(lineno)d | %(message)s"
+            fmt = "%(levelname)s | %(threadName)-18s | %(name)s:%(lineno)d | %(message)s"
         else:
-            fmt = "%(asctime)s | %(message)s"
-        super().__init__(fmt=fmt, datefmt="%H:%M:%S")
+            fmt = "%(levelname)s | %(message)s"
+        super().__init__(fmt=fmt)
         self.use_color = use_color
 
     def format(self, record: logging.LogRecord) -> str:

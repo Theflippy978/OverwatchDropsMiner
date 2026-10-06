@@ -99,11 +99,11 @@ def live_trace_session_from_enter_payload(
     secret_rule = [int(item) for item in secret_rule_raw]
 
     if not secret_key or not secret_rule:
-        raise ValueError(f"x25Kn/E 返回缺少签名参数 room_id={room.room_id}")
+        raise ValueError(f"x25Kn/E 返回缺少签名参数 房间号：{room.room_id}")
     if heartbeat_interval <= 0:
         heartbeat_interval = 60
     if ets <= 0:
-        raise ValueError(f"x25Kn/E 返回 timestamp 无效 room_id={room.room_id}")
+        raise ValueError(f"x25Kn/E 返回 timestamp 无效 房间号：{room.room_id}")
 
     return LiveTraceSession(
         room_id=room.room_id,

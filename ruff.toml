@@ -1,16 +1,16 @@
-# ruff 配置（2026-10-02 新增）
+# ruff 是本项目唯一的 Python 静态门禁。它与测试互补：未定义名（F821）
+# 这类错误只在异常路径上可达，测试正常时永远碰不到，而一旦触发就会在
+# 异常处理里二次抛异常，把真实错误盖掉。
 #
-# 此前全仓库零 lint 配置，唯一静态门禁是前端的 vue-tsc。它结构上抓不到
-# Python 侧问题 —— 本文件首次启用时立刻抓出两个真 bug：
+# 本文件首次启用时立刻抓出两个真 bug：
 #   * python_sidecar/main.py 有 8 处 `logger.xxx()`，但模块并无同名全局
-#     （原先只有函数内的局部 logger），全部位于 except 分支 → 异常处理
-#     路径自身会抛 NameError；
+#     （原先只有函数内的局部 logger），全部位于 except 分支；
 #   * 同文件 handle_command 的 except 分支引用了不存在的 `request`
 #     （形参名是 command）—— 只在 handler 抛异常时可达，故零测试覆盖。
 
 target-version = "py312"
 line-length = 100
-# 与仓库实际布局一致：src 侧根目录是两个 Python 包 + sidecar + tests
+# python_sidecar/ 是唯一的 Python 源码目录，其余都是产物或外部依赖
 exclude = [
     ".recycle",
     ".ptmp",
@@ -21,7 +21,7 @@ exclude = [
 ]
 
 [lint]
-# 首轮只开「确定性最高」的规则集，避免一次性引入数百条风格告警而无法落地。
+# 只开「确定性最高」的规则集，避免一次性引入数百条风格告警而无法落地。
 # 分级说明：
 #   F    pyflakes：未定义名（F821）、未用导入、f-string 缺占位符等 —— 必须为 0
 #   E9   运行时错误：语法/缩进错误 —— 必须为 0

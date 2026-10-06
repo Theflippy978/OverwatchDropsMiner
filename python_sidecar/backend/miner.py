@@ -13,6 +13,7 @@ from python_sidecar.backend.account_log_context import (
 from python_sidecar.backend.client import BilibiliClient
 from python_sidecar.backend.config import MinerConfig
 from python_sidecar.backend.notifier import MultiPlatformNotifier
+from python_sidecar.backend.utils import format_room_ids
 from python_sidecar.backend.watch_time_tracker import WatchTimeTracker
 from python_sidecar.backend.x25kn_worker import X25KnWorker
 
@@ -68,7 +69,8 @@ class BilibiliWatchTimeMiner:
             await client.close()
 
     async def _thread_loop(self, plan: SessionPlan, thread_index: int) -> None:
-        # 1s stagger is the bench-verified floor under 128 threads: 0.5s triggers server throttle, 0.75s exhausts local proxy.
+        # 1s 错峰是 128 线程下实测出的下限：0.5s 会触发服务端限流，
+        # 0.75s 会打满本地代理。线程上限改了这里要重新压测。
         if thread_index > 1 and await asyncio.to_thread(
             self._stop_event.wait, (thread_index - 1) * 1
         ):
@@ -78,9 +80,8 @@ class BilibiliWatchTimeMiner:
 
         client = BilibiliClient(self.config.cookie)
         with self._clients_lock:
-            # The Cookie may have changed while this client was being built.
-            # Registration and updates share this lock, so calibrate against
-            # the latest committed Cookie before publishing the client.
+            # 建 client 期间配置里的 Cookie 可能已被热更新。
+            # 注册与更新共用这把锁，所以在登记进列表前对齐到最新的 Cookie。
             client.update_cookie(self.config.cookie)
             self._clients.append(client)
 
@@ -94,7 +95,7 @@ class BilibiliWatchTimeMiner:
                     # 首次获取 uid 失败只终结当前连接，不触发全局停机，
                     # 其余房间的连接应继续正常运行。
                     LOGGER.error(
-                        "直播间 %s 连接 #%s 获取用户信息失败，本次连接退出: %s",
+                        "房间号：%s 连接：#%s 获取用户信息失败，本次连接退出，%s",
                         plan.room_id,
                         plan.session_no,
                         exc,
@@ -103,7 +104,7 @@ class BilibiliWatchTimeMiner:
                 if uid is None:
                     # uid 获取失败时直接退出，避免以 uid=0 启动 worker。
                     LOGGER.error(
-                        "直播间 %s 连接 #%s 获取用户信息返回空 UID，本次连接退出",
+                        "房间号：%s 连接：#%s 获取用户信息返回空 UID，本次连接退出",
                         plan.room_id,
                         plan.session_no,
                     )
@@ -129,7 +130,7 @@ class BilibiliWatchTimeMiner:
             # 每连接一条会让 INFO 日志量等于线程数（60 线程就是 60 条），普通用户
             # 看不过来。降为 DEBUG：上方「开始运行: 房间 X，每房间 N 个连接」
             # 已经概括了总量，详细日志模式仍能在这里看到每条明细。
-            LOGGER.debug("直播间 %s 连接 #%s 已启动", plan.room_id, plan.session_no)
+            LOGGER.debug("房间号：%s 连接：#%s 已启动", plan.room_id, plan.session_no)
 
             while not self._stop_event.is_set():
                 if await asyncio.to_thread(self._stop_event.wait, 1):
@@ -140,7 +141,7 @@ class BilibiliWatchTimeMiner:
                     await worker.stop()
                 except Exception:
                     LOGGER.debug(
-                        "停止 worker 失败 room=%s session=%s",
+                        "停止 worker 失败 房间号：%s 会话：%s",
                         plan.room_id,
                         plan.session_no,
                         exc_info=True,
@@ -158,7 +159,7 @@ class BilibiliWatchTimeMiner:
                 await client.close()
             except Exception:
                 LOGGER.debug(
-                    "关闭 HTTP client 失败 room=%s session=%s",
+                    "关闭 HTTP client 失败 房间号：%s 会话：%s",
                     plan.room_id,
                     plan.session_no,
                     exc_info=True,
@@ -172,16 +173,35 @@ class BilibiliWatchTimeMiner:
             # 意外异常只终结当前连接线程，不设置全局停止事件，
             # 其余连接与主循环不受影响；主循环检测到全部线程
             # 退出后会自然收尾。
-            LOGGER.exception("直播间连接异常退出")
+            LOGGER.exception("房间号连接异常退出")
         finally:
             clear_current_account()
 
     def run(self) -> None:
+        """启动本账号的挂宝会话，并全程绑定账号身份。
+
+        账号身份必须覆盖整个 run 而不只是连接线程：`set_current_account`
+        用的是 ``threading.local()``，原本只在 ``_thread_entry`` 里调用，
+        于是本方法里这些日志的 ``account_id`` 全是 None——
+        「登录成功」「开始运行」「任务追踪已开启」以及看门狗的复检告警。
+
+        前端按 account_id 过滤日志，None 的行既无法归到任何账号，
+        切到该账号时看不到启动过程（「日志显示一半」），而在「全部账号」
+        视图下又与所有账号的日志混在一起。归属缺失同时让需求 18
+        要求的「在 INFO 后标注运行账号」在这几条上无从显示。
+        """
+        set_current_account(self._account_id)
+        try:
+            self._run_impl()
+        finally:
+            clear_current_account()
+
+    def _run_impl(self) -> None:
         self._stop_event.clear()
         self._force_stop_requested = False
         self._login_invalidated.clear()
 
-        # 启动探测带一次重试并对异常给出明确文案（D-12）：瞬时网络错误
+        # 启动探测带一次重试并对异常给出明确文案：瞬时网络错误
         # 不应被上层 catch-all 降格为 "worker crashed"，让用户无法区分
         # 是网络抖动还是 Cookie 失效。
         uid: int | None = None
@@ -201,23 +221,25 @@ class BilibiliWatchTimeMiner:
                     time.sleep(1.0)
         if probe_error is not None:
             raise RuntimeError(
-                f"启动登录检测失败，请检查网络后重试：{probe_error}"
+                f"启动登录检测失败，请检查网络后重试，错误为 {probe_error}"
             ) from probe_error
         self._uid = uid
         if uid is None:
             self._login_invalidated.set()
             raise RuntimeError("Cookie 已失效，无法启动")
-        LOGGER.info("登录成功: %s (UID: %s)", uname, uid)
+        # 这几行的字段用「中文标签：值」输出，供前端按语义着色。理由见
+        # miner_manager 的「挂宝已启动」注释：标签是稳定契约。
+        LOGGER.info("登录成功 账号：%s UID：%s", uname, uid)
 
         plans = self._build_session_plans()
         LOGGER.info(
-            "开始运行: 房间 %s，每房间 %s 个连接",
-            self.config.room_ids,
+            "开始运行 房间号：%s 线程数：%s",
+            format_room_ids(self.config.room_ids),
             self.config.thread_count,
         )
         if self.config.task_ids:
             LOGGER.info(
-                "任务追踪已开启，每 %s 秒查询一次",
+                "任务追踪已开启 间隔：%ss",
                 self.config.task_query_interval_seconds,
             )
         else:
@@ -252,7 +274,7 @@ class BilibiliWatchTimeMiner:
                         finally:
                             loop.close()
                     except Exception as exc:
-                        LOGGER.warning("登录状态复检失败，将稍后重试: %s", exc)
+                        LOGGER.warning("登录状态复检失败，将稍后重试，%s", exc)
                     else:
                         if checked_uid is None:
                             LOGGER.error("Cookie 已失效，正在自动停止")
@@ -276,8 +298,8 @@ class BilibiliWatchTimeMiner:
         finally:
             self.stop(force=self._force_stop_requested)
             join_timeout = 1.2 if self._force_stop_requested else 3.0
-            # 收尾等待设总上限（J-5）：极端情况下个别连接线程 hang 死时，
-            # 无限等待会让 GUI 永远显示"运行中"；超时后放弃等待并明确告警，
+            # 收尾等待设总上限：极端情况下个别连接线程 hang 死时，
+            # 无限等待会让 GUI 永远显示「运行中」；超时后放弃等待并明确告警，
             # daemon 线程随进程退出（GUI 侧 poll 会把会话标记为 stopped）。
             join_deadline = time.monotonic() + (
                 8.0 if self._force_stop_requested else 20.0
@@ -294,9 +316,9 @@ class BilibiliWatchTimeMiner:
                     gave_up = True
                     break
 
-                # Keep the miner's owner thread alive until every session has
-                # released its client and event loop. The GUI polls this owner
-                # thread, so these short joins never block the GUI thread.
+                # 必须让持有者线程活到所有会话都释放 client 与事件循环。
+                # GUI 轮询的是这个持有者线程，所以这些 0.2s 的短 join
+                # 不会阻塞 GUI 线程。
                 for thread in alive_threads:
                     thread.join(timeout=0.2)
 
@@ -308,7 +330,7 @@ class BilibiliWatchTimeMiner:
                         preview = ", ".join(alive_names[:5])
                         if len(alive_names) > 5:
                             preview += f" ... 共 {len(alive_names)} 个"
-                        LOGGER.warning("停止未完成，仍有线程未退出: %s", preview)
+                        LOGGER.warning("停止未完成，仍有线程未退出，%s", preview)
                     next_warning_at = time.monotonic() + join_timeout
 
             if gave_up:
@@ -317,7 +339,7 @@ class BilibiliWatchTimeMiner:
                 ]
                 LOGGER.error(
                     "等待 %s 秒后仍有 %s 个连接线程未退出，放弃等待并继续收尾，"
-                    "这些线程将在进程退出时结束: %s",
+                    "这些线程将在进程退出时结束，%s",
                     8.0 if self._force_stop_requested else 20.0,
                     len(stuck_names),
                     ", ".join(stuck_names[:5]),
@@ -330,7 +352,7 @@ class BilibiliWatchTimeMiner:
                 self._clients.clear()
 
     def stop(self, *, force: bool = False) -> None:
-        # Keep GUI compatibility: force flag is accepted and can tighten join budget.
+        # force 不改变停止语义，只让收尾阶段用更短的 join 预算
         if force:
             self._force_stop_requested = True
         self._stop_event.set()

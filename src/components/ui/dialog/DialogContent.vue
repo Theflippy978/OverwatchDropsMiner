@@ -38,7 +38,13 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits)
       v-bind="forwarded"
       :class="
         cn(
-          'fixed left-1/2 top-1/2 z-50 grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg',
+          // 进场只做「从中心淡入 + 轻微放大」，不做位移。
+          // 原来的 slide-in-from-left-1/2 配 slide-in-from-top-[48%]
+          // 会把弹窗从左上角斜滑进来 —— 终点虽是中心，视觉上却像
+          // 从窗口左上角飞过去，与「点按钮弹出对话框」的直觉相反。
+          // 位移还叠加了 -translate-x-1/2 的定位补偿，两者相加后
+          // 起点偏移量难以准确预测，改文案时极易调不准。
+          'fixed left-1/2 top-1/2 z-50 grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 sm:rounded-lg',
           props.class,
         )"
     >

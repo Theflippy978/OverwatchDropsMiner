@@ -9,14 +9,14 @@ from typing import Any
 import httpx
 
 # URL 查询串中的会话敏感参数：出现在 httpx 异常消息里的完整 URL 必须
-# 打码后再进入日志/GUI（修复 Z-1 凭据泄漏面）。
+# 打码后再进入日志/GUI。
 #
-# ★ benchmark 必须在内（2026-10-02 补）：x25Kn 的 live_trace.py:141 把它作为
+# ★ benchmark 最要紧：x25Kn 的 client_parts/live_trace.py 把它作为
 #   「benchmark」查询参数下发，而它是服务端给的 **HMAC 签名根密钥**
 #   （同响应里的 secret_rule 也是）。拿到它可以离线伪造任意 seq_id 的
 #   x25Kn 心跳，即伪造观看时长 —— 这是本项目最核心的业务资产。
-#   原先只匹配 csrf/bili_jct/access_key/token/sessdata 五个 B 站参数，
-#   漏了它，于是该密钥会经 httpx 异常消息 → 前端 LogHandler →
+#   只匹配 csrf/bili_jct/access_key/token/sessdata 五个 B 站参数是不够的：
+#   漏了它，该密钥会经 httpx 异常消息 → 前端 LogHandler →
 #   log-entry 事件 → WebView 渲染树 全链路明文可见。
 #   （企业微信 corpsecret 不走这里，见 notifier.py —— 那边是自行拼 URL）
 _SENSITIVE_PARAM_RE = re.compile(
@@ -82,7 +82,7 @@ async def request_with_transient_retry(
     # 高并发时，x25Kn/live API 偶发 ConnectTimeout/ReadTimeout。
     # 对这类瞬时网络异常做短退避重试，避免单次抖动就打断会话。
     #
-    # 非幂等 POST 的重试口径更紧（D-1）：ConnectTimeout/ConnectError
+    # 非幂等 POST 的重试口径更紧：ConnectTimeout/ConnectError
     # 意味着连接未建立、请求必然未发出，可安全重试；而 ReadTimeout/
     # RemoteProtocolError 表示请求可能已被服务端受理、仅响应丢失，
     # 盲目重试会导致领奖/上报等重复提交——只记录不重试。
@@ -108,7 +108,7 @@ async def request_with_transient_retry(
                 raise
             delay = delays[attempt - 1]
             logger.debug(
-                "%s %s 网络瞬时异常(%s/%s): %s，%.2fs 后重试",
+                "%s %s 网络瞬时异常(%s/%s)，%s，%.2fs 后重试",
                 method,
                 url,
                 attempt,

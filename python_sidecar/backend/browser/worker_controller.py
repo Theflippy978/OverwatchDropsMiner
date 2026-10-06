@@ -20,8 +20,8 @@ PollResult = Literal["no_thread", "running", "stopped"]
 
 class WorkerController:
     def __init__(self, *, auto_force_stop_after_seconds: float = 2.0) -> None:
-        # start 全程持锁（J-1）：虽然当前所有调用都来自 GUI 单线程事件循环，
-        # 锁可以让"检查-创建-启动"序列对未来的跨线程调用保持原子。
+        # start 全程持锁：虽然当前所有调用都来自 GUI 单线程事件循环，
+        # 锁可以让「检查-创建-启动」序列对未来的跨线程调用保持原子。
         self._start_lock = threading.Lock()
         self.worker_thread: threading.Thread | None = None
         self.miner: BilibiliWatchTimeMiner | None = None
@@ -48,8 +48,8 @@ class WorkerController:
         watch_tracker: WatchTimeTracker | None = None,
     ) -> bool:
         with self._start_lock:
-            # A completed worker remains owned until the GUI poll finalizes it.
-            # Do not replace its miner reference in that small window.
+            # 已结束的 worker 在 GUI 轮询收尾完成前仍算「有线程」，
+            # 这个窗口内不能替换它的 miner 引用。
             if self.has_thread:
                 return False
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from python_sidecar.backend.constants import TASK_STATUS_CLAIMED
 from python_sidecar.backend.client_parts.models import (
     MissionRewardClaimResult,
     MissionRewardInfo,
@@ -9,6 +10,9 @@ from python_sidecar.backend.client_parts.models import (
 
 MISSION_RETRY_DELAYS = (0.0, 1.5, 3.0)
 REWARD_CLAIM_INTERVAL_SECONDS = 1.2
+#: 单批并发领取的子任务数。批内并发、批间按 REWARD_CLAIM_INTERVAL_SECONDS
+#: 节流，所以相邻两批的起点间隔不小于该值（限频语义与串行版一致）。
+REWARD_CLAIM_BATCH_SIZE = 4
 
 
 def normalize_task_id(task_id: str) -> str:
@@ -32,7 +36,7 @@ def parse_mission_reward_info(
         # status 缺失时不能默认按 0 处理：0 会被误判为“可领取”并触发无效领取，
         # 这里直接抛错暴露异常的返回结构
         raise ValueError(
-            f"领奖信息缺少 status 字段: task_id={normalized_id}, message={payload.get('message')}"
+            f"领奖信息缺少 status 字段，任务ID：{normalized_id}，返回消息：{payload.get('message')}"
         )
     return MissionRewardInfo(
         task_id=str(data.get("task_id") or normalized_id),
@@ -102,7 +106,7 @@ def reward_claim_result_from_payload(
             task_id=info.task_id,
             task_name=info.task_name,
             reward_name=info.reward_name,
-            status=6,
+            status=TASK_STATUS_CLAIMED,
             message=message,
             success=True,
             skipped=False,

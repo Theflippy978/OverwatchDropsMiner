@@ -1,47 +1,61 @@
-# Python
+# 每条规则都保留历史项：目标目录虽然已清空，但删规则的成本是
+# 「将来真出现同名目录时污染工作区」，保留的成本只是一行注释。
+
+# --- Python ---
 __pycache__/
 *.pyc
-# PyInstaller 中间产物与 Vite 构建产物（约 225MB + 0.7MB）
+# PyInstaller 中间产物与 Vite 构建产物（约 123MB + 0.5MB）
 build/
 dist/
+# PyInstaller 生成的 .spec 会带上本机绝对路径，属机器特定文件
 *.spec.venv/
+# 浏览器抓包产物，含 Cookie 与 token，绝不能入库
 *.har
-# 2026-10-02 精确化：原先是全局 *.exe，过于宽和 —— 会连将来需要入库的
-# 合法 exe（CI 夹具、驱动替身、MSI 工具）一起忽略。改为只忽略产物目录。
+
+# 只忽略产物目录而非全局 *.exe：全局规则会连将来需要入库的合法 exe
+# （CI 夹具、驱动替身、MSI 工具）一起忽略
 *.exe
 !/src-tauri/binaries/.gitkeep
 # 配置目录由 OW_CONFIG_DIR / %APPDATA% 决定，可能出现在任意工作目录，
 # 只忽略根目录那一处不够
 config.json
 **/config.json
+# 早期用过 AGENTS.md 承载开发约定，现已改由 plan.md 承担；
+# 保留规则防止它再次出现在工作区
 AGENTS.md
 .DS_Store
 debug.log
 
-# 测试与 lint 工具缓存
+# --- 测试与 lint 工具缓存 ---
 .pytest_cache/
 .ruff_cache/
 
-# Node.js
+# --- Node.js ---
 node_modules/
 dist/
 # 双锁文件：已统一 pnpm（tauri.conf.json 的 beforeXxx 也改成 pnpm），
 # package-lock.json 已删除，避免解析出两套依赖树
 
-# Rust / Tauri
+# --- Rust / Tauri ---
 target/
 src-tauri/target/
 # tauri build 自动生成的 schema（5232 行），可由 build.rs 重新产出
 src-tauri/gen/schemas/
 
-# 不加入 git
-# docs/ 是本地审阅报告与计划的存放处，不属于交付物。
-# 注意：它与被忽略的 plan.md 不同 —— plan.md 是接手方唯一的设计依据，
-# 由本文件末尾单独列出。
+# --- 不入库：本地开发资产 ---
+#
+# docs/ 是审阅报告与计划，plan.md 是设计依据。两者都是过程材料，
+# 交付物里只应有源码。
 docs/
 plan.md
-# 2026-10-02 清理：该目录（本地模拟回收站，含已删文件的副本）已空，
-# 规则保留以防后续 agent 再次使用该约定时误提交
+
+# tests/ 是本地验证脚手架，不是交付物的一部分。
+# 其中 build-release.ps1 是打包脚本：pnpm tauri build 不会重新打包
+# Python（只编译 Rust 再复制已有的 binaries/*.exe），所以改过
+# python_sidecar/ 后必须用它重打，否则程序仍跑旧 sidecar。
+tests/
+
+# 早期用的本地模拟回收站（已清空）
 .recycle/
 
 # 临时目录（曾出现 .ptmp/、ktmp_*/、probe_*/ 等未忽略的空目录，
@@ -51,5 +65,6 @@ tmp/
 ktmp_*/
 probe_*/
 
-# VS
+
+# --- VS ---
 .vs/
