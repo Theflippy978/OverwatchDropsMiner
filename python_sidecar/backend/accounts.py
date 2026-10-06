@@ -138,7 +138,13 @@ class AccountStore:
                     account = Account.from_dict(item)
                 except Exception:
                     continue
+                # from_dict 只做 str() 强转，不清洗：它也是文件里读出来的入口，
+                # 必须在这里补 sanitize_text，否则下面的「已清洗」日志是假的 ——
+                # 代理字符会一直留在内存里，直到某次落盘被 errors="replace"
+                # 静默替换成 U+FFFD，用户全程看不到任何提示。
+                cleaned = sanitize_text(account.remark)
                 repaired += count_unsafe_chars(account.remark)
+                account.remark = cleaned
                 accounts.append(account)
             self._accounts = accounts
             if repaired:
