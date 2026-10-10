@@ -5,6 +5,34 @@
     <link rel="icon" type="image/x-icon" href="/app.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>守望先锋直播掉宝助手</title>
+    <!-- 挂载前的兜底底色。窗口以 visible:false 创建、由 App.vue 的
+         restoreWindowGeometry().finally(showWindow) 在 onMounted 内显示，
+         所以正常路径下不会看到空白 —— 但这个保证依赖两处代码的相对关系，
+         很脆弱：一旦 show() 提前到挂载之前，用户就会看到一帧纯白。
+
+         **必须用 prefers-color-scheme 而不是 html:not(.dark)**：
+         `.dark` 类由 JS（App.vue 的 applySavedTheme）添加，而这段样式要
+         保护的正是「JS 还没跑」的那一帧 —— 此时 html 上没有任何类，
+         `html:not(.dark)` 恒为真，于是深色分支永远不生效、深色用户照样
+         看到白闪。改用媒体查询后，跟随系统主题的用户（默认配置）首帧
+         就是正确底色。
+
+         已知局限：若系统为深色、用户又在应用内手动选了浅色主题，
+         首帧会是深色再切白（一次性、几十毫秒）。这个代价远小于
+         「深色用户每次启动都白闪」，且该组合下首帧短暂不一致不构成困扰。
+
+         只能写 <style> 不能写 <script>：tauri.conf.json 的 CSP 里
+         style-src 含 'unsafe-inline'，而 script-src 只有 'self'。 -->
+    <style>
+      html {
+        background: #ffffff;
+      }
+      @media (prefers-color-scheme: dark) {
+        html {
+          background: #0a0a0a;
+        }
+      }
+    </style>
   </head>
 
   <body>

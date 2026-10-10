@@ -1,11 +1,14 @@
 @import "tailwindcss";
 
-/* 弹层进出场动画。四个 ui 组件（DialogContent / DialogScrollContent /
-   DropdownMenuContent / DropdownMenuSubContent）都声明了 animate-in /
-   fade-in-0 / zoom-in-95 / slide-in-from-* 这些类，此前从未安装对应插件，
-   产物里一个 @keyframes 都没有 —— 结果所有弹层瞬时出现、瞬时消失，
-   DialogContent 上那句孤零零的 duration-200 也因无对应 animation 而完全无作用。
+/* 弹层进出场动画。三个 ui 组件（DialogContent / DropdownMenuContent /
+   DropdownMenuSubContent）都声明了 animate-in / fade-in-0 / zoom-in-95 /
+   slide-in-from-* 这些类，此前从未安装对应插件，产物里一个 @keyframes
+   都没有 —— 结果所有弹层瞬时出现、瞬时消失，DialogContent 上那句孤零零的
+   duration-200 也因无对应 animation 而完全无作用。
    tw-animate-css 是 TailwindCSS v4 对 tailwindcss-animate 的官方替代。
+
+   （原为「四个 ui 组件」，含 DialogScrollContent —— 该组件全项目零使用，
+   已于本轮删除，故此处同步改为三个。）
 
    注意必须用 @import 而非 @plugin：该包的 exports 只声明了 "style" 条件
    （没有 default/import），而 @plugin 走模块解析，在 Vite 8 下会报
@@ -20,6 +23,14 @@
    （表现为「全项目直角」且无任何控制台线索）。必须保留。 */
 :root {
   --radius: 0.5rem;
+
+  /* 原生控件（下拉列表、数字微调箭头、滚动条）的配色方案。
+     必须在 :root 显式声明 light：否则当**系统是深色**而用户**在应用内
+     切到浅色**时（TitleBar 的太阳图标），页面背景变白，但原生渲染的部分
+     仍按系统偏好渲染成深色 —— LogViewer 的 <select> 展开选项、
+     ConfigForm 三个 number 输入框的上下箭头、各滚动条都会与页面割裂。
+     .dark 块里的 color-scheme: dark 会覆盖它。 */
+  color-scheme: light;
 
   /* 配置卡的标签列宽。
      六个标签行（房间号 / 任务 ID / 通知 URL / 线程数 / 重连延迟(s) / 查询间隔(s)）
@@ -58,6 +69,12 @@
   --color-input: oklch(0.922 0 0);
   --color-ring: oklch(0.708 0 0);
 
+  /* 模态遮罩。此前是硬编码的 bg-black/80 —— 全项目唯一不走语义令牌的
+     颜色（其余 .vue 里 hex/oklch/rgb 字面量零命中）。
+     写成 token 的好处是深色主题可以单独调：纯黑 80% 压在深色页面上时
+     遮罩与背景的明度差远小于浅色主题，弹窗的「浮起」层次会变弱。 */
+  --color-overlay: oklch(0 0 0 / 80%);
+
   /* 语义色。必须声明在 @theme 内 —— Tailwind v4 只为 @theme 里的 --color-*
      生成工具类，写在 :root 里则 text-signal-danger / bg-signal-success 等
      25 处使用全部不生成，静默退化成继承色（错误提示、成功反馈、日志等级
@@ -90,8 +107,13 @@
      折叠态已于 2026-10-05 取消，日志面板常驻满高可滚动；
      这个高度仍然要固定，否则换行的长消息会把行高撑大、
      同一屏能看到的日志行数变得不可预测。
-     用 min-height 而非 height：消息折行时仍能撑开，不会截断文字。 */
-  --log-row-h: 22px;
+     用 min-height 而非 height：消息折行时仍能撑开，不会截断文字。
+
+     24px 而不是原先的 22px：统一到 4px 网格（22 是刻度外的值，
+     且与三张卡内边距的 16px 不成比例）。**这个改动不影响最小窗口
+     高度** —— 日志面板是 flex-1 + min-h-0 的可滚动区，行高变化只会
+     改变「一屏能看到几行」，不会把卡片撑高（卡片高度由右列 1fr 分配）。 */
+  --log-row-h: 24px;
 
   /* 缓动。ease-out 用于「元素进入」（快起慢收，衔接自然）；
      ease-in 用于「元素退出」；ease 用于原地变化（颜色/透明度）。
@@ -123,6 +145,10 @@
   --color-border: oklch(1 0 0 / 10%);
   --color-input: oklch(1 0 0 / 15%);
   --color-ring: oklch(0.556 0 0);
+  /* 深色下遮罩要比浅色更重：纯黑 80% 压在 0.145 亮度的页面上时，
+     遮罩与背景的明度差远小于浅色主题（白底 vs 黑 80%），
+     弹窗的「浮起」层次会明显变弱。提到 85% 让层次回到与浅色相当。 */
+  --color-overlay: oklch(0 0 0 / 85%);
   /* 暗色下需更亮的语义色才达 WCAG AA */
   --color-signal-success: oklch(0.78 0.17 145);
   --color-signal-info: oklch(0.75 0.14 255);
@@ -169,6 +195,72 @@
   }
 }
 
+/* ---- 按压反馈 ----
+   此前全项目零处 :active（grep `active:` 只命中 ConfigForm.vue 的 TS 类型字段），
+   鼠标按下到松开之间没有任何视觉变化 —— 桌面应用里「按下去」的手感完全依赖
+   这一层，只有 hover 会显得按钮是「浮」的。
+
+   为什么用 transform: scale 而不是改背景色：
+   ① scale 不触发布局（只影响绘制与合成层），不会让相邻内容抖动 ——
+      这与本文件「只覆盖不触发布局抖动的属性」的既有约束一致；
+   ② 它是非颜色通道，深色/浅色下表现一致，不需要为两套主题各调一个色值。
+
+   scale(0.97) 的量级：w-16（64px）的启停按钮缩放 3% 是 1.9px 位移，
+   肉眼可辨且不显得「弹」；标题栏 36px 高的窗口键是 1px，几乎无感但足以
+   提供触觉暗示。再大就会让按钮看起来在「呼吸」。
+
+   duration 用 --duration-instant（80ms）：按下必须感觉不到延迟。
+   这正是该 token 的用途（见 @theme 里它的注释）—— 此前它定义了却零使用。
+
+   覆盖范围含 [role="menuitem"]：自绘右键菜单（InputContextMenu）与
+   reka 的下拉菜单项都是 button，但显式写上角色选择器可防止将来有人
+   把它们改成非 button 元素后失去反馈。
+
+   reduced-motion 降级由文件末尾的通配规则统一处理（transition-duration
+   被压到 0.001ms），无需在此重复。
+
+   **绝对不要写进 @layer base（本项目实测踩过）**：CSS 的 @layer 优先级
+   与选择器特异性无关，**后声明的 layer 整体优先**。产物里层顺序是
+   base → components → utilities，而项目所有按钮的基础类都含
+   `transition-colors`（ui/button/index.ts），它在 utilities 层重新声明了
+   `transition-property` 与 `transition-duration` —— 于是本块若放在 base 层，
+   会被 utilities 层整体覆盖，后果是：
+     * `transform` 不在 transition-property 内 → 按下瞬间是**瞬变**而非 80ms 过渡；
+     * 时长变成 .transition-colors 的 0.15s，`--duration-instant` 从未生效。
+   实测（Edge headless + CDP `CSS.forcePseudoState` 强制 :active）：
+     带 transition-colors 的按钮 → transition-property 不含 transform、duration=0.15s
+     不带工具类的裸 button    → transition-property 含 transform（对照）
+   移出 layer 后本块属于**无 layer 的普通声明**，优先级高于任何 @layer，
+   因此能真正生效（选择器特异性 0,1,1 也高于 .transition-colors 的 0,1,0，
+   两层保险）。
+
+   **transition-property 必须写成「按钮上所有可能用到的过渡属性」的超集**：
+   因为本块现在会盖住按钮自带的 transition-* 工具类，漏掉哪个属性，
+   哪个属性的过渡就会消失。逐个核对过本项目按钮上的工具类：
+     * `.transition-colors`（Button 基础类、DropdownMenuItem、InputContextMenu、
+       TitleBar 的检查更新键）→ 需要 color / background-color / border-color；
+     * `.transition-opacity`（DialogClose 的关闭按钮，hover 时 opacity-70 → 100）
+       → **必须含 opacity**。这是第一版漏掉的一项：漏了它关闭按钮的
+       hover 淡入会变成瞬变（已修正）；
+     * `box-shadow`：focus-visible 的 ring 靠它过渡，且 .transition-colors
+       不含它 —— 保留它是**扩大**而非缩小，无副作用。
+   outline-color / text-decoration-color / fill / stroke 一并列出，纯粹为了
+   与 .transition-colors 的定义保持一致（按钮当前用不到，但成本为零，
+   且避免将来有人加 `hover:underline` 时发现下划线不过渡）。 */
+button:not(:disabled),
+[role="menuitem"]:not(:disabled) {
+  transition-property: color, background-color, border-color, outline-color,
+    text-decoration-color, fill, stroke, opacity, box-shadow, transform;
+  transition-duration: var(--duration-fast);
+  transition-timing-function: var(--ease-inout);
+}
+
+button:not(:disabled):active,
+[role="menuitem"]:not(:disabled):active {
+  transform: scale(0.97);
+  transition-duration: var(--duration-instant);
+}
+
 .card-hover {
   transition:
     background-color var(--duration-fast) var(--ease-inout),
@@ -178,6 +270,97 @@
 
 .card-hover:hover {
   border-color: var(--color-ring);
+}
+
+/* ---- 主题切换：View Transitions「圆形揭示」 ----
+   `.dark` 一次性重定义 20+ 个 CSS 变量（背景/前景/卡片/边框/输入框/圆环/
+   四个语义色），受影响元素遍布全树。手写「给全树挂临时 transition」的方案
+   实测反复出问题（见 App.vue 的 applyThemeWithTransition 注释），改用
+   浏览器原生的 View Transitions。
+
+   **⚠ 不能用交叉淡变**（2026-10-10 逐帧实测推翻）：
+   交叉淡变在浅↔深之间会**必然**出现对比度塌陷。两套主题各以 50% 叠加时，
+   背景（浅 #FFF → 深 #1A1A1A）与文字（深 #111 → 浅 #EEE）会在中点相遇：
+       bg ≈ #8C8C8C，text ≈ #7F7F7F → 对比度约 1.03:1
+   实测帧（过渡中 165ms）里整屏变成一片灰糊，按钮文字几乎看不见 ——
+   这正是用户报的「部分字会闪烁」。**数学上无解**：只要背景与前景同时插值，
+   它们必然在某一时刻亮度相等。
+
+   所以改成**揭示**：旧快照原地不动（不淡出），新快照用 clip-path 圆形展开
+   盖在它上面。**每个像素在任一时刻只显示一套主题**，不存在两套半透明叠加，
+   因此不可能出现对比度塌陷。
+   圆心放在标题栏主题按钮附近（右上角）—— 视觉上从「你点的那个按钮」扩散开。
+
+   **不要试图把 transition 常驻在 `*` 上**：那会让所有属性变化都带过渡，
+   包括布局相关属性，与本项目「只覆盖不触发布局抖动的属性」的约束冲突，
+   也会让列表滚动、面板展开发糊。
+
+   ::view-transition-old/new(root) 是浏览器为「文档根快照」自动创建的伪元素。 */
+::view-transition-old(root) {
+  /* **必须显式 animation: none**：UA 默认给 old 一个淡出动画，
+     留着它就又变成交叉淡变了（对比度塌陷会回来）。
+     mix-blend-mode 也要压回 normal —— UA 给 old/new 设的是 plus-lighter，
+     那是给交叉淡变做加法混合用的，揭示不需要。 */
+  animation: none;
+  mix-blend-mode: normal;
+}
+::view-transition-new(root) {
+  animation: vt-reveal var(--duration-normal) var(--ease-inout) both;
+  mix-blend-mode: normal;
+}
+@keyframes vt-reveal {
+  from { clip-path: circle(0% at 88% 4%); }
+  to   { clip-path: circle(150% at 88% 4%); }
+}
+
+/* **过渡期间必须关掉覆盖层的指针事件**（2026-10-10 CDP 实测发现）。
+   实测 `getComputedStyle(document.documentElement, '::view-transition').pointerEvents`
+   是 **`auto`**，不是 `none` —— 于是这 220ms 内整屏覆盖层把点击**全部吃掉**，
+   表现成「切完主题马上点按钮没反应」，手感上就是「卡」。
+
+   `pointer-events` 是**继承属性**，所以在 `::view-transition` 上设一次即可
+   覆盖到 group / image-pair / old / new 整棵伪元素树（实测确认）。
+   关掉后点击穿透到新状态的页面上；新快照与真实 DOM 位置一致，点得准。 */
+::view-transition {
+  pointer-events: none;
+}
+
+/* 减少动效：新快照不做揭示动画。
+   `animation: none` 时它没有 clip-path，直接整幅盖住旧快照 ——
+   效果等价于「瞬时切换」，正是减少动效想要的。
+   （App.vue 里也会走「不调 startViewTransition」的降级分支，这里再兜一层。） */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-new(root) {
+    animation: none !important;
+  }
+}
+/* ---- 骨架屏 ----
+   账号列表加载期间占位（AccountList.vue）。用背景渐变平移做微光，
+   而不是 opacity 闪烁：后者在深色主题下会让整块区域「呼吸」，
+   干扰比前者大得多。
+
+   基色用 --color-muted，高光用 muted 与 muted-foreground 的混合 ——
+   两者都随主题变化，所以浅色/深色下都不需要单独的色值。 */
+@keyframes skeleton-sheen {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.skeleton {
+  background-color: var(--color-muted);
+  background-image: linear-gradient(
+    90deg,
+    transparent 25%,
+    color-mix(in oklab, var(--color-muted-foreground) 22%, transparent) 50%,
+    transparent 75%
+  );
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation: skeleton-sheen 1.4s var(--ease-inout) infinite;
 }
 
 /* 账号列表条目增删的进入/离开过渡。离开比进入略快：
@@ -191,6 +374,24 @@
   transition:
     opacity var(--duration-fast) var(--ease-exit),
     transform var(--duration-fast) var(--ease-exit);
+  /* 离开项必须脱离文档流，否则它在 leave 期间仍占着原来的位置：
+     下面的行被它顶住不动，等它真正移除时才整体上跳 ——
+     用户看到的是「先顿一下，再跳」，而 -move 过渡的起点也因此是错的
+     （它记录的是「离开项已消失后」的位置，与实际渲染位置差一行）。
+     容器需要 position: relative 才能让 left/right 生效，
+     见 AccountList.vue 的 TransitionGroup 上的 relative 类。 */
+  position: absolute;
+  left: 0;
+  right: 0;
+}
+
+/* 位置过渡：兄弟节点增删导致其他行改变位置时，让它们平滑滑到新位置。
+   此前完全没有这条规则，于是那些行是「瞬移」的 —— 这正是
+   「删一个账号，下面几行跳上来」的直接原因。
+   时长用 normal（220ms）：位移是较大范围的空间变化，
+   用 fast（150ms）会显得仓促；缓动沿用 --ease-enter（快起慢收）。 */
+.account-list-move {
+  transition: transform var(--duration-normal) var(--ease-enter);
 }
 
 .account-list-enter-from,
@@ -199,9 +400,52 @@
   transform: translateY(-4px);
 }
 
+/* ---- 账号拖拽排序（SortableJS，forceFallback 模式）----
+   两个类由 AccountList.vue 的 useSortable 选项指定：
+     .account-row-fallback  跟随指针的克隆体（fallbackClass + fallbackOnBody）
+     .account-row-ghost     **被拖的那一行本身**（ghostClass）—— 插入位置高亮线画在它身上
+
+   **用户 2026-10-10 明确要求：不要跟随鼠标的元素、不要半透明。**
+   原实现让克隆体跟着指针跑（`fallbackOnBody` 挂到 body 上），于是它会被拖出
+   账号栏、压在右侧配置卡上 —— 用户原话「账号超出了账号栏不美观」；
+   再叠一层 `opacity: .75` 又显得发虚。
+   现在改成：**克隆体彻底不显示**（`visibility: hidden`），被拖的那一行留在列表里
+   跟着上下走，只靠它身上的「插入位置高亮线」标示落点。
+
+   **为什么用 `visibility: hidden` 而不是 `display: none`**：SortableJS 在 fallback
+   模式下要读克隆体的 `offsetWidth/offsetHeight` 算拖拽阈值，`display:none` 会让
+   这两个值变成 0；`visibility: hidden` **保留盒尺寸**只隐藏绘制，不影响它的计算。 */
+.account-row-fallback {
+  visibility: hidden;
+}
+
+/* 被拖的那一行本身。**必须保留行的外观**：跟随鼠标的克隆体已经不显示了，
+   再把它透明掉，用户就只能看到「一行凭空消失 + 一条线在动」，
+   而不是「这一行在列表里跟着我走」。
+
+   插入位置高亮线用伪元素画，**不要用 border-top**：
+   border 会改变盒高，拖拽过程中整列会跟着上下抖。 */
+.account-row-ghost {
+  position: relative;
+  border-color: var(--color-primary);
+}
+.account-row-ghost::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -2px;
+  height: 2px;
+  border-radius: 1px;
+  background-color: var(--color-primary);
+}
+
 /* ---- 滚动条：全局隐藏但保留滚动能力 ----
-   scrollbar-width 给标准实现、::-webkit-scrollbar 给 Chromium/WebView2，
-   两者必须双写。只写前者时 WebView2 仍会画出 15px 宽的竖条。 */
+   `scrollbar-width: none` 是标准属性，WebView2 152 直接支持。
+   下面的 ::-webkit-scrollbar 规则在标准属性非 auto 时会被忽略
+   （实测结论见 .scroll-subtle 处），此处保留它是**无害的**：
+   两者方向一致（都是隐藏），即使被忽略结果也相同 ——
+   但不要把它当作「双写保险」来依赖，它只是历史遗留的兼容写法。 */
 .scroll-hidden {
   scrollbar-width: none;
   -ms-overflow-style: none;
@@ -214,34 +458,35 @@
 /* ---- 任务区（挂宝进度胶囊）的例外滚动条 ----
    全局隐藏滚动条的规则不适用于这里：胶囊区内容可能远超卡片高度，
    用户需要一个明确的「下面还有」的信号，否则只能盲滚试错。
-   常态 6px / 50% 不透明度，hover 加粗到 10px / 80% —— 平时不抢注意力，
-   需要时又足够醒目。 */
+
+   **只写标准属性，不写 ::-webkit-scrollbar** —— 这不是风格选择，是实测结论：
+   Chromium 121 起规定「scrollbar-width / scrollbar-color 一旦非 auto，
+   ::-webkit-scrollbar 伪元素样式被整体忽略」。本机 WebView2 是 152，
+   用真实 Chromium（Edge 153 headless）实测：
+     * .scroll-subtle 的滚动条实际占宽 = 12px（由 scrollbar-width: thin 决定）；
+     * 强制注入 `.scroll-subtle::-webkit-scrollbar { width: 10px }` 后，
+       占宽仍是 12px —— 完全无变化，证明那批 webkit 规则一条都没生效。
+
+   所以此前那 6 条 ::-webkit-scrollbar 规则（含 `:hover { width: 10px }`）
+   全是死代码，且其中「hover 加粗到 10px」这个承诺从未实现过 ——
+   也因此不存在「hover 变粗把内容挤得抖动」这一现象（曾据此推测过，
+   实测推翻了它）。留着它们会让下一个维护者继续按错误前提改东西。
+
+   现在 hover 反馈改由 scrollbar-color 承担（标准属性，确实生效）：
+   只加深滑块颜色、**不改变宽度**，因此天然不会引起横向位移。 */
 .scroll-subtle {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in oklab, var(--color-muted-foreground) 50%, transparent)
     transparent;
 }
 
-.scroll-subtle::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-.scroll-subtle::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.scroll-subtle::-webkit-scrollbar-thumb {
-  background-color: color-mix(in oklab, var(--color-muted-foreground) 50%, transparent);
-  border-radius: 9999px;
-}
-
-.scroll-subtle:hover::-webkit-scrollbar {
-  width: 10px;
-}
-
-.scroll-subtle:hover::-webkit-scrollbar-thumb {
-  background-color: color-mix(in oklab, var(--color-muted-foreground) 80%, transparent);
+/* hover 只加深颜色，不改变宽度。
+   改宽度会重新分配内容区宽度（属于布局变化），与本项目
+   「只覆盖不触发布局抖动的属性」的既有约束直接冲突；
+   而颜色变化是纯绘制，不会让任何相邻内容位移。 */
+.scroll-subtle:hover {
+  scrollbar-color: color-mix(in oklab, var(--color-muted-foreground) 80%, transparent)
+    transparent;
 }
 
 /* 日志面板：吃掉日志卡的全部剩余高度，常驻可滚动。
@@ -281,6 +526,18 @@
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
-    scroll-behavior: auto !important;
+  }
+
+  /* indeterminate 进度条必须单独处理，不能沿用上面「只播一次」的降级。
+     它的终态是 translateX(400%)（@keyframes progress-indeterminate 的 100%），
+     只播一次会**停在容器外**，而容器是 overflow-hidden ——
+     于是「账号运行中」这条视觉信号在开启减少动效的用户那里彻底消失。
+     这不是「动画被关掉」那么简单：它是一个功能性指示元素不见了。
+
+     改为停在中间偏左的可见位置：既保留「有东西在跑」的静态提示，
+     又完全不产生动效。 */
+  .progress-indeterminate {
+    animation: none !important;
+    transform: translateX(33%) !important;
   }
 }

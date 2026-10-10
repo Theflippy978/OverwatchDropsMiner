@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, onUnmounted } from "vue";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { useTasksStore } from "@/stores/tasks";
 import { useAccountsStore } from "@/stores/accounts";
 import { useConfigStore } from "@/stores/config";
+import { useLogsStore } from "@/stores/logs";
 import { useTimedNotice } from "@/lib/notice";
 import { TASK_STATUS_CLAIMED } from "@/lib/types";
 import { textProgressBar } from "@/lib/progress";
@@ -22,6 +23,7 @@ const DURATION_TASK_RE = /^.+?\d+分钟$/;
 const EMPTY_TASKS = {
   tasks: [] as TaskItem[],
   text: "",
+  hint: "",
   error: "",
   cur: 0,
   limit: 0,
@@ -44,6 +46,7 @@ const props = defineProps<{
 const tasksStore = useTasksStore();
 const accountsStore = useAccountsStore();
 const configStore = useConfigStore();
+const logsStore = useLogsStore();
 // 未选中账号时用空串键取空任务集（对齐旧版：挂宝进度卡常驻，未选择显示占位）。
 // 必须用纯读路径 peekAccountTasks：getAccountTasks 会在 computed 求值期间写
 // accountTasksMap，导致渲染期副作用与多余的重新求值。
@@ -65,6 +68,19 @@ const {
   clear: clearActionError,
 } = useTimedNotice();
 
+/** store 侧**过程提示**的独立通道（见下方 storeHint 的 watch）。
+ *
+ *  **必须与 actionError 分开，不能共用一个 useTimedNotice**：共用时
+ *  hint 会顶掉 error —— 实测「自动领取失败（红）」显示后，下一轮刷新写
+ *  `hint="检测到任务完成，正在自动领取奖励..."` 会把它覆盖成中性色，
+ *  且停留时长被从 ERROR_NOTICE_AUTO_HIDE_MS(10s) 重置为 3s。
+ *  用户因此看不到真正的失败原因，而错误提示延长到 10s 本就是为了
+ *  「来得及看」。
+ *
+ *  拆开后两条提示各自计时、互不重置；模板里按「error 优先」显示
+ *  （两者都有时只显示 error），见模板中的 `actionError || actionHint`。 */
+const { text: actionHint, show: showActionHint, clear: clearActionHint } = useTimedNotice();
+
 const statusLine = ref("");
 const progressPercent = ref(0);
 const loginInvalidated = ref(false);
@@ -82,6 +98,8 @@ let statusFetching = false;
     由在途那次在 finally 里续跑一次：永不丢请求，也不会并发。 */
 let statusStale = false;
 let statusFailures = 0;
+/** 「在途结束后续跑」的定时器句柄（见 fetchStatus 的 finally） */
+let staleRetryTimer: number | null = null;
 
 const hasTasks = computed(() => tasks.value.length > 0);
 
@@ -271,6 +289,38 @@ function hasDurationTasks(tasks: TaskItem[]): boolean {
   return tasks.some((t) => DURATION_TASK_RE.test(t.title));
 }
 
+/**
+ * 下面四个派生值必须走 computed，**不能**直接在模板里调用函数。
+ *
+ * 原因：`statusLine` 由 1 秒轮询更新（观看时长几乎每秒都在涨），
+ * 于是整个 TaskProgress 每秒重渲染一次 —— 而此前模板里写的是
+ *   v-for="(group, i) in groupDurationTasks(tasks)"      // 建 Record + sort
+ *   v-for="cp in [...group.checkpoints].sort(...)"        // 复制数组 + sort
+ *   v-for="task in tasks.filter(...)"                     // 新建数组 + 跑正则
+ * 三处都是普通函数调用，每次重渲染全量重算。computed 会按依赖缓存，
+ * 只在 tasks 真正变化时才重算。
+ */
+const durationGroups = computed(() => groupDurationTasks(tasks.value));
+
+const hasDuration = computed(() => hasDurationTasks(tasks.value));
+
+/** 普通任务（过滤掉已被时长分组消费的），模板不再自己 filter */
+const plainTasks = computed(() =>
+  tasks.value.filter((t) => !DURATION_TASK_RE.test(t.title))
+);
+
+/** 时长任务组内检查点按 limit_value 升序的副本，按组前缀缓存 */
+const sortedDurationCheckpoints = computed(() => {
+  const map = new Map<string, CheckPoint[]>();
+  for (const group of durationGroups.value) {
+    map.set(
+      group.prefix,
+      [...group.checkpoints].sort((a, b) => a.limit_value - b.limit_value),
+    );
+  }
+  return map;
+});
+
 async function handleRefresh() {
   if (!props.accountId) return;
   // 不在前端校验 Cookie：config.cookie 由后端 _load_config 硬编码返回空串
@@ -319,14 +369,44 @@ async function fetchStatus() {
     // 状态查询失败：保留上次数据，但累计失败后给出降级提示
     if (props.accountId !== accountId) return;
     statusFailures += 1;
-    if (statusFailures === 3) {
-      showStatusError("状态查询连续失败，可能账号已被外部删除");
+    // 每 3 次失败重申一次，而不是只在第 3 次提示一次。
+    // 原先写的是 `statusFailures === 3`（精确相等）—— 第 4、5、6… 次
+    // 连续失败不再提示，而这条是唯一能告诉用户「账号可能已被外部删除」
+    // 的诊断，用户若此刻正在看浏览器就会永久错过它。
+    //
+    // 为什么用 % 3 而不是 >= 3：1 秒轮询下一直失败时，`>= 3` 会让提示
+    // 每秒钟刷新一次倒计时，变成永久常驻且不断闪动；% 3 是每约 3 秒
+    // 重申一次，既不会漏也不会刷屏。
+    if (statusFailures >= 3 && statusFailures % 3 === 0) {
+      const message = "状态查询连续失败，可能账号已被外部删除";
+      showStatusError(message);
+      // 同时写进日志面板：行内提示 10 秒后仍会消失，而日志可回看。
+      // 与 App.vue 关闭失败时写日志的做法一致（那里也是「提示 + 日志」双通道）。
+      logsStore.addLog({
+        timestamp: new Date().toISOString(),
+        account_id: accountId,
+        level: "warning",
+        message,
+      });
     }
   } finally {
     statusFetching = false;
     if (statusStale) {
       statusStale = false;
-      void fetchStatus();
+      // 至少隔一个轮询周期再续跑。
+      //
+      // 原先是在 finally 里直接 void fetchStatus()：当 get_account_status
+      // 单次耗时 ≥ 1s 时，1 秒定时器每次 tick 都会撞上 in-flight 并置
+      // statusStale，在途一结束立刻续跑 → **无间隔连续 IPC**，
+      // sidecar 越慢请求越密，形成正反馈。
+      //
+      // 用 setTimeout 而不是立即调用，让节奏重新落回固定周期；
+      // 句柄必须保存，卸载时要清掉（否则组件卸载后仍打一次 IPC）。
+      if (staleRetryTimer !== null) clearTimeout(staleRetryTimer);
+      staleRetryTimer = window.setTimeout(() => {
+        staleRetryTimer = null;
+        void fetchStatus();
+      }, STATUS_REFRESH_INTERVAL_MS);
     }
   }
 }
@@ -346,6 +426,34 @@ const storeError = computed(() => accountTasks.value.error || "");
 
 watch(storeError, (message) => {
   if (message) showActionError(message, true);
+});
+
+/**
+ * store 侧的**瞬时过程提示**（如「已有刷新进行中，已排队下一次刷新...」
+ * 「检测到任务完成，正在自动领取奖励...」）。
+ *
+ * 必须监听 `hint` 而不是 `text`：
+ *   * `text` 是后端 `refresh_tasks` 下发的**完整格式化任务进度文本**，
+ *     每轮刷新都覆盖一次。它的全部信息已并入上方胶囊与结构化列表，
+ *     组件里另有注释说明它**刻意不显示**（重复一份会让用户对着两处
+ *     数字核对）。把 `text` 接进 UI 会每 30 秒弹出一大段本应隐藏的文本。
+ *   * `hint` 才是「刚刚发生了什么」的一次性通知 —— 它此前只被写、
+ *     从未被读（tasks.ts 四处赋值、全项目零消费），于是「连点手动刷新
+ *     时给出可见反馈」这个写在注释里的设计意图从未生效。
+ *
+ * 复用页面级的定时提示（与 storeError 的 watch 同构），但**用独立的
+ * 通道**（`actionHint` 而不是 `actionError`）：共用时 hint 会顶掉错误
+ * 提示，让用户看不到真正的失败原因（见 actionHint 声明处的实测说明）。
+ */
+const storeHint = computed(() => accountTasks.value.hint || "");
+
+watch(storeHint, (message) => {
+  if (!message) return;
+  showActionHint(message);
+  // 显示后立刻消费掉。不清空的话同一条文案第二次出现时 watch 不会触发
+  // （值没变）—— 用户第二次连点「手动刷新」就看不到「已排队」提示了。
+  // 已用真实 Vue 运行时复现：不清空时连点两次只提示 1 次，清空后 2 次。
+  if (props.accountId) tasksStore.consumeHint(props.accountId);
 });
 
 /** 状态刷新周期：1s。
@@ -385,31 +493,46 @@ function clearWatchState() {
   // 换账号/停止时把上一个账号留下的行内提示一并收掉：
   // store 里的任务错误可能还是旧账号的，而本地提示是定时显示的，
   // 不清的话用户会看到「A 账号的失败原因」挂在 B 账号的卡上。
+  // hint 通道同理：它是「刚刚发生了什么」的一次性通知，换账号后
+  // 「已排队下一次刷新」这类文案已不属于当前账号。
   clearActionError();
+  clearActionHint();
   // 换账号/停止时把「还要再刷一次」的待办一并丢弃：它属于上一个账号，
   // 带到新账号上会打一次多余的请求并可能覆盖刚设置的状态。
   statusStale = false;
+  // **已经排上队的续跑定时器也必须取消**：只清 statusStale 标志是不够的
+  // —— 定时器一旦 setTimeout 就独立于标志存在，到点仍会执行 fetchStatus，
+  // 而那时读到的已是新账号的 accountId，正好产生注释里说要避免的那次
+  // 「多余的请求并覆盖刚设置的状态」。
+  if (staleRetryTimer !== null) {
+    clearTimeout(staleRetryTimer);
+    staleRetryTimer = null;
+  }
 }
 
+// 轮询周期随「任务查询间隔」变化，与 App.vue 的任务刷新共用同一个字段，
+// 因此由 App.vue 统一在自身定时器里处理，这里不再重复建 watch。
+//
+// accountId 与 running **必须合并在同一个 watch 里**：两者同源（都来自
+// App.vue 的 selectedAccount），从「运行中的账号 A」切到「运行中的账号 B」
+// 时它们同时变化。分成两个 watch 会对同一个账号触发两次 handleRefresh ——
+// 第二次进入时 refreshing 已为 true，走 tasks.ts 的排队分支置
+// refreshQueued，链尾**真的会再跑一轮 refresh_tasks**，一次切换就是
+// 两次 sidecar 往返。
+//
+// immediate: true 替代原先 onMounted 里的那次调用（避免三处重复触发）。
 watch(
-  () => props.accountId,
-  () => {
-    if (!props.accountId) {
+  () => [props.accountId, props.running] as const,
+  ([accountId, running], prev) => {
+    const prevAccountId = prev?.[0];
+    if (!accountId) {
       // 取消选中/账号被删：停轮询并清空上一个账号的观看态
       stopStatusTimer();
       clearWatchState();
       return;
     }
-    // 切到另一个账号时也必须清空，否则会短暂显示上一个账号的观看数据
-    clearWatchState();
-    startStatusTimer();
-    void handleRefresh();
-  }
-);
-
-watch(
-  () => props.running,
-  (running) => {
+    // 换账号时必须清空，否则会短暂显示上一个账号的观看数据
+    if (accountId !== prevAccountId) clearWatchState();
     if (running) {
       startStatusTimer();
       // 启动挂宝后立刻刷一次任务进度：启动前的任务列表是上一次运行残留的
@@ -421,18 +544,17 @@ watch(
       stopStatusTimer();
       clearWatchState();
     }
-  }
+  },
+  { immediate: true }
 );
-
-// 轮询周期随「任务查询间隔」变化，与 App.vue 的任务刷新共用同一个字段，
-// 因此由 App.vue 统一在自身定时器里处理，这里不再重复建 watch。
-onMounted(() => {
-  startStatusTimer();
-  void handleRefresh();
-});
 
 onUnmounted(() => {
   stopStatusTimer();
+  // 续跑用的定时器必须一并清理：否则组件卸载后仍会打一次 IPC
+  if (staleRetryTimer !== null) {
+    clearTimeout(staleRetryTimer);
+    staleRetryTimer = null;
+  }
 });
 </script>
 
@@ -446,10 +568,12 @@ onUnmounted(() => {
 
        卡片内部那两个 min-h-0 不是可选优化，见 CardContent 处的长注释：
        没有它们，「内容高度逐环上传」会让卡片高度被内容顶高、无法由内容决定。 -->
-  <Card class="flex flex-col">
-    <CardHeader class="px-[18px] pb-2 pt-3">
+  <Card data-nav-region="progress" data-nav-order="4" class="flex flex-col">
+    <CardHeader class="px-4 pb-2 pt-3">
       <div class="flex flex-wrap items-center gap-2">
-        <CardTitle class="text-[11pt] font-bold">挂宝进度</CardTitle>
+        <!-- 与另两张卡统一为 15px + font-semibold（原为 11pt + font-bold，
+             既与正文几乎同大、字重又与 AccountList 不一致）。 -->
+        <CardTitle class="text-[15px] font-semibold">挂宝进度</CardTitle>
         <span
           v-if="!accountId"
           class="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"
@@ -505,7 +629,12 @@ onUnmounted(() => {
          这两个 min-h-0 现在是「高度由内容决定」的必要条件而非内部滚动的必要条件：
          任务区已不再有 flex-1（见下方任务展示区注释），卡片高度 = 各部分内容
          高度之和，多出来的窗口高度由右列的 align-content: start 让给日志卡下方。 -->
-    <CardContent class="flex min-h-0 flex-1 flex-col px-[18px] pb-3.5 pt-0">
+    <!-- px-4 / pb-4（均 16px）：统一到 4px 网格，与另两张卡四边一致
+         （原为 18px 横向 + 14px 纵向的任意值）。
+         纵向 +2px 已计入最小窗口高度从 860 抬到 868（见 App.vue）。
+         注释刻意不复写旧类名 —— Tailwind v4 会扫源码原文并生成，
+         注释里的类名同样会污染产物。 -->
+    <CardContent class="flex min-h-0 flex-1 flex-col px-4 pb-4 pt-0">
       <div class="flex min-h-0 flex-1 flex-col gap-3">
         <!-- 状态行：后端 format_watch_status_line 返回「A | B | C | D」四段，
              这里按 | 拆成字段格渲染（见 statusSegments）。
@@ -600,13 +729,15 @@ onUnmounted(() => {
         <div class="scroll-subtle min-h-[170px] overflow-y-auto rounded-md border border-input bg-input/40 p-2">
           <div v-if="hasTasks" class="space-y-3">
           <!-- 时长任务聚合 -->
-          <div v-if="hasDurationTasks(tasks)" class="space-y-2">
-            <div v-for="(group, index) in groupDurationTasks(tasks)" :key="group.prefix" class="space-y-1">
+          <div v-if="hasDuration" class="space-y-2">
+            <div v-for="(group, index) in durationGroups" :key="group.prefix" class="space-y-1">
               <div class="text-sm font-medium">
                 {{ index + 1 }}. {{ group.prefix }} (当前: {{ group.currentMinutes }} 分钟)
               </div>
-              <!-- 检查点用左侧竖线表达层级：比 pl-4 缩进更明确，
-                   且不与任务名的悬挂缩进混淆 -->
+              <!-- 检查点用左侧竖线表达层级：比单纯左缩进 16px 更明确，
+                   且不与任务名的悬挂缩进混淆。
+                   （注释刻意不写缩进的 Tailwind 类名：Tailwind v4 按源码
+                   原始文本扫描，注释里的类名会被生成进产物 CSS） -->
               <div class="space-y-1 border-l-2 border-border pl-3">
                 <!-- 检查点单行三段：左=总时间+任务ID，中=文字进度条+##/##+百分比，
                      右=状态+奖励。
@@ -628,7 +759,7 @@ onUnmounted(() => {
                       与「可压缩容器装不可压缩内容」是同一种病，
                       而且因为是居中溢出，scrollWidth 都不变，扫描器查不出来。 -->
                 <div
-                  v-for="cp in [...group.checkpoints].sort((a, b) => a.limit_value - b.limit_value)"
+                  v-for="cp in sortedDurationCheckpoints.get(group.prefix) ?? []"
                   :key="cp.sid"
                   class="grid grid-cols-[72px_minmax(240px,1fr)_auto] items-center gap-x-2 gap-y-0.5 py-0.5 text-xs"
                 >
@@ -695,7 +826,7 @@ onUnmounted(() => {
 
           <!-- 普通任务列表（过滤掉已被时长分组消费的任务） -->
           <div
-            v-for="task in tasks.filter(t => !DURATION_TASK_RE.test(t.title))"
+            v-for="task in plainTasks"
             :key="task.task_id"
             class="rounded-md border border-border/60 bg-background/40 p-2"
           >
@@ -714,7 +845,15 @@ onUnmounted(() => {
                 </span>
               </div>
             </div>
-            <Progress :value="percentOf(task)" class="mt-1.5 h-1.5" />
+            <!-- 必须绑 `:model-value`，不是 `:value`：
+                 Progress 是对 reka-ui ProgressRoot 的封装，而 ProgressRoot
+                 只声明了 `modelValue`（node_modules/reka-ui/dist/Progress/
+                 ProgressRoot.js 的 props 里没有 `value`）。写成 `:value` 时
+                 它变成未被声明的 fallthrough attr 落到 DOM 上，组件内部读的
+                 props.modelValue 恒为默认值 0 → 指示条 translateX(-100%)
+                 被整体移出可视区，这条进度条**永远是空轨道**，
+                 而控制台不报任何错。 -->
+            <Progress :model-value="percentOf(task)" class="mt-1.5 h-1.5" />
 
             <!-- 检查点明细：与时长任务组的胶囊行**逐列同宽**。
                  第 1 列是别名（可长、可截断），所以是 1fr；
@@ -782,15 +921,23 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- 后端错误。正常态的文本化进度不再显示：它的全部信息（时长、
-             已看时长、进度、状态）已并入上方胶囊，重复一份只会让
-             用户对着两处数字核对，且两处来源不同容易不一致。 -->
+        <!-- 任务提示。两类消息走**两个独立通道**（各自计时、互不重置）：
+               * 后端错误（刷新失败、领取失败）→ actionError，红 + role="alert"；
+               * 过程提示（「已排队下一次刷新」「正在自动领取奖励」）→ actionHint，
+                 中性色 + role="status"。
+
+             两者共用同一个 p 且 **error 优先**：同时存在时只显示 error，
+             因为错误是用户必须看到的（hint 只是过程说明）。
+             早前两者共用一个 useTimedNotice 时，hint 会把 error 顶掉、
+             并把停留时长从 10s 重置为 3s —— 用户看不到真正的失败原因。
+             两者不能都涂成红色：过程提示被染红会让用户以为出错了。 -->
         <p
-          v-if="actionError"
-          class="whitespace-pre-wrap break-all font-mono text-xs text-signal-danger"
-          role="alert"
+          v-if="actionError || actionHint"
+          class="whitespace-pre-wrap break-all font-mono text-xs"
+          :class="actionError ? 'text-signal-danger' : 'text-muted-foreground'"
+          :role="actionError ? 'alert' : 'status'"
         >
-          {{ actionError }}
+          {{ actionError || actionHint }}
         </p>
       </div>
     </CardContent>

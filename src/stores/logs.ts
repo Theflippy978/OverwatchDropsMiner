@@ -22,6 +22,23 @@ export const useLogsStore = defineStore("logs", () => {
     return logs.value.filter((l) => l.account_id === filterAccountId.value);
   });
 
+  /**
+   * 最后一条日志的序号（单调递增，永不重复、永不回退）。
+   *
+   * 供「新日志到达」这类副作用监听使用 —— **不能监听 logs.length**：
+   * 到达 maxLogs 之后每批是「push N 条 + splice 掉 N 条」，length 恒为 5000，
+   * 依赖它的 watcher 永远不会再触发（实测：灌满 5000 条后再追加 5000 条，
+   * 监听 length 的 watcher 触发 0 次）。LogViewer 的自动滚动正是这样
+   * 在长时间运行后永久失效的。
+   *
+   * 空列表返回 -1：clear() 之后值会从正数变回 -1，watcher 触发一次；
+   * 那次是无害的（scrollHeight 归零，滚动位置本就是 0），
+   * 且 LogViewer 里另有长度判断兜住。
+   */
+  const lastSeq = computed(() =>
+    logs.value.length > 0 ? logs.value[logs.value.length - 1].seq : -1
+  );
+
   function flush() {
     flushTimer = null;
     if (buffer.length === 0) return;
@@ -94,5 +111,5 @@ export const useLogsStore = defineStore("logs", () => {
     clear();
   }
 
-  return { logs, filteredLogs, filterAccountId, addLog, clear, clearByAccount, setFilter, initListeners, dispose };
+  return { logs, filteredLogs, lastSeq, filterAccountId, addLog, clear, clearByAccount, setFilter, initListeners, dispose };
 });

@@ -198,10 +198,12 @@ onUnmounted(() => {
  */
 const capsuleAnim = {
   enterFromClass: "translate-y-1 opacity-0",
-  enterActiveClass: "transition duration-300 ease-out",
+  enterActiveClass:
+    "transition duration-[var(--duration-normal)] ease-[var(--ease-enter)]",
   enterToClass: "translate-y-0 opacity-100",
   leaveFromClass: "translate-y-0 opacity-100",
-  leaveActiveClass: "transition duration-200 ease-in",
+  leaveActiveClass:
+    "transition duration-[var(--duration-fast)] ease-[var(--ease-exit)]",
   leaveToClass: "-translate-y-1 opacity-0",
 };
 </script>
@@ -214,6 +216,8 @@ const capsuleAnim = {
        不可拖的元素（状态胶囊、窗口按钮）各自标
        data-tauri-drag-region="false" 局部排除。 -->
   <header
+    data-nav-region="titlebar"
+    data-nav-order="1"
     class="flex h-9 shrink-0 items-center gap-2 select-none
            border-b border-border bg-background pl-3 pr-0"
     data-tauri-drag-region
@@ -268,7 +272,7 @@ const capsuleAnim = {
         class="pointer-events-none relative inline-flex h-[22px] w-[132px]
                shrink-0 items-center justify-center gap-1.5 rounded-full
                border px-2.5 text-[11px] leading-none
-               transition-colors duration-300"
+               transition-colors duration-[var(--duration-normal)]"
         :class="updateNotice && updateNoticeError
           ? 'border-signal-danger/40 bg-signal-danger/10 text-signal-danger'
           : updateNotice

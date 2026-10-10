@@ -417,6 +417,7 @@ class PythonSidecar:
             "add_account": self._add_account,
             "remove_account": self._remove_account,
             "rename_account": self._rename_account,
+            "reorder_accounts": self._reorder_accounts,
             "start_miner": self._start_miner,
             "stop_miner": self._stop_miner,
             "get_account_status": self._get_account_status,
@@ -533,6 +534,31 @@ class PythonSidecar:
             "remark": account.remark or account.id[:8],
             "running": self.miner_manager.is_running(account.id) if self.miner_manager else False,
         }
+
+    async def _reorder_accounts(self, params: dict) -> dict:
+        """按给定顺序重排账号（前端拖拽排序的落盘入口）。
+
+        只接受「当前账号集合的一个排列」——既不缺也不多。
+        **刻意不支持子集**：那样调用方漏传一个账号就会把它静默删掉，
+        用户看到的是「拖了一下，账号没了」。宁可报错让他刷新重试。
+
+        失败时返回明确错误而不是静默成功：前端据此回滚本地顺序，
+        否则界面显示新顺序、磁盘还是旧顺序，重启即变回去。
+        """
+        ordered_ids = params.get("ordered_ids")
+        if not isinstance(ordered_ids, list) or not all(
+            isinstance(item, str) for item in ordered_ids
+        ):
+            return {"error": "ordered_ids 必须是字符串数组"}
+        if not self.account_store:
+            return {"error": "后端未初始化"}
+
+        if not self.account_store.reorder(ordered_ids):
+            return {
+                "error": "排序未生效：提交的账号集合与当前不一致"
+                "（可能已被其它操作改动），请刷新后重试"
+            }
+        return {}
 
     async def _start_miner(self, params: dict) -> dict:
         """启动 miner（只收 account_id，配置取 _config_data）"""

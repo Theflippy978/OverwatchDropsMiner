@@ -27,25 +27,19 @@ export function textProgressBar(
   percent: number,
   width: number = BAR_WIDTH
 ): { filled: string; empty: string; percent: number } {
-  const safe = Math.max(0, Math.min(100, Math.round(percent)));
+  // 必须**截断**而不是四舍五入：后端 browser/task_presenter.py 的
+  // `_progress_percent` 用 int()（截断），TaskProgress.percentOf /
+  // percentOfCheckpoint 用 Math.floor（同为截断）。三处口径必须一致，
+  // 否则 999/1000 会显示成「100%」并画满整条，而任务其实尚未完成。
+  //
+  // 当前调用方传入的已经是 floor 过的整数，所以 Math.round 在这里恰好
+  // 是恒等运算、看不出差异 —— 但那是巧合，不是契约。写成 floor 让
+  // 「直接传小数」的新调用方也得到正确结果，与本函数开头的同口径声明一致。
+  const safe = Math.max(0, Math.min(100, Math.floor(percent)));
   const filledCount = Math.floor((width * safe) / 100);
   return {
     filled: "#".repeat(filledCount),
     empty: "-".repeat(width - filledCount),
     percent: safe,
   };
-}
-
-/**
- * 进度条的完整文本（含两端方括号）。
- *
- * 单独给出而不是让调用方自己拼：方括号一旦漏在某处，两端口径就又不一致了，
- * 而这种不一致在界面上表现为「有的行有括号有的没有」，极难定位。
- */
-export function textProgressBarText(
-  percent: number,
-  width: number = BAR_WIDTH
-): string {
-  const { filled, empty } = textProgressBar(percent, width);
-  return `[${filled}${empty}]`;
 }

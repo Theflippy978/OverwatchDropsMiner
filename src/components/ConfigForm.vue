@@ -2,9 +2,11 @@
 import { ref, computed, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { save, open } from "@tauri-apps/plugin-dialog";
+import { LoaderCircle } from "lucide-vue-next";
 import { useConfigStore, TaskIdsAlteredError } from "@/stores/config";
 import { useAccountsStore } from "@/stores/accounts";
 import { useTimedNotice } from "@/lib/notice";
+import { formatIpcError } from "@/lib/ipc-error";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -56,7 +58,7 @@ async function handleToggleVerbose(next: boolean) {
   try {
     await configStore.setVerbose(next);
   } catch (e) {
-    showVerboseError(`详细日志切换失败: ${e}`, true);
+    showVerboseError(formatIpcError(e, "详细日志切换失败"), true);
   }
 }
 
@@ -87,7 +89,7 @@ async function handleTest() {
     // 所以颜色仍按文案判断，不额外维护一个 isError
     showTestResult(ok ? "已发送" : "发送失败，请检查通知 URL", !ok);
   } catch (e) {
-    showTestResult(`发送失败: ${e}`, true);
+    showTestResult(formatIpcError(e, "发送失败"), true);
   } finally {
     testing.value = false;
   }
@@ -133,6 +135,16 @@ onMounted(async () => {
   await configStore.ensureLoaded();
 });
 
+/** 重试配置加载。load() 失败会 throw（config.ts 的 catch 分支里 rethrow），
+    不接住会变成未处理的 Promise 拒绝 —— 按钮看起来「点了没反应」。 */
+async function retryLoadConfig() {
+  try {
+    await configStore.load();
+  } catch {
+    /* 失败原因已由 store 写进 loadError 并显示在上方，这里只需吞掉拒绝 */
+  }
+}
+
 /** 真正落盘当前编辑（关窗也会 save，但显式保存让用户不依赖关窗行为） */
 async function handleSave() {
   clearSaveNotice();
@@ -150,7 +162,7 @@ async function handleSave() {
       );
       return;
     }
-    showSaveNotice(`保存配置失败: ${e}`, true);
+    showSaveNotice(formatIpcError(e), true);
   }
 }
 
@@ -165,7 +177,7 @@ async function handleExport() {
     await invoke("export_config", { path: filePath });
     showSaveNotice("配置已导出", false);
   } catch (e) {
-    showSaveNotice(`导出配置失败: ${e}`, true);
+    showSaveNotice(formatIpcError(e, "导出配置失败"), true);
   }
 }
 
@@ -181,7 +193,7 @@ async function handleImport() {
     await configStore.load();
     showSaveNotice("配置已导入", false);
   } catch (e) {
-    showSaveNotice(`导入配置失败: ${e}`, true);
+    showSaveNotice(formatIpcError(e, "导入配置失败"), true);
   }
 }
 
@@ -314,7 +326,7 @@ async function handleConfirm() {
   try {
     await cb();
   } catch (e) {
-    showFetchError(`操作失败: ${e}`, true);
+    showFetchError(formatIpcError(e, "操作失败"), true);
   }
 }
 
@@ -348,7 +360,7 @@ async function showBrowserPicker() {
     showBrowserDialog.value = true;
   } catch (e) {
     pendingAction.value = null;
-    showFetchError(`检测浏览器失败: ${e}`, true);
+    showFetchError(formatIpcError(e, "检测浏览器失败"), true);
   }
 }
 
@@ -381,7 +393,7 @@ async function executeFetchRoom(browser: string) {
         rooms.length > 0 ? `${rooms.join(",")},${captured}` : captured;
     }
   } catch (e) {
-    showFetchError(`自动跳转房间号失败: ${e}`, true);
+    showFetchError(formatIpcError(e, "自动跳转房间号失败"), true);
   } finally {
     fetchingRoom.value = false;
   }
@@ -397,7 +409,7 @@ async function executeFetchTaskIdsMode1(browser: string) {
     );
     applyGroups(result.groups, result.room_id);
   } catch (e) {
-    showFetchError(`自动获取模式1失败: ${e}`, true);
+    showFetchError(formatIpcError(e, "自动获取模式1失败"), true);
   } finally {
     fetchingTasks.value = false;
   }
@@ -413,7 +425,7 @@ async function executeFetchTaskIdsMode2(browser: string) {
     }>("auto_fetch_task_ids_mode2", { roomId: firstRoomId() || null, browser });
     applyGroups(result.groups, result.room_id);
   } catch (e) {
-    showFetchError(`自动获取模式2失败: ${e}`, true);
+    showFetchError(formatIpcError(e, "自动获取模式2失败"), true);
   } finally {
     fetchingTasks.value = false;
   }
@@ -432,246 +444,314 @@ function cancelBrowserPicker() {
 
 <template>
   <!-- 无卡头、单列行式（标签 + 输入 + 行内按钮）：
-       按钮行只保留加载/保存（启动/停止由账号行内按钮承担），全局进度条收于卡底 -->
-  <Card class="card-hover">
-    <CardContent class="space-y-3.5 px-[18px] py-[14px]">
-      <!-- 分组一：连接与任务
-           标签列宽度取 style.css 的 --cfg-label-w 而不是各写各的字面量：
-           本组三行与下方运行参数三行必须共用同一个左边缘，
-           否则「线程数」（3 字）会比「查询间隔(s)」（8 字）缩进 40px。
-           minmax(0,1fr) 给输入框，auto 给行内按钮组：
-           按钮组的 min-content 必须原样保留，列宽才不会被压到内容以下。 -->
-      <fieldset class="space-y-2">
-        <legend class="sr-only">连接与任务</legend>
-        <div class="grid grid-cols-[var(--cfg-label-w)_minmax(0,1fr)_auto] items-center gap-2">
-          <Label for="rooms" class="text-left text-sm">房间号</Label>
-          <Input
-            id="rooms"
-            v-model="configStore.config.rooms_text"
-            placeholder="必填: 直播间号，多个用逗号分隔"
-            class="h-8 min-w-0 text-sm"
-          />
-          <Button
-            size="sm"
-            variant="outline"
-            class="h-8 min-w-[88px] text-sm"
-            :disabled="fetchingRoom"
-            @click="handleFetchRoom"
-          >
-            {{ fetchingRoom ? "跳转中..." : "自动跳转" }}
-          </Button>
-        </div>
+       按钮行只保留加载/保存（启动/停止由账号行内按钮承担），全局进度条收于卡底。
 
-        <div class="grid grid-cols-[var(--cfg-label-w)_minmax(0,1fr)_auto] items-center gap-2">
-          <Label for="taskIds" class="text-left text-sm">任务 ID</Label>
-          <!-- 占位文案必须按「输入框在最窄可用宽度下仍能完整显示」来写，
-               而不是把想说的话都塞进去。
-               本行的宽度是 `74(标签) + 8 + input + 8 + 241(两个「自动获取模式X」按钮)`
-               切出来的，input 在最小窗口 1030、侧栏拖到最宽 420 时只剩约 209px
-               （扣掉 input 自身 26px 内边距与边框，可用文字宽约 183px）。
-               原文案「可留空: 可用浏览器嗅探自动获取（模式1需先有房间号）」约需 380px，
-               括号部分永远被截掉 —— 用户看到的是一句残缺的话。
-               现在这句约 206px，在默认侧栏 240（input 约 389px）下完整显示。
-               被删掉的「模式1 需先有房间号」并没有丢：本卡片底部的说明行写着
-               「模式1：纯 HTTP 抓取直播间页面（需先填房间号）」，输入框的
-               title 也带完整说明，两处都不遮挡任何可见文字。 -->
-          <Input
-            id="taskIds"
-            v-model="configStore.config.task_ids_text"
-            placeholder="可留空: 可用浏览器嗅探自动获取"
-            title="可留空。点「自动获取模式1」用纯 HTTP 抓取直播间页面（需先填房间号）；点「自动获取模式2」用浏览器嗅探，并同时自动获取房间号。"
-            class="h-8 min-w-0 text-sm"
-          />
-          <div class="flex gap-1.5">
-            <Button
-              size="sm"
-              variant="outline"
-              class="h-8 min-w-[92px] text-sm"
-              :disabled="fetchingTasks || fetchingRoom"
-              :title="fetchingRoom ? '任务 ID 捕获进行中，请稍候' : undefined"
-              @click="handleFetchTaskIdsMode1"
-            >
-              {{ fetchingTasks && pendingAction === "task1" ? "捕获中..." : "自动获取模式1" }}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              class="h-8 min-w-[92px] text-sm"
-              :disabled="fetchingTasks || fetchingRoom"
-              :title="fetchingRoom ? '任务 ID 捕获进行中，请稍候' : undefined"
-              @click="handleFetchTaskIdsMode2"
-            >
-              {{ fetchingTasks ? "捕获中..." : "自动获取模式2" }}
-            </Button>
-          </div>
-        </div>
+       内边距统一到 4px 网格（px-4 / py-4，均 16px）：
+       原先三张卡写的是 18px 横向 + 14px 纵向的任意值 —— 18px 在 Tailwind
+       刻度里没有对应档位，14px 虽是 3.5 档但同属 .5 半档、不在 4px 网格上。
+       统一为 16px 后三张卡四边一致。
 
-        <div class="grid grid-cols-[var(--cfg-label-w)_minmax(0,1fr)_auto] items-center gap-2">
-          <Label for="notifyUrls" class="text-left text-sm">通知 URL</Label>
-          <Input
-            id="notifyUrls"
-            v-model="configStore.config.notify_urls_text"
-            placeholder="可留空: 通知 URL，如 gotify://host/token"
-            class="h-8 min-w-0 text-sm"
-          />
-          <Button
-            size="sm"
-            variant="outline"
-            class="h-8 min-w-[88px] text-sm"
-            :disabled="testing"
-            @click="handleTest"
-          >
-            {{ testing ? "发送中..." : "测试通知" }}
-          </Button>
-        </div>
-      </fieldset>
+       **注释里刻意不复写旧类名**：Tailwind v4 按**源码原始文本**扫描，
+       注释里出现的类名会被当真生成进产物 CSS ——
+       本项目实测过：一条 HTML 注释里的任意值类名让产物多出一条死规则。
+       这里一律用「18px 横向」这样的自然语言描述旧值，避免污染产物。
 
-      <!-- 分组二：运行参数。三块在同一行里做贴左 / 居中 / 贴右分布，
-             列模板是 repeat(3, minmax(160px, 1fr)) 而不是 grid-cols-3。
-
-             为什么不能是 grid-cols-3：`grid-cols-3` 展开为
-             `repeat(3, minmax(0, 1fr))`，下限是 0 —— 列宽可以缩到比内容还窄；
-             而块内的标签 `w-[var(--cfg-label-w)] shrink-0` 与输入框
-             `w-[68px] shrink-0` 都不允许缩，于是内容溢出各自的列、
-             往右压到相邻列上，表现为「按钮重叠」。
-             写成 minmax(160px, 1fr)（160 = 74 + 8 + 68，即
-             --cfg-label-w + gap + 输入框宽）后，列宽永远 ≥ 内容宽，窄窗口下的表现从
-             「重叠」变成「整卡溢出」——后者由最小窗口尺寸兜住，
-             前者无论窗口多宽都会出现。
-
-             标签列同样取 --cfg-label-w 并全部左对齐：三块与上方三行的
-             标签、输入框左边缘完全齐平。 -->
-      <fieldset class="space-y-2">
-        <legend class="sr-only">运行参数</legend>
-        <div class="grid grid-cols-[repeat(3,minmax(160px,1fr))] items-center">
-          <div class="flex items-center justify-self-start gap-2">
-            <Label
-              for="threads"
-              class="w-[var(--cfg-label-w)] shrink-0 text-left text-sm"
-            >线程数</Label>
-            <Input
-              id="threads"
-              v-model="configStore.config.thread_count_text"
-              type="number"
-              min="1"
-              max="256"
-              class="h-8 w-[68px] shrink-0 text-sm"
-            />
-          </div>
-          <div class="flex items-center justify-self-center gap-2">
-            <Label
-              for="reconnect"
-              class="w-[var(--cfg-label-w)] shrink-0 text-left text-sm"
-            >重连延迟(s)</Label>
-            <Input
-              id="reconnect"
-              v-model="configStore.config.reconnect_delay_text"
-              type="number"
-              min="1"
-              max="3600"
-              class="h-8 w-[68px] shrink-0 text-sm"
-            />
-          </div>
-          <div class="flex items-center justify-self-end gap-2">
-            <Label
-              for="interval"
-              class="w-[var(--cfg-label-w)] shrink-0 text-left text-sm"
-            >查询间隔(s)</Label>
-            <Input
-              id="interval"
-              v-model="configStore.config.task_query_interval_text"
-              type="number"
-              min="10"
-              max="3600"
-              class="h-8 w-[68px] shrink-0 text-sm"
-            />
-          </div>
-        </div>
-
-        <!-- 复选框单独一行：它们是行为开关而非数值参数，混在数值里会让人
-             误以为与线程数等同属一组可调参数 -->
-        <div class="flex flex-wrap items-center gap-x-5 gap-y-1.5 pt-0.5">
-          <div class="flex items-center gap-1.5">
-            <Checkbox
-              id="cfg-verbose"
-              :model-value="configStore.config.verbose"
-              aria-label="详细日志"
-              @update:model-value="onVerboseModelValue"
-            />
-            <Label for="cfg-verbose" class="cursor-pointer text-sm">详细日志</Label>
-          </div>
-          <div class="flex items-center gap-1.5">
-            <Checkbox
-              id="cfg-disable-task-notify"
-              :model-value="disableTaskNotify"
-              aria-label="禁用任务完成通知"
-              @update:model-value="disableTaskNotify = $event === 'indeterminate' ? true : $event"
-            />
-            <Label for="cfg-disable-task-notify" class="cursor-pointer text-sm">
-              禁用任务完成通知
-            </Label>
-          </div>
-        </div>
-        <p
-          v-if="verboseError"
-          class="break-all text-xs text-signal-danger"
-          role="alert"
-        >
-          {{ verboseError }}
-        </p>
-      </fieldset>
-
-      <!-- 操作按钮 -->
-      <div class="flex items-center gap-2">
-        <Button size="sm" class="h-8 text-sm" @click="handleSave">
-          保存配置
-        </Button>
-        <Button size="sm" variant="outline" class="h-8 text-sm" @click="handleImport">
-          导入配置
-        </Button>
-        <Button size="sm" variant="outline" class="h-8 text-sm" @click="handleExport">
-          导出配置
-        </Button>
-      </div>
-
-      <!-- 提示与错误。role="alert" 不能省：自动获取失败是异步发生的，
-           没有它屏幕阅读器不会播报，用户只会看到配置悄悄没填上 -->
+       **纵向改 16px 会让内容总高 +8px**（本卡 +4、挂宝卡 +2、日志卡 +2），
+       因此最小窗口高度同步从 860 抬到 868（见 App.vue 的 MIN_WINDOW_HEIGHT
+       与 tauri.conf.json 的 minHeight，三处必须同源）。
+       868 的来历：裸下限 853 + 8 = 861，保留原设计同样的 7px 余量
+       （用于吸收 3 秒行内提示带来的瞬时增高），861 + 7 = 868，
+       且 868 是 4 的倍数。 -->
+  <Card data-nav-region="config" data-nav-order="3" class="card-hover">
+    <CardContent class="space-y-3.5 px-4 py-4">
+      <!-- 加载失败：必须在卡内就地告知并给重试入口。
+           原先 loadError 只有 store 在写、没有任何组件读，失败终点是
+           App.vue 的 runStep 里一句 console.error —— 用户看到的是
+           config.ts 里那份默认值（房间号 23612045、线程 60、间隔 30），
+           一份「看起来已经配好了」的表单，会以为自己的配置被重置。
+           与账号栏的错误态（AccountList 的 role="alert" + 重试）保持同构。 -->
       <p
-        v-if="fetchError"
-        class="break-all rounded-md bg-signal-danger/10 px-2.5 py-1.5 text-xs text-signal-danger"
+        v-if="configStore.loadError"
+        class="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md bg-signal-danger/10 px-2.5 py-1.5 text-xs text-signal-danger"
         role="alert"
       >
-        {{ fetchError }}
-      </p>
-      <p
-        v-if="saveNotice"
-        class="break-all rounded-md px-2.5 py-1.5 text-xs"
-        :class="saveNoticeError ? 'bg-signal-danger/10 text-signal-danger' : 'bg-signal-success/10 text-signal-success'"
-        role="status"
-      >
-        {{ saveNotice }}
-      </p>
-      <p
-        v-if="testResult"
-        class="break-all rounded-md px-2.5 py-1.5 text-xs"
-        :class="testResult === '已发送' ? 'bg-signal-success/10 text-signal-success' : 'bg-signal-danger/10 text-signal-danger'"
-        role="status"
-      >
-        {{ testResult }}
-      </p>
-      <p class="text-xs leading-relaxed text-muted-foreground">
-        模式1：纯 HTTP 抓取直播间页面（需先填房间号）；模式2：浏览器嗅探（自动同时获取房间号）
+        <!-- 不要再拼「配置加载失败：」前缀：store 侧已经用
+             formatIpcError(e, "加载配置失败") 带上了它，这里再加一次会渲染成
+             「配置加载失败：加载配置失败：后台服务响应超时，请稍后重试」。
+             与保存路径同构 —— config.ts 抛出的串已带前缀，调用方一律不再补。 -->
+        <span class="break-all">{{ configStore.loadError }}</span>
+        <button
+          type="button"
+          class="shrink-0 underline underline-offset-2 hover:text-foreground
+                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          @click="retryLoadConfig"
+        >
+          重试
+        </button>
       </p>
 
-      <!-- 运行中全局 indeterminate 进度动画，初始隐藏 -->
+      <!-- 加载中：整块表单换成占位态。
+           不是装饰性骨架屏，是**功能性互斥** —— 表单所有输入框都直接
+           双向绑定 store（v-model="configStore.config.xxx"），而 load()
+           成功时执行 config.value = next 整体替换。窗口在
+           restoreWindowGeometry 的 2~4 次轻量 IPC 后就显示，而配置加载
+           排在 4 个 runStep 的最后（前面还有两次 initListeners 与一次
+           完整的 fetchAccounts 往返）—— 这段时间里用户敲进去的字会被
+           整片覆盖，且没有任何提示。用 v-if 把表单换掉即可关掉竞争窗口，
+           比事后做「脏字段合并」可靠得多。 -->
       <div
-        v-if="anyRunning"
-        class="relative mt-2.5 h-1.5 w-full overflow-hidden rounded bg-secondary"
-        role="progressbar"
-        aria-label="账号运行中"
+        v-if="configStore.loading"
+        class="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground"
+        role="status"
+        aria-live="polite"
       >
-        <div class="progress-indeterminate absolute h-full w-1/3 bg-primary" />
+        <LoaderCircle class="h-4 w-4 animate-spin" aria-hidden="true" />
+        正在加载配置…
       </div>
+
+      <template v-else>
+        <!-- 分组一：连接与任务
+             标签列宽度取 style.css 的 --cfg-label-w 而不是各写各的字面量：
+             本组三行与下方运行参数三行必须共用同一个左边缘，
+             否则「线程数」（3 字）会比「查询间隔(s)」（8 字）缩进 40px。
+             minmax(0,1fr) 给输入框，auto 给行内按钮组：
+             按钮组的 min-content 必须原样保留，列宽才不会被压到内容以下。 -->
+        <fieldset class="space-y-2">
+          <legend class="sr-only">连接与任务</legend>
+          <div class="grid grid-cols-[var(--cfg-label-w)_minmax(0,1fr)_auto] items-center gap-2">
+            <Label for="rooms" class="text-left text-sm">房间号</Label>
+            <Input
+              id="rooms"
+              v-model="configStore.config.rooms_text"
+              placeholder="必填: 直播间号，多个用逗号分隔"
+              class="h-8 min-w-0 text-sm"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              class="h-8 min-w-[88px] text-sm"
+              :disabled="fetchingRoom"
+              @click="handleFetchRoom"
+            >
+              {{ fetchingRoom ? "跳转中..." : "自动跳转" }}
+            </Button>
+          </div>
+
+          <div class="grid grid-cols-[var(--cfg-label-w)_minmax(0,1fr)_auto] items-center gap-2">
+            <Label for="taskIds" class="text-left text-sm">任务 ID</Label>
+            <!-- 占位文案必须按「输入框在最窄可用宽度下仍能完整显示」来写，
+                 而不是把想说的话都塞进去。
+                 本行的宽度是 `74(标签) + 8 + input + 8 + 241(两个「自动获取模式X」按钮)`
+                 切出来的，input 在最小窗口 1030、侧栏拖到最宽 420 时只剩约 209px
+                 （扣掉 input 自身 26px 内边距与边框，可用文字宽约 183px）。
+                 原文案「可留空: 可用浏览器嗅探自动获取（模式1需先有房间号）」约需 380px，
+                 括号部分永远被截掉 —— 用户看到的是一句残缺的话。
+                 现在这句约 206px，在默认侧栏 240（input 约 389px）下完整显示。
+                 被删掉的「模式1 需先有房间号」并没有丢：本卡片底部的说明行写着
+                 「模式1：纯 HTTP 抓取直播间页面（需先填房间号）」，输入框的
+                 title 也带完整说明，两处都不遮挡任何可见文字。 -->
+            <Input
+              id="taskIds"
+              v-model="configStore.config.task_ids_text"
+              placeholder="可留空: 可用浏览器嗅探自动获取"
+              title="可留空。点「自动获取模式1」用纯 HTTP 抓取直播间页面（需先填房间号）；点「自动获取模式2」用浏览器嗅探，并同时自动获取房间号。"
+              class="h-8 min-w-0 text-sm"
+            />
+            <div class="flex gap-1.5">
+              <Button
+                size="sm"
+                variant="outline"
+                class="h-8 min-w-[92px] text-sm"
+                :disabled="fetchingTasks || fetchingRoom"
+                :title="fetchingRoom ? '任务 ID 捕获进行中，请稍候' : undefined"
+                @click="handleFetchTaskIdsMode1"
+              >
+                {{ fetchingTasks && pendingAction === "task1" ? "捕获中..." : "自动获取模式1" }}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                class="h-8 min-w-[92px] text-sm"
+                :disabled="fetchingTasks || fetchingRoom"
+                :title="fetchingRoom ? '任务 ID 捕获进行中，请稍候' : undefined"
+                @click="handleFetchTaskIdsMode2"
+              >
+                {{ fetchingTasks ? "捕获中..." : "自动获取模式2" }}
+              </Button>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-[var(--cfg-label-w)_minmax(0,1fr)_auto] items-center gap-2">
+            <Label for="notifyUrls" class="text-left text-sm">通知 URL</Label>
+            <Input
+              id="notifyUrls"
+              v-model="configStore.config.notify_urls_text"
+              placeholder="可留空: 通知 URL，如 gotify://host/token"
+              class="h-8 min-w-0 text-sm"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              class="h-8 min-w-[88px] text-sm"
+              :disabled="testing"
+              @click="handleTest"
+            >
+              {{ testing ? "发送中..." : "测试通知" }}
+            </Button>
+          </div>
+        </fieldset>
+
+        <!-- 分组二：运行参数。三块在同一行里做贴左 / 居中 / 贴右分布，
+               列模板是 repeat(3, minmax(160px, 1fr)) 而不是「三列等宽」写法。
+
+               为什么不能用三列等宽：它展开为
+               `repeat(3, minmax(0, 1fr))`，下限是 0 —— 列宽可以缩到比内容还窄；
+               而块内的标签 `w-[var(--cfg-label-w)] shrink-0` 与输入框
+               `w-[68px] shrink-0` 都不允许缩，于是内容溢出各自的列、
+               往右压到相邻列上，表现为「按钮重叠」。
+               写成 minmax(160px, 1fr)（160 = 74 + 8 + 68，即
+               --cfg-label-w + gap + 输入框宽）后，列宽永远 ≥ 内容宽，窄窗口下的表现从
+               「重叠」变成「整卡溢出」——后者由最小窗口尺寸兜住，
+               前者无论窗口多宽都会出现。
+
+               （本条注释刻意不写那个旧类名本身：Tailwind v4 按源码原始文本
+               扫描，注释里出现的类名会被当真生成进产物 CSS ——
+               本项目已实测确证产物里真的会多出死规则。）
+
+               标签列同样取 --cfg-label-w 并全部左对齐：三块与上方三行的
+               标签、输入框左边缘完全齐平。 -->
+        <fieldset class="space-y-2">
+          <legend class="sr-only">运行参数</legend>
+          <div class="grid grid-cols-[repeat(3,minmax(160px,1fr))] items-center">
+            <div class="flex items-center justify-self-start gap-2">
+              <Label
+                for="threads"
+                class="w-[var(--cfg-label-w)] shrink-0 text-left text-sm"
+              >线程数</Label>
+              <Input
+                id="threads"
+                v-model="configStore.config.thread_count_text"
+                type="number"
+                min="1"
+                max="256"
+                class="h-8 w-[68px] shrink-0 text-sm"
+              />
+            </div>
+            <div class="flex items-center justify-self-center gap-2">
+              <Label
+                for="reconnect"
+                class="w-[var(--cfg-label-w)] shrink-0 text-left text-sm"
+              >重连延迟(s)</Label>
+              <Input
+                id="reconnect"
+                v-model="configStore.config.reconnect_delay_text"
+                type="number"
+                min="1"
+                max="3600"
+                class="h-8 w-[68px] shrink-0 text-sm"
+              />
+            </div>
+            <div class="flex items-center justify-self-end gap-2">
+              <Label
+                for="interval"
+                class="w-[var(--cfg-label-w)] shrink-0 text-left text-sm"
+              >查询间隔(s)</Label>
+              <Input
+                id="interval"
+                v-model="configStore.config.task_query_interval_text"
+                type="number"
+                min="10"
+                max="3600"
+                class="h-8 w-[68px] shrink-0 text-sm"
+              />
+            </div>
+          </div>
+
+          <!-- 复选框单独一行：它们是行为开关而非数值参数，混在数值里会让人
+               误以为与线程数等同属一组可调参数 -->
+          <div class="flex flex-wrap items-center gap-x-5 gap-y-1.5 pt-0.5">
+            <div class="flex items-center gap-1.5">
+              <Checkbox
+                id="cfg-verbose"
+                :model-value="configStore.config.verbose"
+                aria-label="详细日志"
+                @update:model-value="onVerboseModelValue"
+              />
+              <Label for="cfg-verbose" class="cursor-pointer text-sm">详细日志</Label>
+            </div>
+            <div class="flex items-center gap-1.5">
+              <Checkbox
+                id="cfg-disable-task-notify"
+                :model-value="disableTaskNotify"
+                aria-label="禁用任务完成通知"
+                @update:model-value="disableTaskNotify = $event === 'indeterminate' ? true : $event"
+              />
+              <Label for="cfg-disable-task-notify" class="cursor-pointer text-sm">
+                禁用任务完成通知
+              </Label>
+            </div>
+          </div>
+          <p
+            v-if="verboseError"
+            class="break-all text-xs text-signal-danger"
+            role="alert"
+          >
+            {{ verboseError }}
+          </p>
+        </fieldset>
+
+        <!-- 操作按钮 -->
+        <div class="flex items-center gap-2">
+          <Button size="sm" class="h-8 text-sm" @click="handleSave">
+            保存配置
+          </Button>
+          <Button size="sm" variant="outline" class="h-8 text-sm" @click="handleImport">
+            导入配置
+          </Button>
+          <Button size="sm" variant="outline" class="h-8 text-sm" @click="handleExport">
+            导出配置
+          </Button>
+        </div>
+
+        <!-- 提示与错误。role="alert" 不能省：自动获取失败是异步发生的，
+             没有它屏幕阅读器不会播报，用户只会看到配置悄悄没填上 -->
+        <p
+          v-if="fetchError"
+          class="break-all rounded-md bg-signal-danger/10 px-2.5 py-1.5 text-xs text-signal-danger"
+          role="alert"
+        >
+          {{ fetchError }}
+        </p>
+        <p
+          v-if="saveNotice"
+          class="break-all rounded-md px-2.5 py-1.5 text-xs"
+          :class="saveNoticeError ? 'bg-signal-danger/10 text-signal-danger' : 'bg-signal-success/10 text-signal-success'"
+          role="status"
+        >
+          {{ saveNotice }}
+        </p>
+        <p
+          v-if="testResult"
+          class="break-all rounded-md px-2.5 py-1.5 text-xs"
+          :class="testResult === '已发送' ? 'bg-signal-success/10 text-signal-success' : 'bg-signal-danger/10 text-signal-danger'"
+          role="status"
+        >
+          {{ testResult }}
+        </p>
+        <p class="text-xs leading-relaxed text-muted-foreground">
+          模式1：纯 HTTP 抓取直播间页面（需先填房间号）；模式2：浏览器嗅探（自动同时获取房间号）
+        </p>
+
+        <!-- 运行中全局 indeterminate 进度动画，初始隐藏 -->
+        <div
+          v-if="anyRunning"
+          class="relative mt-2.5 h-1.5 w-full overflow-hidden rounded bg-secondary"
+          role="progressbar"
+          aria-label="账号运行中"
+        >
+          <div class="progress-indeterminate absolute h-full w-1/3 bg-primary" />
+        </div>
+      </template>
     </CardContent>
   </Card>
 

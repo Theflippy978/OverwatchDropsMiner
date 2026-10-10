@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, nextTick, onUnmounted } from "vue";
+import { storeToRefs } from "pinia";
+import { useSortable } from "@vueuse/integrations/useSortable";
 import { useAccountsStore } from "@/stores/accounts";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { useTimedNotice } from "@/lib/notice";
+import { formatIpcError } from "@/lib/ipc-error";
 import ConfirmDialog from "@/components/ConfirmDialog.vue";
 
 const accountsStore = useAccountsStore();
@@ -86,7 +89,7 @@ async function handleRenameAccount() {
     await accountsStore.renameAccount(renameTargetId.value, remark);
     showRenameDialog.value = false;
   } catch (e) {
-    renameError.value = `${e}`;
+    renameError.value = formatIpcError(e);
   } finally {
     renaming.value = false;
   }
@@ -102,7 +105,7 @@ async function handleAddAccount() {
     showAddDialog.value = false;
     if (account) emit("select", account.id);
   } catch (e) {
-    addError.value = `添加账号失败: ${e}`;
+    addError.value = formatIpcError(e, "添加账号失败");
   } finally {
     adding.value = false;
   }
@@ -127,7 +130,7 @@ async function confirmRemoveAccount() {
   } catch (e) {
     // 失败时保留 removeTargetId：清空它会让框内的错误提示无法重试，
     // 用户只能关掉重来。
-    removeError.value = `删除账号失败: ${e}`;
+    removeError.value = formatIpcError(e, "删除账号失败");
   } finally {
     removing.value = false;
   }
@@ -154,7 +157,7 @@ async function handleStart(accountId: string) {
     // 不自动选中会让他再点一次账号行，而进度卡还停在别的账号上。
     emit("select", accountId);
   } catch (e) {
-    showActionError(`启动失败: ${e}`, true);
+    showActionError(formatIpcError(e, "启动失败"), true);
   } finally {
     pendingActions.value.delete(token);
   }
@@ -168,7 +171,7 @@ async function handleStop(accountId: string) {
   try {
     await accountsStore.stopMiner(accountId);
   } catch (e) {
-    showActionError(`停止失败: ${e}`, true);
+    showActionError(formatIpcError(e, "停止失败"), true);
   } finally {
     pendingActions.value.delete(token);
   }
@@ -193,8 +196,11 @@ async function confirmCaptureCookie() {
     showCaptureConfirm.value = false;
     if (account) emit("select", account.id);
   } catch (e) {
-    // 捕获期间保持对话框打开，失败文案显示在框内供重试
-    captureError.value = String(e);
+    // 捕获期间保持对话框打开，失败文案显示在框内供重试。
+    // 必须走 formatIpcError：原先这里是 String(e)，与 `${e}` 展示等价 ——
+    // 用户看到的是 Rust 内部措辞（含命令名与超时秒数）。
+    // 它此前逃过了 P2-9 的收口，因为那一轮的判据只搜 `${e}` 模板串。
+    captureError.value = formatIpcError(e);
   } finally {
     capturing.value = false;
   }
@@ -204,6 +210,182 @@ function cancelCaptureCookie() {
   showCaptureConfirm.value = false;
   captureError.value = "";
 }
+
+/**
+ * 方向键/Home/End 移动选中项，并把焦点一并带过去。
+ *
+ * roving tabindex 的标准做法：焦点与选中必须同步，否则用户按方向键后
+ * 视觉上的选中变了、焦点却还停在原来那一行 —— 下一次按方向键会从旧行
+ * 继续算，表现成「按键没反应」。
+ *
+ * 用 nextTick 等 DOM 更新：tabindex 由 :tabindex 绑定在选中项上，
+ * 不等到更新完成就 focus() 会聚焦到一个 tabindex=-1 的元素上
+ * （浏览器允许程序化聚焦，但随后 Tab 会跳到别处，行为不一致）。
+ *
+ * **模板里的绑定必须带 `.capture`（实测踩过，用户报「方向键不能移动选中」）**：
+ * 焦点落在行内的「启动/停止」按钮上时，`.down.prevent` 绑在**行**上会失效。
+ * 实测（真实 exe + CDP 派发按键）：
+ *     焦点在行上   → ArrowDown 生效，选中 0→1
+ *     焦点在按钮上 → ArrowDown 无效，选中不变（焦点从 BUTTON 变成 DIV）
+ * 原因：事件从按钮冒泡到行时，按钮没有阻止默认行为，浏览器已经把**默认
+ * 行为**（把焦点移到下一个可聚焦元素）执行掉了；行上的 handler 虽被调用，
+ * 但它拿到的 index 是渲染时闭包捕获的旧值，而焦点已不在那一行 —— 表现为
+ * 「按键没反应」。
+ * 而 **Tab 进入列表时焦点恰好停在按钮上**（Tab 顺序：行 → 行内按钮），
+ * 所以「Tab 后按方向键」必然无效 —— 这正是用户报告的现象。
+ * 捕获阶段在事件到达按钮**之前**执行，既能 preventDefault 掐掉浏览器的
+ * 默认焦点移动，也能保证 handler 拿到正确的 index。
+ *
+ * 行元素从**本组件自己的容器**里取，不用 document.querySelectorAll：
+ * 后者会命中页面上任何 role="option"（将来若有第二个列表组件就会串位），
+ * 而且它依赖「DOM 顺序 == accounts 顺序」这一隐含前提。
+ */
+const listEl = ref<HTMLElement | null>(null);
+
+/** 方向键/Home/End 移动选中项并把焦点带过去。
+ *
+ *  **返回「是否真的移动了」**，调用方据此决定要不要 `preventDefault`：
+ *  到边界时返回 `false` 且**不**阻止默认行为，好让事件继续冒泡到区域导航
+ *  （`src/lib/region-nav.ts`），由它跨到相邻区块 —— 这正是用户确认的
+ *  「到区域边缘后再按一次才跨区」：列表内部优先，列表到头的那次按键才交给区域导航。
+ *
+ *  早前这里是模板上的 `.prevent` 修饰符，它会**无条件** preventDefault，
+ *  于是列表到头时事件被吃掉、区域导航永远收不到 —— 跨区功能会静默失效。
+ */
+function moveSelection(from: number, delta: number): boolean {
+  const list = accountsStore.accounts;
+  if (list.length === 0) return false;
+  const next = Math.min(list.length - 1, Math.max(0, from + delta));
+  if (next === from) return false;
+  emit("select", list[next].id);
+  void nextTick(() => {
+    // 行元素从本组件自己的滚动容器里取（见模板上的 ref="listEl"），
+    // 不用 document.querySelectorAll —— 后者会命中页面上任何
+    // role="option"（将来若有第二个列表组件就会串位）。
+    //
+    // **必须排除正在离场的节点**：`.account-list-leave-active` 带
+    // position:absolute，删除某行后它在 150ms（--duration-fast）过渡期内
+    // **仍留在 DOM 里**，而 querySelectorAll 会把它算进索引。
+    // 于是 next（accounts 数组索引）与 rows 索引在过渡期内不等价 ——
+    // 实测：删除 B 后立刻按下方向键，accounts=[A,C,D] 而 DOM=[A,B,C,D]，
+    // rows[1] 指向已删除的 B，焦点被送到 B 上、aria-selected 却在 C 上。
+    // 触发窗口就是「删除后 150ms 内按方向键」，键盘用户可稳定复现。
+    const rows = listEl.value?.querySelectorAll<HTMLElement>(
+      '[role="option"]:not(.account-list-leave-active)',
+    );
+    rows?.[next]?.focus();
+  });
+  return true;
+}
+
+/** 行上的方向键入口：移动成功才阻止默认行为（见 `moveSelection` 的说明）。 */
+function onRowArrow(event: KeyboardEvent, from: number, delta: number): void {
+  if (moveSelection(from, delta)) event.preventDefault();
+}
+
+/** 拖拽排序。用户要求：整行可拖、半透明跟随、插入位置高亮线、边缘自动滚动、
+ *  拖拽期禁文字选中、**不需要键盘替代操作**、纯手动顺序。
+ *
+ *  **用 SortableJS（经 @vueuse/integrations 的 useSortable），不自己写拖拽**：
+ *  指针跟随、占位元素、边缘自动滚动、触屏兼容这一整套自己写要几百行且坑多。
+ *  （`@vueuse/integrations` 的 useSortable 内部排序工具直接取自
+ *   `Alfred-Skyblue/vue-draggable-plus`，两者同源，这里选前者是因为它的
+ *   `sortablejs` 是显式声明的 optional peer，依赖关系更清楚。）
+ *
+ *  **`forceFallback: true` 不能省**：SortableJS 默认用 HTML5 drag-and-drop
+ *  生成拖拽影像，而本项目已确认 HTML5 DnD 在 WebView2 下不可靠
+ *  （见 App.vue 侧栏拖拽把手的注释）。fallback 模式走它自己的指针事件 +
+ *  一个克隆元素，可控且能自定义样式。
+ *
+ *  **ref 必须挂在「直接子元素就是账号行」的那一层**（见模板里的 rowsEl）：
+ *  SortableJS 排的是容器的**直接子元素**，而 useSortable 默认的 onUpdate 用
+ *  `e.oldIndex/newIndex` 直接索引数组（见其 moveArrayElement 实现）。
+ *  挂到外层滚动容器上会因为中间隔了一层 TransitionGroup 而一个都排不到。
+ */
+const rowsEl = ref<HTMLElement | null>(null);
+/** 拖拽开始前的 id 顺序。**回滚必须用它**：拖拽结束时数组已经被 SortableJS
+ *  改过了，那时再读「当前顺序」拿到的已经是新顺序，拿它当回滚点等于不回滚。 */
+let orderBeforeDrag: string[] = [];
+
+// 传 ref 而不是 store 上的裸数组：moveArrayElement 对 ref 走「复制→改副本→整体赋值」，
+// 对裸数组走「原地 splice 再下一拍补回」—— 后者会有一拍「元素凭空少了一个」的中间态。
+const { accounts: accountsRef } = storeToRefs(accountsStore);
+
+useSortable(rowsEl, accountsRef, {
+  // 容器出现/消失时自动重建：账号列表在 loading / 错误 / 空列表分支下不渲染
+  watchElement: true,
+  animation: 150,
+  forceFallback: true,
+  // 克隆体挂到 body：**它现在被 style.css 隐藏了**（`visibility: hidden`），
+  // 所以位置本身不影响观感。仍然挂 body 是为了**避开 Vue**：
+  // 挂进列表容器（`fallbackOnBody: false`）的话，克隆体会成为 TransitionGroup
+  // 那层 div 的子节点，而那个 div 的子元素由 Vue 按 key 管理 ——
+  // 下次重渲染会把不认识的那个节点删掉。
+  fallbackOnBody: true,
+  fallbackClass: "account-row-fallback",
+  // 原位置的占位元素 —— 「插入位置高亮线」画在它身上（见 style.css）
+  ghostClass: "account-row-ghost",
+  // 行内按钮不触发拖拽：否则点「启动/停止」会变成把它拖起来
+  filter: "button",
+  // **`preventOnFilter` 必须显式关掉**（SortableJS 默认 true）。
+  // 默认值会对被 filter 命中的元素调用 `evt.preventDefault()`，而那个 evt 是
+  // `mousedown` —— 阻止它的默认行为会**阻止按钮获得焦点**。后果是：
+  // 点 B 行的「启动」→ 选中切到 B（handleStart 里 emit select），
+  // 但焦点还停在 A 行 → 此后按 ↑/↓ 是从 A 行开始算，与看到的高亮不一致。
+  preventOnFilter: false,
+  // 边缘自动滚动（SortableJS 默认就开，显式写出来表明是有意为之）
+  scroll: true,
+  scrollSensitivity: 40,
+  scrollSpeed: 12,
+  onStart: () => {
+    orderBeforeDrag = accountsStore.accounts.map((a) => a.id);
+    // 拖拽期禁文字选中：SortableJS 只管被拖的那个元素，指针扫过其它行的
+    // 文字时浏览器仍会选中，所以在 body 上整体禁掉。
+    document.body.style.userSelect = "none";
+    // 兜底：拖拽中窗口失焦（Alt+Tab / 弹出系统窗口）时 mouseup 可能收不到，
+    // 那样这个 `userSelect: none` 会永久留在 body 上 —— **整个应用再也选不中文字**，
+    // 而且用户完全想不到是「上次拖拽」造成的。所以失焦时也清一次。
+    window.addEventListener("blur", clearDragUserSelect, { once: true });
+  },
+  onEnd: () => {
+    clearDragUserSelect();
+    void persistOrderAfterDrag();
+  },
+});
+
+/** 清掉拖拽期的全局禁选态。`onEnd` 与「窗口失焦」两条路都会走它。 */
+function clearDragUserSelect() {
+  document.body.style.userSelect = "";
+  window.removeEventListener("blur", clearDragUserSelect);
+}
+
+/** 拖拽结束后把新顺序落盘。
+ *
+ *  **必须先 `await nextTick()`**：useSortable 默认的 onUpdate 走 moveArrayElement，
+ *  它把数组改动推迟到 `nextTick` 才赋值。在 onEnd 里同步读数组拿到的还是**旧顺序**，
+ *  据此落盘等于什么都没做。
+ *
+ *  失败时 `reorderAccounts` 回滚到 `orderBeforeDrag` —— 此时那次 nextTick 赋值
+ *  已经跑完，回滚不会再被它覆盖。 */
+async function persistOrderAfterDrag() {
+  const before = orderBeforeDrag;
+  await nextTick();
+  const after = accountsStore.accounts.map((a) => a.id);
+  // 拖回原位：SortableJS 也会触发 onEnd，但顺序没变，不必落盘
+  if (after.length === before.length && after.every((id, i) => id === before[i])) return;
+  // 保险：万一 DOM 与数组不同步（例如拖拽中途账号被删），宁可不落盘也不要写坏
+  if (after.length !== before.length || new Set(after).size !== after.length) return;
+  try {
+    await accountsStore.reorderAccounts(after, before);
+  } catch (e) {
+    showActionError(formatIpcError(e, "保存账号顺序失败"), true);
+  }
+}
+
+onUnmounted(() => {
+  // 拖拽中途卸载时恢复 body 的禁选态，否则整个应用再也选不中文字
+  document.body.style.userSelect = "";
+});
 
 // 底部「备注/删除」作用于当前选中账号（对齐旧版：行内只保留启动/停止）
 function handleBottomRename() {
@@ -225,10 +407,19 @@ function handleBottomRemove() {
        之间露出一小块背景色，看起来像「卡片没贴满」。
        card-hover 的 hover 边框变化保留，它不影响圆角。
        图标条模式已删除，这里不再有 collapsed 分支。 -->
-    <Card class="card-hover flex h-full flex-col rounded-none">
+    <Card
+      data-nav-region="accounts"
+      data-nav-order="2"
+      class="card-hover flex h-full flex-col rounded-none"
+    >
       <CardHeader class="px-3.5 pb-2.5 pt-3">
       <div class="flex items-center justify-between">
-        <CardTitle class="text-[11pt] font-semibold">账号</CardTitle>
+        <!-- 15px 而不是 11pt：11pt = 14.67px，与正文 text-sm（14px）只差
+             0.67px，三张卡的标题几乎与正文同大，层级完全靠字重承担 ——
+             任何字体回退或 DPI 缩放都可能让标题看起来比正文还小。
+             统一到 px 并与另两张卡（TaskProgress / LogViewer）保持
+             「15px + font-semibold」同一形态。 -->
+        <CardTitle class="text-[15px] font-semibold">账号</CardTitle>
         <span class="text-xs text-muted-foreground">
           {{ accountsStore.accounts.length }} 个
         </span>
@@ -330,12 +521,37 @@ function handleBottomRemove() {
            用原生 overflow-y-auto 而非引入 reka 的滚动条组件：后者会渲染
            一条独立的隐藏式滚动条元素，CSS 的 ::-webkit-scrollbar 盖不住它，
            而全局隐藏滚动条是本项目的统一要求。 -->
-      <div class="scroll-hidden h-full overflow-y-auto rounded-lg border border-input bg-input/40 p-1">
-        <div
-          v-if="accountsStore.loading"
-          class="py-8 text-center text-sm text-muted-foreground"
-        >
-          加载中...
+      <div
+        ref="listEl"
+        class="scroll-hidden h-full overflow-y-auto rounded-lg border border-input bg-input/40 p-1"
+      >
+        <!-- 骨架行而不是一行「加载中...」文字：
+             窗口在 App.vue 的 restoreWindowGeometry 完成（2~4 次轻量 IPC）
+             后就显示，而账号列表要等一次完整的 sidecar 往返 —— 这段时间里
+             左侧只有一句灰字，用户看到的是「一块什么都没有的区域」。
+             骨架行按真实条目的结构（圆点 + 名字 + 按钮）占位，
+             尺寸与真行一致，数据到位时不会发生布局跳动。
+             aria-hidden：这是纯视觉占位，读屏用户由下方 role="status"
+             的文案获知状态（否则会念出 4 个空条目）。 -->
+        <div v-if="accountsStore.loading" class="space-y-0.5" role="status">
+          <span class="sr-only">正在加载账号列表…</span>
+          <div
+            v-for="i in 4"
+            :key="i"
+            aria-hidden="true"
+            class="flex items-center justify-between rounded-md border border-border px-2.5 py-2"
+          >
+            <div class="flex items-center gap-2">
+              <span class="h-2 w-2 shrink-0 rounded-full bg-muted" />
+              <!-- 宽度写死成几个固定值而不是随机数：随机值每次重渲染都变，
+                   骨架自己就在抖，比没有骨架更显廉价 -->
+              <span
+                class="skeleton h-3.5 rounded"
+                :style="{ width: `${[72, 96, 60, 84][i - 1]}px` }"
+              />
+            </div>
+            <span class="skeleton h-7 w-16 shrink-0 rounded-md" />
+          </div>
         </div>
         <!-- 错误态：缺了它，sidecar 起不来时 accounts 保持 []，
              下面会渲染「暂无账号」，把故障伪装成空列表 -->
@@ -357,19 +573,45 @@ function handleBottomRemove() {
         >
           暂无账号，点击下方按钮添加
         </div>
+        <!-- relative 是 .account-list-leave-active 里 position: absolute 的定位祖先：
+             离开项要脱离文档流（否则它在 leave 期间仍占位，后面的行要等它消失
+             才动，-move 过渡的起点就是错的），而 absolute 需要最近的定位祖先
+             来界定 left/right 的参照。
+
+             **ref="rowsEl" 是拖拽排序的容器**：SortableJS 排的是容器的**直接子元素**，
+             而这里 tag="div" 渲染出的那层 div 的直接子元素正好就是账号行。
+             （ref 挂在 TransitionGroup 组件上也能拿到 DOM：VueUse 的 unrefElement
+               实现是 `plain?.$el ?? plain`，会自己取组件实例的 $el。）
+             `watchElement: true` 让它在「空列表 / 加载中」分支下不渲染时能自动补建。 -->
         <TransitionGroup
           v-else
+          ref="rowsEl"
           name="account-list"
           tag="div"
-          class="space-y-0.5"
+          class="relative space-y-0.5"
           role="listbox"
           aria-label="账号列表"
         >
+          <!-- roving tabindex：只有当前选中项可 Tab 聚焦（tabindex=0），
+               其余为 -1 —— 这是 role="listbox" 的标准交互。
+               此前每行都是 tabindex="0"，于是键盘用户要按 N+1 次 Tab
+               才能穿过账号列表（N = 账号数）。
+               方向键/Home/End 由 moveSelection 处理，焦点与选中同步移动。
+
+               **`@focus` 也要 emit select（焦点即选中）**：单选框语义的
+               listbox 里焦点与选中必须同步，否则会出现「焦点环在这一行、
+               高亮却在另一行」。这条不是理论顾虑 —— 区域导航
+               （src/lib/region-nav.ts）的 ↑/↓ 会把焦点送到区域内任意停靠点，
+               包括**未被选中**的账号行（例如从底部「添加账号」往上按）。
+               加上它之后任何来源的焦点（点击 / Tab / 区域导航 / moveSelection）
+               都会把选中带过去，两边不会再分叉。
+               `@focus` 与 `@click` 同时触发是幂等的（同一个 id 重复 emit 无副作用）。 -->
           <div
-            v-for="account in accountsStore.accounts"
+            v-for="(account, index) in accountsStore.accounts"
             :key="account.id"
             role="option"
-            tabindex="0"
+            data-nav-self-managed
+            :tabindex="account.id === selectedId ? 0 : -1"
             :aria-selected="account.id === selectedId"
             :aria-label="`${account.remark}，${account.running ? '运行中' : '未运行'}`"
             class="mx-px flex cursor-pointer items-center justify-between rounded-md border border-border px-2.5 py-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -382,8 +624,13 @@ function handleBottomRemove() {
                 : 'hover:bg-accent/50',
             ]"
             @click="emit('select', account.id)"
+            @focus="emit('select', account.id)"
             @keydown.enter.prevent="emit('select', account.id)"
             @keydown.space.prevent="emit('select', account.id)"
+            @keydown.down.capture="onRowArrow($event, index, 1)"
+            @keydown.up.capture="onRowArrow($event, index, -1)"
+            @keydown.home.capture="onRowArrow($event, index, -index)"
+            @keydown.end.capture="onRowArrow($event, index, accountsStore.accounts.length - 1 - index)"
           >
             <div class="flex min-w-0 items-center gap-2">
               <!-- 运行状态由行级 aria-label 提供，圆点本身对读屏隐藏 -->
@@ -500,6 +747,7 @@ function handleBottomRemove() {
     :message="`确定要删除账号「${removeTargetRemark}」吗？该操作不可撤销。`"
     :error="removeError"
     confirm-text="删除"
+    loading-text="删除中…"
     variant="destructive"
     :loading="removing"
     @update:open="showRemoveConfirm = $event"

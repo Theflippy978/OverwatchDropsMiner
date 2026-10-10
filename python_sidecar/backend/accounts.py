@@ -284,3 +284,42 @@ class AccountStore:
                 self._accounts = previous
                 raise
         return True
+
+    def reorder(self, ordered_ids: list[str]) -> bool:
+        """按给定顺序重排账号（拖拽排序的落盘入口）。
+
+        **顺序本身就是账号的显示顺序**：`accounts.json` 是有序 JSON 数组，
+        `list_accounts()` 原样返回，前端按数组顺序渲染。所以「重排」只是把
+        `self._accounts` 换成新顺序再落盘，**没有也不需要额外的 order 字段**
+        （加字段会引入「数组顺序与 order 字段不一致时以谁为准」的二义性）。
+
+        **契约（不满足则返回 False 且不落盘）**：
+          * `ordered_ids` 必须是当前账号集合的**一个排列** —— 既不缺也不多、无重复。
+            刻意**不**放宽成「子集」：放宽后调用方漏传一个账号就会把它静默删掉，
+            而用户看到的是「拖了一下，账号没了」。
+          * 顺序与当前完全相同时直接返回 True，不做无谓落盘（避免每次拖拽都写盘）。
+
+        与 add/update/remove 同口径：先改内存再落盘，**落盘失败回滚**。
+        不回滚的话，一次写失败会让内存顺序与磁盘顺序分叉 ——
+        用户当前会话看到新顺序，重启后变回去，且此后任何一次成功保存
+        都会把这次失败的顺序悄悄持久化。
+        """
+        with self._lock:
+            current_ids = [account.id for account in self._accounts]
+            # 先用 set 查重：等长但「重复一项 + 漏一项」的错配单看长度查不出来
+            if len(ordered_ids) != len(set(ordered_ids)):
+                return False
+            if set(ordered_ids) != set(current_ids):
+                return False
+            if ordered_ids == current_ids:
+                return True
+
+            by_id = {account.id: account for account in self._accounts}
+            previous = self._accounts
+            self._accounts = [by_id[account_id] for account_id in ordered_ids]
+            try:
+                self._save_locked()
+            except Exception:
+                self._accounts = previous
+                raise
+        return True

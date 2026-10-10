@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, nextTick, computed } from "vue";
 import { useLogsStore } from "@/stores/logs";
+import type { StoredLog } from "@/stores/logs";
 import { useAccountsStore } from "@/stores/accounts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -157,18 +158,49 @@ function segmentClass(kind: LogSegment["kind"]): string {
 }
 
 /**
- * 新日志到达时滚到底。
+ * 新日志到达时滚到底；**切换筛选时无条件滚到底**。
  *
- * 折叠态已取消（2026-10-05），面板常驻可滚动，所以只剩一种情况：
- * 用户手动往上翻阅历史时，不应该被新日志拽回底部 ——
- * 靠 atBottom 判定（距底 30px 内才跟随）。
+ * 面板常驻可滚动，所以「新日志」这一路只剩一种情况：用户手动往上翻阅
+ * 历史时，不应该被新日志拽回底部 —— 靠 atBottom 判定（距底 30px 内才跟随）。
+ *
+ * **必须监听 lastSeq 而不是 filteredLogs.length**：到达 maxLogs(5000) 之后
+ * 每批是「push N 条 + splice 掉 N 条」，length 恒为 5000，监听 length 的
+ * watcher 再也不会触发 —— 表现为长时间运行后日志面板不再跟随最新日志
+ * （实测：灌满 5000 条后再追加 5000 条，监听 length 触发 0 次）。
+ * lastSeq 由 store 的 nextSeq++ 生成，单调递增，永不受容量裁剪影响。
+ *
+ * **但只监听 lastSeq 会引入一个更糟的回归（实测确证）**：切换账号筛选时
+ * 结果集整体替换，浏览器把 scrollTop 钳在新内容高度以内，此时
+ * atBottom 判定为 false —— 而它**不会自愈**：此后新日志到达时同样因为
+ * atBottom=false 被提前 return，自动跟随**永久失效**，用户必须手动
+ * 滚到底才能恢复。实测轨迹：
+ *     5000 行滚到底 → 切「只看A」(120 行) → 切回「全部账号」
+ *     → scrollTop 停在 2201/99801、atBottom=false，
+ *       随后追加新日志触发 0 次（卡住）
+ *
+ * 因此把两种语义分开：
+ *   * **筛选变化**（filterAccountId 变）→ 属「视图重置」，**无条件滚到底**，
+ *     不看 atBottom。用户切筛选的意图就是「看这个账号的最新日志」，
+ *     此时停在半空没有任何理由。
+ *   * **新日志到达**（lastSeq 变）→ 仍尊重用户的上翻（atBottom 判定）。
+ *
+ * 用数组 watch 源让两者共用一次回调，靠比对旧值区分是哪种变化 ——
+ * 若拆成两个 watch，「筛选变化」那一路的 nextTick 会与另一路竞争写
+ * scrollTop，最终位置取决于回调注册顺序。
  */
 watch(
-  () => logsStore.filteredLogs.length,
-  async () => {
+  [() => logsStore.lastSeq, () => logsStore.filterAccountId],
+  async (_next, prev) => {
     const el = scrollRef.value;
     if (!el) return;
-    if (el.scrollHeight - el.scrollTop - el.clientHeight > 30) return;
+    // 清空后 lastSeq 变回 -1 会触发一次：此时无需滚动
+    if (logsStore.filteredLogs.length === 0) return;
+    const prevFilter = prev?.[1];
+    const filterChanged = prevFilter !== undefined && prevFilter !== logsStore.filterAccountId;
+    // 非筛选变化（即新日志）时才尊重用户的上翻位置
+    if (!filterChanged && el.scrollHeight - el.scrollTop - el.clientHeight > 30) {
+      return;
+    }
     await nextTick();
     el.scrollTop = el.scrollHeight;
   },
@@ -207,9 +239,94 @@ function levelDotClass(level: string) {
   }
 }
 
+/**
+ * 等级的文本形式，供读屏使用（视觉上 sr-only 隐藏）。
+ *
+ * 为什么需要：等级此前**只由颜色与圆点表达**，而圆点标了 aria-hidden，
+ * 颜色对读屏完全无效 —— 读屏用户无法区分一条日志是普通信息还是错误。
+ * 颜色不是唯一指示（WCAG 1.4.1）在这里必须靠这段文本补上。
+ */
+const LEVEL_TEXT: Record<string, string> = {
+  error: "错误",
+  warning: "警告",
+  debug: "调试",
+  info: "信息",
+};
+
+function levelText(level: string): string {
+  return LEVEL_TEXT[level] ?? "信息";
+}
+
 function formatTime(timestamp: string) {
   return new Date(timestamp).toLocaleTimeString("zh-CN");
 }
+
+/**
+ * 每行渲染所需的全部派生数据，**按 seq 缓存**。
+ *
+ * 为什么必须缓存：`segmentMessage`（20 分支 alternation 正则的 matchAll）与
+ * `formatTime`（走 ICU 的 toLocaleTimeString）此前都在模板里逐行调用，
+ * 而 store 每 120ms 就 flush 一批新日志 —— 每次 flush 都会让整个列表
+ * 重渲染，于是 5000 行 × (一次正则 + 一次 ICU) 每 120ms 重算一遍，
+ * 主线程持续被占住。写入只发生一次，渲染要发生 N 次，把计算从后者
+ * 挪到前者即可去掉绝大部分开销。
+ *
+ * 用 Map 而不是给 StoredLog 加字段：日志的格式化规则（FIELD_LABELS /
+ * ACCOUNT_KEYS / VALUE_STOP_CHARS）定义在本文件，而 StoredLog 在 store 层。
+ * 直接搬去 store 会破坏 tests/test_ui_regressions.py::LogFieldColoringTest
+ * 与 tests/check_log_regex.mjs 的既有断言（它们都从本文件读取这些常量）。
+ *
+ * 缓存必须随列表裁剪而修剪，否则 seq 单调递增会让 Map 无限增长（内存泄漏）。
+ * 修剪在下面 `logRows` 的尾部完成，不需要额外定时器。
+ *
+ * **修剪是「条件式」的，注释要按实现写（不要照愿望写）**：它被
+ * `if (rowCache.size > alive.size)` 门控，即**只在 size 超了才遍历清理**，
+ * 而不是「每次都精确清理」。这在当前实现下是正确且高效的，依据是一条
+ * 不变式：**rowCache ⊇ alive** —— 每个 alive 里的 seq 要么命中缓存、
+ * 要么在本轮被 set 进去，所以 size 恒 ≥ alive.size；门控成立时恰好
+ * 等价于「存在 stale 项」，此时遍历能精确清掉它们。
+ *
+ * 为什么不去掉门控、改成无条件清理：那会让**每次 logRows 重算都全遍历
+ * rowCache**（5000 项），而 logRows 每 120ms 就重算一次 —— 为了注释好读
+ * 而引入每 120ms 的 5000 次 Map 遍历，不划算。代价是这条不变式成为
+ * 前提：**将来若有人改动 set 时机（例如允许同一 seq 重复入 Map 导致
+ * alive 去重后更小），门控会静默跳过清理、stale 项开始累积**。
+ * 改那处时请一并把这里改成无条件清理。
+ */
+interface LogRow {
+  log: StoredLog;
+  time: string;
+  segments: LogSegment[];
+}
+
+const rowCache = new Map<number, { time: string; segments: LogSegment[] }>();
+
+const logRows = computed<LogRow[]>(() => {
+  const source = logsStore.filteredLogs;
+  const alive = new Set<number>();
+  const rows: LogRow[] = [];
+  for (const log of source) {
+    alive.add(log.seq);
+    let cached = rowCache.get(log.seq);
+    if (!cached) {
+      cached = {
+        time: formatTime(log.timestamp),
+        segments: segmentMessage(log.message),
+      };
+      rowCache.set(log.seq, cached);
+    }
+    rows.push({ log, time: cached.time, segments: cached.segments });
+  }
+  // 条件式修剪：门控依据是 rowCache ⊇ alive 这条不变式（见上方 rowCache
+  // 的注释）。成立时它等价于「存在 stale 项」，此时遍历能精确清掉
+  // 被 maxLogs 裁掉的旧 seq 与切筛选后不在结果集里的 seq。
+  if (rowCache.size > alive.size) {
+    for (const seq of rowCache.keys()) {
+      if (!alive.has(seq)) rowCache.delete(seq);
+    }
+  }
+  return rows;
+});
 
 function handleClear() {
   const filterId = logsStore.filterAccountId;
@@ -232,14 +349,21 @@ function handleClear() {
     <!-- 卡头是 shrink-0：高度固定，日志面板的伸缩全部由下方内容区承担。
          面板此前的 translateY(-8px) 已删，那个 transform 会与卡头下内边距
          抵消成「零间距」，让「全部账号」的下边框与面板上边框叠在一起。 -->
-    <CardHeader class="shrink-0 px-[18px] pb-2 pt-2">
+    <CardHeader class="shrink-0 px-4 pb-2 pt-2">
       <div class="flex items-center justify-between gap-2">
-        <CardTitle class="text-[11pt] font-bold">运行日志</CardTitle>
+        <!-- 与另两张卡统一为 15px + font-semibold（原为 11pt + font-bold，
+             既与正文几乎同大、字重又与 AccountList 不一致）。 -->
+        <CardTitle class="text-[15px] font-semibold">运行日志</CardTitle>
         <div class="flex items-center gap-2">
+          <!-- focus-visible:ring 不能省：紧邻的「清空」按钮走 Button 组件、
+               自带 focus-visible:ring-2，而原生 select 此前没有任何焦点样式 ——
+               键盘 Tab 过来时焦点完全不可见（WCAG 2.4.7）。 -->
           <select
             id="log-account-filter"
             aria-label="按账号过滤日志"
-            class="h-7 rounded-md border border-input bg-background px-2 text-xs"
+            class="h-7 rounded-md border border-input bg-background px-2 text-xs
+                   transition-colors hover:border-ring
+                   focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             :value="logsStore.filterAccountId ?? ''"
             @change="logsStore.setFilter(($event.target as HTMLSelectElement).value || null)"
           >
@@ -266,7 +390,12 @@ function handleClear() {
     <!-- min-h-0：flex 项目的 `min-height: auto` 会解析成内容高度，
          不写它日志面板就拿不到 flex 高度，超长时不内部滚动而是把卡片顶高
          （与 TaskProgress 的 CardContent 同一个道理）。 -->
-    <CardContent class="flex min-h-0 flex-1 flex-col px-[18px] pb-3.5 pt-0">
+    <!-- px-4 / pb-4（均 16px）：统一到 4px 网格，与另两张卡四边一致
+         （原为 18px 横向 + 14px 纵向的任意值）。
+         纵向 +2px 已计入最小窗口高度从 860 抬到 868（见 App.vue）。
+         注释刻意不复写旧类名 —— Tailwind v4 会扫源码原文并生成，
+         注释里的类名同样会污染产物。 -->
+    <CardContent class="flex min-h-0 flex-1 flex-col px-4 pb-4 pt-0">
       <!-- 日志面板吃掉卡内全部剩余高度（`.log-panel` 的 flex: 1），
            始终可滚动。折叠态已在 2026-10-05 取消：右列把剩余高度给了日志，
            「只有两行高」的折叠语义会让空白重新出现在卡外，
@@ -274,9 +403,19 @@ function handleClear() {
 
            不要加 h-full：那是相对 main 全文高度、会向下冲出 main。
            高度来源唯一是 `.log-panel` 的 flex 链，Tailwind 不再参与。 -->
+      <!-- role="log" + aria-label：读屏用户此前完全感知不到这是一个日志区，
+            而日志等级（info/warning/error/debug）的唯一非颜色通道是那个
+            6px 圆点，它标了 aria-hidden —— 于是等级信息对读屏彻底不可见。
+
+            **刻意不加显式 aria-live**：verbose 模式下每 120ms 就有一批日志
+            涌入，aria-live 会让读屏不停播报、把用户彻底淹没。role="log"
+            本身已带隐式的 polite 语义，交给读屏按自身策略处理更稳妥。
+            若后续实测确认需要显式声明，再按 V9 的结论调整。 -->
       <div
         id="log-panel"
         ref="scrollRef"
+        role="log"
+        aria-label="运行日志"
         class="log-panel min-h-0 flex-1 overflow-y-auto rounded-md border border-input bg-input/40"
       >
         <!-- 空态用 absolute inset-0 撑满面板再 flex 居中。
@@ -291,30 +430,36 @@ function handleClear() {
           暂无日志
         </div>
         <div v-else class="space-y-0.5 p-1.5 font-mono text-xs">
+          <!-- 遍历 logRows（已缓存的派生数据）而不是 filteredLogs：
+               时间格式化与结构化分段都在 computed 里按 seq 缓存，
+               模板只负责渲染，不再逐行重跑正则与 ICU。 -->
           <div
-            v-for="log in logsStore.filteredLogs"
-            :key="log.seq"
+            v-for="row in logRows"
+            :key="row.log.seq"
             class="flex min-h-[var(--log-row-h)] items-center gap-2 rounded px-1
                    leading-[var(--log-row-h)] hover:bg-accent/40"
           >
             <span class="shrink-0 tabular-nums text-muted-foreground/80">
-              {{ formatTime(log.timestamp) }}
+              {{ row.time }}
             </span>
             <span
-              v-if="log.account_id"
+              v-if="row.log.account_id"
               class="shrink-0 font-medium text-signal-success"
             >
-              {{ remarkOf(log.account_id) }}
+              {{ remarkOf(row.log.account_id) }}
             </span>
             <!-- 等级用色块而不是纯文字色：等级信息不该只靠颜色传达，
                  但色块本身也提供了非颜色的视觉锚点 -->
             <span
               class="h-1.5 w-1.5 shrink-0 rounded-full"
-              :class="levelDotClass(log.level)"
+              :class="levelDotClass(row.log.level)"
               aria-hidden="true"
             />
-            <span :class="getLevelColor(log.level)" class="min-w-0 break-all">
-              <template v-for="(seg, i) in segmentMessage(log.message)" :key="i">
+            <!-- 等级的文本通道：圆点与颜色对读屏都无效，这里补一个
+                 视觉隐藏的等级词，让「错误/警告」能被念出来。 -->
+            <span class="sr-only">{{ levelText(row.log.level) }}</span>
+            <span :class="getLevelColor(row.log.level)" class="min-w-0 break-all">
+              <template v-for="(seg, i) in row.segments" :key="i">
                 <span :class="segmentClass(seg.kind)">{{ seg.text }}</span>
               </template>
             </span>

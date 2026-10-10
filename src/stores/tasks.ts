@@ -3,11 +3,30 @@ import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useConfigStore, taskIdsFingerprint } from "@/stores/config";
 import { TASK_STATUS_CLAIMED } from "@/lib/types";
+import { formatIpcError } from "@/lib/ipc-error";
 import type { TaskItem } from "@/lib/types";
 
 interface AccountTasks {
   tasks: TaskItem[];
+  /** 后端 `refresh_tasks` 返回的**完整格式化任务进度文本**。
+   *
+   *  **不要把它接到 UI 上**：它的全部信息（时长、已看时长、进度、状态）
+   *  已经并入 TaskProgress 的胶囊与结构化列表，重复显示只会让用户对着
+   *  两处数字核对，而两处来源不同还容易不一致。TaskProgress.vue 里
+   *  有同名的说明。 */
   text: string;
+  /**
+   * 面向用户的**瞬时过程提示**（如「已有刷新进行中，已排队下一次刷新...」
+   * 「检测到任务完成，正在自动领取奖励...」）。
+   *
+   * 为什么必须与 `text` 分开：两者语义完全不同 —— `text` 是后端下发的
+   * 完整进度快照（每次刷新都覆盖，且刻意不显示），而这里是「刚刚发生了
+   * 什么」的一次性通知。此前两者共用一个字段，于是：
+   *   * 只读 `text` 会每轮刷新都弹出一大段被刻意隐藏的进度文本；
+   *   * 不读则「已排队」这类反馈永远不会出现（改前就是这种状态）。
+   * 拆成独立字段后，UI 只订阅 hint，语义清晰且不会误伤。
+   */
+  hint: string;
   error: string;
   cur: number;
   limit: number;
@@ -86,6 +105,7 @@ export const useTasksStore = defineStore("tasks", () => {
     return {
       tasks: [],
       text: "",
+      hint: "",
       error: "",
       cur: 0,
       limit: 0,
@@ -190,7 +210,7 @@ export const useTasksStore = defineStore("tasks", () => {
 
       maybeAutoClaim(accountId);
     } catch (e) {
-      accountTasks.error = `刷新任务失败: ${e}`;
+      accountTasks.error = formatIpcError(e, "刷新任务失败");
     } finally {
       accountTasks.refreshing = false;
       if (accountTasks.refreshQueued) {
@@ -220,7 +240,9 @@ export const useTasksStore = defineStore("tasks", () => {
       // 连点多次与一次等价，重跑只会有一次。
       accountTasks.refreshQueued = true;
       if (manual) {
-        accountTasks.text = "已有刷新进行中，已排队下一次刷新...";
+        // 写 hint 而不是 text：这是给用户看的一次性提示，
+        // 而 text 是后端下发的完整进度快照（刻意不显示）。
+        accountTasks.hint = "已有刷新进行中，已排队下一次刷新...";
       }
       // 等当前这条链的结束信号；由链上最后一轮兑现。
       await accountTasks.refreshSettled;
@@ -253,7 +275,7 @@ export const useTasksStore = defineStore("tasks", () => {
 
     // 先入队 pending，再下发，保证同一 ID 不会在一个周期内被重复下发
     accountTasks.pendingIds = new Set([...accountTasks.pendingIds, ...toClaim]);
-    accountTasks.text = "检测到任务完成，正在自动领取奖励...";
+    accountTasks.hint = "检测到任务完成，正在自动领取奖励...";
     void claimRewards(accountId, true);
   }
 
@@ -306,7 +328,9 @@ export const useTasksStore = defineStore("tasks", () => {
       accountTasks.pendingIds = new Set(
         [...accountTasks.pendingIds].filter((id) => !requested.has(id))
       );
-      accountTasks.text = (automatic ? "自动领取\n" : "") + result.text;
+      // 领取结果属于「刚刚发生了什么」的一次性通知，走 hint。
+      // 它不覆盖 text —— text 要保留后端最近一次下发的完整进度快照。
+      accountTasks.hint = (automatic ? "自动领取\n" : "") + result.text;
       // 先解除 claiming 再做嵌套刷新：否则 refreshTasks 内部的
       // maybeAutoClaim 会被「本轮正在领取」挡住，本轮新完成的任务
       // 要多等一个轮询周期（最短 10s）才被领取。
@@ -319,7 +343,10 @@ export const useTasksStore = defineStore("tasks", () => {
       accountTasks.pendingIds = new Set(
         [...accountTasks.pendingIds].filter((id) => !requested.has(id))
       );
-      accountTasks.error = `${automatic ? "自动领取" : "领取奖励"}失败: ${e}`;
+      accountTasks.error = formatIpcError(
+        e,
+        automatic ? "自动领取失败" : "领取奖励失败",
+      );
     } finally {
       accountTasks.claiming = false;
       if (accountTasks.claimQueued) {
@@ -341,6 +368,24 @@ export const useTasksStore = defineStore("tasks", () => {
     deletedIds.delete(accountId);
   }
 
+  /**
+   * 消费并清空 hint。
+   *
+   * **必须由消费方调用**，否则同一条提示只会出现一次：hint 是普通字符串
+   * 字段，而 UI 侧用 watch 监听它 —— watch 只在**值发生变化**时触发。
+   * 若写入后不清空，用户第二次连点「手动刷新」时 hint 仍是同一句话，
+   * watcher 不会触发，表现为「第二次连点没有任何提示」。
+   * （已用真实 Vue 运行时复现：不清空时连点两次只提示 1 次，清空后 2 次。）
+   *
+   * 与 `error` 的差别：error 在 runRound / claimRewards 的**入口**就被清空
+   * （见那两处的 `accountTasks.error = ""`），所以它天然能重复触发；
+   * hint 没有这样的入口可清（它由 UI 消费），故显式提供这个方法。
+   */
+  function consumeHint(accountId: string) {
+    const accountTasks = accountTasksMap.value[accountId];
+    if (accountTasks?.hint) accountTasks.hint = "";
+  }
+
   return {
     accountTasksMap,
     getAccountTasks,
@@ -349,5 +394,6 @@ export const useTasksStore = defineStore("tasks", () => {
     claimRewards,
     clearAccountTasks,
     reviveAccountTasks,
+    consumeHint,
   };
 });

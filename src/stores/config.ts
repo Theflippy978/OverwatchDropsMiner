@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { GuiConfigValues } from "@/lib/types";
+import { formatIpcError } from "@/lib/ipc-error";
 
 function clampInt(value: string, defaultVal: number, min: number, max: number): string {
   const n = parseInt(value, 10);
@@ -114,7 +115,9 @@ export const useConfigStore = defineStore("config", () => {
       }
     } catch (e) {
       if (token === loadToken) {
-        loadError.value = `${e}`;
+        // 用 formatIpcError 而不是裸 `${e}`：此前这一处连业务前缀都没有，
+        // 用户看到的是一句来自 Rust 的原始错误（含命令名与超时秒数）。
+        loadError.value = formatIpcError(e, "加载配置失败");
         // 关闭链路写下的兜底快照：上次退出时 save() 失败/超时，
         // 至少把用户编辑恢复回界面，避免直接退回默认值。
         const restored = restoreFromStash();
@@ -221,8 +224,9 @@ export const useConfigStore = defineStore("config", () => {
     try {
       saved = await invoke<GuiConfigValues>("save_config", { config: config.value });
     } catch (e) {
-      // 让调用方（ConfigForm）能提示保存失败，而不是静默丢弃
-      throw new Error(`保存配置失败: ${e}`);
+      // 让调用方（ConfigForm）能提示保存失败，而不是静默丢弃。
+      // 用 formatIpcError 剥离 Rust 内部措辞，只给用户可理解的说明。
+      throw new Error(formatIpcError(e, "保存配置失败"));
     }
     config.value = saved;
     loaded = true;

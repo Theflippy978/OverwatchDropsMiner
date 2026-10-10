@@ -25,7 +25,7 @@
  * 不能靠静态检查保证正确的地方。
  */
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
-import { ClipboardPaste, ClipboardCopy, RotateCcw, Scissors, MousePointerClick } from "lucide-vue-next";
+import { ClipboardPaste, ClipboardCopy, ClipboardType, RotateCcw, MousePointerClick } from "lucide-vue-next";
 
 type MenuKey = "undo" | "copy" | "paste" | "pasteText" | "selectAll";
 
@@ -142,7 +142,11 @@ const items = computed<MenuItem[]>(() => [
   { key: "undo", label: "撤销", shortcut: `${mod}Z`, enabled: canUndo.value, icon: RotateCcw },
   { key: "copy", label: "复制", shortcut: `${mod}C`, enabled: canCopy.value, icon: ClipboardCopy },
   { key: "paste", label: "粘贴", shortcut: `${mod}V`, enabled: canPaste, icon: ClipboardPaste },
-  { key: "pasteText", label: "粘贴为纯文本", shortcut: "", enabled: canPaste, icon: Scissors },
+  // 图标必须是「粘贴」语义。原先是 Scissors（剪刀）—— 那是「剪切」的通用
+  // 图形，与本文件开头「刻意不含剪切」的声明直接冲突，用户会以为这一项是剪切。
+  // 用 ClipboardType：与「粘贴」的 ClipboardPaste 同族，且「纯文本」的语义
+  // 由 T 字形承载，不会与普通粘贴混淆。
+  { key: "pasteText", label: "粘贴为纯文本", shortcut: "", enabled: canPaste, icon: ClipboardType },
   { key: "selectAll", label: "全选", shortcut: `${mod}A`, enabled: canSelectAll.value, icon: MousePointerClick },
 ]);
 

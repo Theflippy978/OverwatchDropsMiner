@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
 import { getCurrentWindow, primaryMonitor, availableMonitors, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { useAccountsStore } from "@/stores/accounts";
@@ -16,6 +16,8 @@ import QrLoginDialog from "@/components/QrLoginDialog.vue";
 import UpdateDialog from "@/components/UpdateDialog.vue";
 import ConfirmDialog from "@/components/ConfirmDialog.vue";
 import { NOTICE_AUTO_HIDE_MS } from "@/lib/notice";
+import { formatIpcError } from "@/lib/ipc-error";
+import { installRegionNav } from "@/lib/region-nav";
 
 const accountsStore = useAccountsStore();
 const configStore = useConfigStore();
@@ -25,28 +27,62 @@ const darkMode = ref(false);
 const showQrLogin = ref(false);
 const qrError = ref("");
 const themeFollowSystem = ref(true);
-let themePollTimer: number | null = null;
+/** 系统主题的监听句柄。**不是定时器** —— 原实现是 5 秒轮询，
+    2026-10-10 改为 matchMedia 的 change 事件（见 startSystemThemeWatch）。 */
+let themeMedia: MediaQueryList | null = null;
+/** 上一次**请求**切换到的主题；`null` = 还没有过手动/系统切换。
+ *
+ *  存在的唯一理由：`applyThemeWithTransition` 把 `darkMode.value` 的赋值推迟到
+ *  `startViewTransition` 的**异步**回调里，所以「连点两次」时第二次读
+ *  `darkMode.value` 拿到的还是旧值 —— 两次算出的目标相同，结果只切了一次。
+ *  用这个变量当基准，连点才能真的来回切。 */
+let themeRequested: boolean | null = null;
+
+/** 方向键区域导航的卸载函数（见 onMounted / onUnmounted）。
+ *  它挂的是 document 级 keydown，必须在卸载时摘掉 —— 否则热重载或
+ *  组件重建会叠加多份 listener，一次按键触发多次跳转。 */
+let uninstallRegionNav: (() => void) | null = null;
 
 const THEME_KEY = "ui/theme";
 
 /** 窗口硬下限：防布局崩坏。
  *
- *  1030 × 860 是用 CDP 逐档扫描实测出来的，不是估算：
+ *  **语义前提（2026-10-09 按 Tauri 源码更正）**：`tauri.conf.json` 的
+ *  `minWidth` / `minHeight` 与下面的常量**是同一语义 —— 客户区（inner）尺寸**，
+ *  两者必须相等，**不存在窗框差值**。Tauri 自己负责把客户区换算成外框：
+ *    * `tauri-utils` 的 config.rs 对 `min_width` 只注明 "in logical pixels"；
+ *    * `tauri-runtime-wry` 的 lib.rs 走 `window.inner_size_constraints(constraints)`；
+ *    * `tao` 的 windows 平台在写 `ptMinTrackSize` 前调用
+ *      `util::adjust_size(hwnd, size, is_decorated)`，用 `adjust_window_rect`
+ *      把**客户区尺寸换算成外框尺寸**（`PhysicalSize::new(rect.right - rect.left, ...)`）。
+ *  历史注释曾写「conf 的 minWidth 是外框宽度、conf 要比客户区下限多 14」，
+ *  那是**反的**，会让后续维护者把下限算错 14px，已更正。
+ *  实际影响：按旧假设「1030 → 客户区 1016」推导，而真实客户区就是 1030 ——
+ *  即当前值比原推导**更宽裕**，因此 1030 / 868 保持不变（偏保守是安全的）。
+ *
+ *  1030 × 868 的来历：
  *  宽度取「侧栏拉满 420 + 右列四区块 min-content 的最大值」，
  *  挂宝进度卡（检查点行 72 / 240 / 163 + 缩进与内边距）实测需要 538，
- *  配置卡 518，取 538。两个必须算进去的额外扣减：
- *   ① **tauri.conf.json 的 minWidth 是外框宽度**，客户区要再减去窗框差
- *      （125% 缩放下实测 14px），所以 conf 要比客户区下限多 14；
- *   ② **最坏情况是任务区正在纵向滚动时** —— `.scroll-subtle` 的 thin
- *      纵向滚动条会再吃掉约 8px 任务区宽度（实测行溢出 8px）。
- *  1030 → 客户区 1016 → 检查点行可用 481 ≥ 所需 477，留 4px 余量。
- *  高度裸下限 851（配置卡 293 + 挂宝卡下限 362 + 日志卡折叠 118
- *  + 行距与内边距 40 + 标题栏 36），取 860 是因为 3 秒自动消失的行内提示
- *  会让配置卡瞬时高约 30px，851/880 下会把挂宝卡挤到下限以下 1~2px。
- *  首次启动尺寸与此相同（tauri.conf.json 的 width/height）。
+ *  配置卡 518，取 538。还必须算进去的一个扣减：
+ *    **最坏情况是任务区正在纵向滚动时** —— `.scroll-subtle` 的 thin
+ *    纵向滚动条会再吃掉约 8px 任务区宽度（实测行溢出 8px）。
+ *  1030 → 检查点行可用 481 ≥ 所需 477，留 4px 余量。
+ *
+ *  高度裸下限 853（配置卡 297 + 挂宝卡下限 364 + 日志卡折叠 118
+ *  + 行距与内边距 38 + 标题栏 36）。**860 → 868 的来历**：三张卡的
+ *  纵向内边距统一到 4px 网格（16px）后内容总高 +8px（配置卡 +4、
+ *  挂宝卡 +2、日志卡 +2），853 → 861；保留原设计同样的 7px 余量
+ *  （用于吸收 3 秒自动消失的行内提示带来的瞬时增高约 30px 中的一部分，
+ *  以及 1~2px 的取整误差），861 + 7 = 868，且 868 是 4 的倍数。
+ *  取 868 而不是 861 的原因与原设计取 860 而不是 853 相同：
+ *  861 那档会把挂宝卡挤到下限以下 1~2px。
+ *
+ *  **868 是推算值，不是实测值**（860 才是 CDP 逐档扫描实测的），
+ *  待真机验收；且上面的宽度推导已按正确语义复核过，无需再减 14px。
+ *  首次启动尺寸与此无关（tauri.conf.json 的 width/height 是 1240×900）。
  *  必须与 src-tauri/tauri.conf.json 的 minWidth/minHeight 同源。 */
 const MIN_WINDOW_WIDTH = 1030;
-const MIN_WINDOW_HEIGHT = 860;
+const MIN_WINDOW_HEIGHT = 868;
 
 /** 窗口几何记忆的 localStorage key（值统一为逻辑像素 dip） */
 const GEOMETRY_KEY = "window_geometry";
@@ -188,7 +224,11 @@ onMounted(async () => {
   loadSidebarWidth();
   window.addEventListener("pointermove", onSidebarResizeMove);
   window.addEventListener("pointerup", onSidebarResizeEnd);
-  startSystemThemePolling();
+  startSystemThemeWatch();
+  // 方向键区域导航：把 ↑/↓ 从「只有账号列表能用」扩展到全界面。
+  // 在这里装而不是各组件各装一份 —— 它本质是**跨区块**的导航，
+  // 属主只能是应用级；组件级安装会变成多个 listener 互相抢按键。
+  uninstallRegionNav = installRegionNav();
   startConfigSync();
   startTaskRefresh();
   updateTimer = window.setTimeout(() => void checkUpdate(false), 3000);
@@ -207,10 +247,15 @@ onUnmounted(() => {
   if (showFallbackTimer !== null) clearTimeout(showFallbackTimer);
   if (updateTimer !== null) clearTimeout(updateTimer);
   if (updateNoticeTimer !== null) clearTimeout(updateNoticeTimer);
+  if (taskRefreshDebounce !== null) clearTimeout(taskRefreshDebounce);
   if (sidebarPersistHandle !== null) cancelAnimationFrame(sidebarPersistHandle);
+  // 主题过渡改用 View Transitions 后，不再有摘类定时器与轮询需要清理
+  // （过渡由浏览器托管，没有我们持有的句柄）。
   window.removeEventListener("pointermove", onSidebarResizeMove);
   window.removeEventListener("pointerup", onSidebarResizeEnd);
-  stopSystemThemePolling();
+  stopSystemThemeWatch();
+  uninstallRegionNav?.();
+  uninstallRegionNav = null;
   stopConfigSync();
   stopTaskRefresh();
   accountsStore.dispose();
@@ -281,7 +326,9 @@ function registerCloseHandler() {
         configSaveFailed.value = "";
       } catch (e) {
         console.error("保存会话配置失败", e);
-        configSaveFailed.value = `${e}`;
+        // formatIpcError 不带 context：下方 message 已经拼了「保存配置失败：」前缀，
+        // 这里再传一次会变成「保存配置失败：保存配置失败：…」。
+        configSaveFailed.value = formatIpcError(e);
       }
       try {
         await saveWindowGeometry();
@@ -362,10 +409,28 @@ function stopTaskRefresh() {
   }
 }
 
-// 「任务查询间隔」改动后立即按新周期重建定时器
+/** 「任务查询间隔」改动的防抖句柄 */
+let taskRefreshDebounce: number | null = null;
+
+// 「任务查询间隔」改动后按新周期重建定时器（带防抖）。
+//
+// 输入框是 ConfigForm 的 v-model，**每敲一个字符**就会触发这个 watch。
+// 无防抖时每次击键都 clearInterval + setInterval，把已经走过一半的计时
+// 整个归零 —— 用户慢慢输入「3600」的过程中，自动任务刷新可能长时间不触发。
+// 另外输入过程中的中间态也不该生效：清空输入框时 parseInt("") 得到 NaN，
+// 落到 `|| 30` 会瞬时把周期跳成 30s。
+//
+// 300ms 是「打字停顿」的量级：足够合并连续击键，又不会让用户觉得
+// 「改完了没反应」。真正生效仍由 startTaskRefresh 里的钳制保证范围合法。
 watch(
   () => configStore.config.task_query_interval_text,
-  () => startTaskRefresh()
+  () => {
+    if (taskRefreshDebounce !== null) clearTimeout(taskRefreshDebounce);
+    taskRefreshDebounce = window.setTimeout(() => {
+      taskRefreshDebounce = null;
+      startTaskRefresh();
+    }, 300);
+  }
 );
 
 /**
@@ -415,7 +480,7 @@ async function checkUpdate(force = false) {
     }
   } catch (e) {
     // 自动检查保持静默：启动阶段弹错误只会干扰用户点账号
-    if (force) announce = () => showUpdateNotice(`检查失败：${e}`, true);
+    if (force) announce = () => showUpdateNotice(formatIpcError(e, "检查失败"), true);
   } finally {
     // 本地开发包的版本号带 dev 标识，后端按「不拿 dev 版去比 release」
     // 的设计直接返回、不发网络请求。整个 invoke 在 1~2ms 内结束，
@@ -572,31 +637,115 @@ function updateTheme() {
   }
 }
 
+/** 主题切换：用浏览器原生的 View Transitions API 做「揭示」。
+ *
+ *  **为什么不再手写「挂过渡类 → 改类 → 等结束摘类」**（2026-10-09 重构）：
+ *  那套写法实测反复出问题，且每一次都只能修掉表面症状：
+ *    ① 挂类与改变量同帧 → 没有可插值的起始值，全部瞬变；
+ *    ② 改用 requestAnimationFrame 延后 → **仍然同帧**（实测两次 class
+ *       变化只隔 0.6ms，而一帧 21ms）；
+ *    ③ 改用「强制读计算样式」→ 过渡确实发生了，但固定 280ms 摘类会在
+ *       过渡中途截断，颜色被强行拉向终值；
+ *    ④ 改用 transitionend → **更糟**：该事件为每个元素、每个属性各触发
+ *       一次，第一个到达就摘类，把还在跑的过渡截断 —— 用户看到的是
+ *       **「闪烁两次」**（实测曲线在 t=260ms 与 t=530ms 各掉回一次）。
+ *  根因是这套机制要手工协调「全树元素的过渡时长」，而元素的时长本就
+ *  不一致（按钮 150ms、主题过渡 220ms、进度条 400ms），且摘类这个动作
+ *  本身又会改变 transition 声明、触发第二轮过渡。**结构上无法做对。**
+ *
+ *  View Transitions 把这层交给浏览器：它给旧状态拍一张快照、新状态拍一张，
+ *  然后在两张之间做过渡。没有「挂类/摘类」，也就没有「哪个元素先变」的问题。
+ *
+ *  **⚠ 但交叉淡变本身在浅↔深之间不可用**（2026-10-10 逐帧实测推翻）：
+ *  两套主题各以 50% 叠加时，背景（浅 #FFF → 深 #1A1A1A）与文字
+ *  （深 #111 → 浅 #EEE）会在中点相遇 —— bg ≈ #8C8C8C、text ≈ #7F7F7F，
+ *  对比度掉到约 **1.03:1**，实测帧里整屏是一片灰糊、按钮文字几乎看不见。
+ *  这正是用户报的「部分字会闪烁」。**数学上无解**：只要背景与前景同时插值，
+ *  它们必然在某一时刻亮度相等。所以最终改成**揭示**（旧快照不动、
+ *  新快照 clip-path 圆形展开），每个像素任一时刻只显示一套主题 —— 见 style.css。
+ *
+ *  **一次测量教训（必须记住）**：我最初验证这个改动时，测的是
+ *  「body 背景亮度是否单调」（22 个中间值、无反转 → 判定通过），
+ *  但**用户抱怨的是文字**。测「背景单调」根本证明不了「文字可读」——
+ *  背景可以完美单调，而文字在同一时刻已经和背景同亮度了。
+ *  **验证观感问题时，必须测用户实际抱怨的那个对象，而不是它旁边那个好测的。**
+ *
+ *  **实测数据**（真实 exe + Edge 152 WebView2，CDP 抓帧）：
+ *    * `document.startViewTransition` 可用；
+ *    * 连抓 13 帧检查视口四角与中心的亮度差，**未发现边缘闪白**
+ *      （视口边缘闪白这一疑点至此实测排除）。
+ *
+ *  **降级**：API 不可用（老 WebView2）或用户开启「减少动效」时，直接切 ——
+ *  与 MDN 的官方示例一致（先判 `document.startViewTransition` 是否存在）。 */
+function applyThemeWithTransition(next: boolean) {
+  // 同步记下「请求切到哪」：`startViewTransition` 的回调是**异步**跑的，
+  // 连点两次时第二次读 `darkMode.value` 还是旧值 → 两次算出的 next 相同 →
+  // 只切了一次（双击看起来像没反应）。`toggleTheme` 用这个值当基准。
+  themeRequested = next;
+
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const applyNow = () => {
+    darkMode.value = next;
+    updateTheme();
+  };
+
+  // 降级路径：不支持 View Transitions 或用户要求减少动效 → 直接切
+  if (reduced || typeof document.startViewTransition !== "function") {
+    applyNow();
+    return;
+  }
+
+  // **回调必须 await 到 Vue 把 DOM 更新完**：`startViewTransition` 会等回调返回的
+  // promise 落定之后才拍「新快照」，而 Vue 的组件更新是**微任务**（`nextTick`）。
+  // 不 await 的话新快照可能仍是旧状态 —— 具体表现是标题栏那个日/月图标
+  // （`TitleBar` 的 `:dark="darkMode"`）在整段揭示动画里显示旧图标，
+  // 动画结束后才「啪」地翻过来。
+  document.startViewTransition(async () => {
+    applyNow();
+    await nextTick();
+  });
+}
 function toggleTheme() {
   themeFollowSystem.value = false;
-  darkMode.value = !darkMode.value;
-  updateTheme();
-  saveTheme(darkMode.value ? "dark" : "light");
-  stopSystemThemePolling();
+  // 基准值取「上一次**请求**切到的主题」而不是 `darkMode.value`：
+  // 后者在过渡回调跑完之前仍是旧值（见 applyThemeWithTransition 的说明）。
+  const next = !(themeRequested ?? darkMode.value);
+  // saveTheme 必须在 applyThemeWithTransition **之前**用算好的 next 落盘：
+  // applyThemeWithTransition 把 darkMode.value 的赋值推迟到了过渡回调里
+  // （startViewTransition 的回调是异步调用的），所以在它之后读
+  // darkMode.value 拿到的仍是**旧值** —— 那会把主题存反，下次启动
+  // applySavedTheme 读到反的主题，表现为「切到浅色、重启变深色」。
+  saveTheme(next ? "dark" : "light");
+  applyThemeWithTransition(next);
+  stopSystemThemeWatch();
 }
 
-function startSystemThemePolling() {
-  if (themePollTimer !== null) return;
-  themePollTimer = window.setInterval(() => {
-    if (!themeFollowSystem.value) return;
-    const systemDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-    if (systemDark !== darkMode.value) {
-      darkMode.value = systemDark;
-      updateTheme();
-    }
-  }, 5000);
+/** 系统主题跟随：用 matchMedia 的 change 事件，**不再轮询**。
+ *
+ *  原实现是 `setInterval(..., 5000)` 轮询 matchMedia，两个问题：
+ *    ① 用户在系统里切主题后，本程序最长 **5 秒**才跟上，看起来像没生效；
+ *    ② 常驻定时器在窗口不可见时也照跑。
+ *  而 matchMedia 本身就支持 change 事件 —— 用事件既省一个常驻定时器，
+ *  又让跟随延迟从「最多 5s」降到即时。
+ *
+ *  函数名从 `…Polling` 改为 `…Watch`：留着旧名字会误导下一个读者去找定时器
+ *  改名是为了让下一个读者不必再去找那个已经不存在的定时器。 */
+function onSystemThemeChange(event: MediaQueryListEvent) {
+  // 用户手动选过主题就不再跟随（与轮询版的判据一致）
+  if (!themeFollowSystem.value) return;
+  // 跟随系统变化也走过渡：否则用户在系统里切主题、本程序却是硬切
+  applyThemeWithTransition(event.matches);
 }
 
-function stopSystemThemePolling() {
-  if (themePollTimer !== null) {
-    clearInterval(themePollTimer);
-    themePollTimer = null;
-  }
+function startSystemThemeWatch() {
+  if (themeMedia) return;
+  themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
+  themeMedia.addEventListener("change", onSystemThemeChange);
+}
+
+function stopSystemThemeWatch() {
+  themeMedia?.removeEventListener("change", onSystemThemeChange);
+  themeMedia = null;
 }
 
 async function handleQrSuccess(cookie: string) {
@@ -609,7 +758,9 @@ async function handleQrSuccess(cookie: string) {
   } catch (e) {
     // 不能用 alert()：WebView2 里它是阻塞式 modal，弹出后窗口停止响应
     // 指针事件，「备注」「删除」全部点不动，唯一出路是杀进程。
-    qrError.value = `添加账号失败: ${e}`;
+    // 这个串会经 QrLoginDialog 的 addError prop 直接渲染给用户，
+    // 所以必须走 formatIpcError（否则露出 Rust 命令名与超时秒数）。
+    qrError.value = formatIpcError(e, "添加账号失败");
     showQrLogin.value = true;
   }
 }

@@ -930,6 +930,26 @@ pub fn rename_account(
     })
 }
 
+/// 按给定顺序重排账号（前端拖拽排序）。
+///
+/// 同步命令（不是 `call_blocking`）：这个调用只做一次本地 JSON 落盘，
+/// 不碰网络、不启子进程，耗时在毫秒级 —— 与 `remove_account` 同档。
+/// 用 async + `call_blocking` 反而要额外占一个阻塞线程池名额。
+///
+/// 后端会校验 `ordered_ids` 必须是**当前账号集合的一个排列**（不缺不多），
+/// 不满足就返回 Err，前端据此回滚本地顺序。
+#[tauri::command]
+pub fn reorder_accounts(
+    ordered_ids: Vec<String>,
+    sidecar: tauri::State<'_, SidecarManager>,
+) -> Result<(), String> {
+    sidecar.call(
+        "reorder_accounts",
+        serde_json::json!({ "ordered_ids": ordered_ids }),
+    )?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn start_miner(
     account_id: String,

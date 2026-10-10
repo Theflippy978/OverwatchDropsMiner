@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, watch, onUnmounted } from "vue";
+import { ref, computed, watch, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { formatIpcError } from "@/lib/ipc-error";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -42,6 +43,21 @@ const error = ref("");
 const statusText = ref("");
 const countdown = ref(0);
 
+/**
+ * 二维码会话的显式状态。
+ *
+ * 为什么需要它：按钮文案此前靠 `statusText.includes("过期")` 反推
+ * （statusText 在三处被赋成「二维码已过期，请重新生成」），
+ * 错误分级也靠 `text.includes("会话不存在")` 之类的字符串匹配 ——
+ * 改一句面向用户的文案就会**静默改变按钮行为**，且没有任何测试会失败。
+ * 展示层的文本不该驱动控制流。
+ */
+type QrState = "idle" | "loading" | "waiting" | "scanned" | "expired" | "error";
+const qrState = ref<QrState>("idle");
+
+/** 过期态（按钮应显示「重新生成二维码」而不是「刷新二维码」） */
+const isExpired = computed(() => qrState.value === "expired");
+
 const POLL_INTERVAL_MS = 2000;
 const SESSION_SECONDS = 180;
 
@@ -80,6 +96,7 @@ async function startSession() {
   statusText.value = "";
   qrImage.value = "";
   qrKey.value = "";
+  qrState.value = "loading";
   const seq = sessionSeq;
   try {
     const challenge = await invoke<QrChallenge>("qr_login");
@@ -87,11 +104,13 @@ async function startSession() {
     qrImage.value = challenge.qr_image;
     qrKey.value = challenge.qr_key;
     statusText.value = "请使用哔哩哔哩手机客户端扫码";
+    qrState.value = "waiting";
     startCountdown();
     startPolling();
   } catch (e) {
     if (seq !== sessionSeq) return;
-    error.value = `获取二维码失败: ${e}`;
+    error.value = formatIpcError(e, "获取二维码失败");
+    qrState.value = "error";
   } finally {
     if (seq === sessionSeq) loading.value = false;
   }
@@ -116,13 +135,16 @@ async function pollOnce() {
     switch (result.status) {
       case "unscanned":
         statusText.value = "请使用哔哩哔哩手机客户端扫码";
+        qrState.value = "waiting";
         break;
       case "scanned":
         statusText.value = "已扫码，请在手机上确认登录";
+        qrState.value = "scanned";
         break;
       case "expired":
         stopTimers();
         statusText.value = "二维码已过期，请重新生成";
+        qrState.value = "expired";
         break;
       case "success":
         stopTimers();
@@ -136,14 +158,21 @@ async function pollOnce() {
     // 原实现一律「保持轮询下次重试」，于是 main.py 返回的
     // 「二维码会话不存在，请重新生成」被降级成一句临时文案，
     // 用户永远拿不到引导，只能自己发现要去点刷新按钮。
+    //
+    // 这里的字符串匹配**保留**：判据来自后端返回的错误原文（不是本组件
+    // 自己写的展示文案），而 IPC 契约没有错误码，只能按内容识别。
+    // 与按钮文案的区别在于：改这里的文案不会影响任何行为 —— 它是
+    // 消费方，不是被消费的展示文本。
     const text = String(e);
     if (text.includes("会话不存在") || text.includes("已过期") || text.includes("invalid")) {
       stopTimers();
       sessionSeq += 1;
       statusText.value = "二维码已过期，请重新生成";
+      qrState.value = "expired";
     } else {
       // 网络抖动时保持轮询，下次重试
-      statusText.value = `查询状态失败: ${e}`;
+      statusText.value = formatIpcError(e, "查询状态失败");
+      qrState.value = "error";
     }
   } finally {
     polling = false;
@@ -158,6 +187,7 @@ function startCountdown() {
     if (countdown.value <= 0) {
       stopTimers();
       statusText.value = "二维码已过期，请重新生成";
+      qrState.value = "expired";
     }
   }, 1000);
 }
@@ -182,6 +212,8 @@ function stopSession() {
     invoke("qr_cancel").catch(() => undefined);
   }
   qrKey.value = "";
+  // 状态复位：下次打开时按钮应显示「刷新二维码」而不是沿用上次的过期态
+  qrState.value = "idle";
 }
 
 function handleOpenChange(next: boolean) {
@@ -260,8 +292,10 @@ function handleCancel() {
 
       <DialogFooter>
         <Button variant="outline" @click="handleCancel">取消</Button>
+        <!-- 文案由显式的 qrState 决定，不再靠 statusText.includes("过期")
+             反推 —— 那种写法在改文案时会静默改变按钮行为。 -->
         <Button :disabled="loading" @click="startSession">
-          {{ countdown === 0 || statusText.includes("过期") ? "重新生成二维码" : "刷新二维码" }}
+          {{ isExpired || countdown === 0 ? "重新生成二维码" : "刷新二维码" }}
         </Button>
       </DialogFooter>
     </DialogContent>

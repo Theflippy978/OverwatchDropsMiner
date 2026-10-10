@@ -26,9 +26,14 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits)
       props.class,
     )"
   >
+    <!-- 图标尺寸必须与容器一致：容器是 h-3.5 w-3.5（14px），
+         而 Check 原为 w-4 h-4（16px）—— 溢出 2px，且 flex 居中后
+         上下各露 1px，勾选标记看起来「顶出格子」。
+         同文件的 RadioItem 用的是 h-2 w-2（8px），也小于容器，
+         两处都在容器内，只有这里溢出。 -->
     <span class="absolute left-2 flex h-3.5 w-3.5 items-center justify-center">
       <DropdownMenuItemIndicator>
-        <Check class="w-4 h-4" />
+        <Check class="h-3.5 w-3.5" />
       </DropdownMenuItemIndicator>
     </span>
     <slot />

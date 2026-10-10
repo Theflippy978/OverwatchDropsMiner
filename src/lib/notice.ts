@@ -9,6 +9,21 @@ import { onUnmounted, ref } from "vue";
 export const NOTICE_AUTO_HIDE_MS = 3000;
 
 /**
+ * 错误提示的自动消失时长。
+ *
+ * 比成功提示长得多（10s），理由是两者的「错过成本」不对称：
+ *   * 成功提示晚几秒消失没有代价，用户已经知道操作成功了；
+ *   * 错误提示一旦消失就**再也查不到** —— 本项目没有 toast 历史面板，
+ *     也没有把行内错误写进日志，用户若此刻正在看浏览器（挂宝场景的常态），
+ *     回来时只看到「什么都没发生过」，无从判断刚才那步到底成没成。
+ *
+ * 仍会自动消失而不是常驻：常驻的失败提示会把配置卡下方的说明行与
+ * 后续内容一直往下挤，且用户下次操作时它会被新提示顶掉 ——
+ * 那种「看起来还在、其实已经过期」的状态比消失更误导。
+ */
+export const ERROR_NOTICE_AUTO_HIDE_MS = 10000;
+
+/**
  * 页面级行内提示：3 秒后自动消失。
  *
  * 为什么需要它：此前 8 处提示（保存/导入/导出结果、测试通知结果、自动获取失败、
@@ -34,6 +49,10 @@ export function useTimedNotice(delayMs: number = NOTICE_AUTO_HIDE_MS) {
       timer = null;
     }
     text.value = "";
+    // isError 必须一并复位：它是「当前这条提示是不是错误」的状态，
+    // 提示已清空却留着 true 会让后续任何读它的逻辑拿到过期结论
+    // （例如「先 clear 再按条件 show」的写法会继承上一次的错误态）。
+    isError.value = false;
   }
 
   /**
@@ -42,15 +61,22 @@ export function useTimedNotice(delayMs: number = NOTICE_AUTO_HIDE_MS) {
    * 重置而不是叠加：`ConfigForm` 里保存与测试通知共用同一条反馈位，
    * 连点两下「保存配置」时若各自起一个定时器，先那条的定时器会在
    * 3 秒后把后一条的提示一起清掉。
+   *
+   * 错误提示的停留时长单独放宽到 ERROR_NOTICE_AUTO_HIDE_MS（见其注释）：
+   * 调用方传进来的 delayMs 仍是「成功提示」的时长，取两者较大值，
+   * 这样既不会把显式传了更长时长的调用方压回去，也不会让错误提示
+   * 沿用 3 秒这种「来不及读」的时长。
    */
   function show(message: string, error = false) {
     if (timer !== null) clearTimeout(timer);
     text.value = message;
     isError.value = error;
+    const holdMs = error ? Math.max(delayMs, ERROR_NOTICE_AUTO_HIDE_MS) : delayMs;
     timer = window.setTimeout(() => {
       timer = null;
       text.value = "";
-    }, delayMs);
+      isError.value = false;
+    }, holdMs);
   }
 
   // 组件卸载时清掉未触发的定时器：否则会对已卸载组件的 ref 写值，

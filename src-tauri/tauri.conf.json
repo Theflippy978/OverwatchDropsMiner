@@ -1,6 +1,6 @@
 {
   "productName": "OverwatchDropsMiner",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "identifier": "com.overwatchdropsminer.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -15,7 +15,7 @@
         "width": 1240,
         "height": 900,
         "minWidth": 1030,
-        "minHeight": 860,
+        "minHeight": 868,
         "resizable": true,
         "fullscreen": false,
         "visible": false,

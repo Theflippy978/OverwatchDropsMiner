@@ -1,7 +1,7 @@
 {
   "name": "overwatchdropsminer",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,15 +15,18 @@
     "@tauri-apps/plugin-dialog": "^2.8.0",
     "@tauri-apps/plugin-opener": "^2.6.0",
     "@vueuse/core": "^15.0.0",
+    "@vueuse/integrations": "15.0.0",
     "lucide-vue-next": "^1.0.0",
     "pinia": "^4.0.3",
     "reka-ui": "^2.10.5",
+    "sortablejs": "^1.15.7",
     "vue": "^3.5.13"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2",
     "@types/node": "^26.6.3",
+    "@types/sortablejs": "^1.15.9",
     "@vitejs/plugin-vue": "^6.0.7",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
