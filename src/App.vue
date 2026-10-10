@@ -438,18 +438,18 @@ watch(
  *
  * 两条调用路径，只有 force 不同：
  * - 启动 3s 后自动检查（force=false）：受 sidecar 侧 update_channel 门禁约束，
- *   dev 渠道不去打扰 GitHub API（未认证限流 60 次/小时）；无更新时完全静默。
- * - 标题栏按钮手动检查（force=true）：绕过**渠道**门禁真去查一次；结果一律
- *   给用户可见反馈。
+ *   dev 渠道不去打扰 GitHub API（未认证限流 60 次/小时）；**不成功也不吭声**
+ *   （启动阶段弹错误只会干扰用户点账号）。
+ * - 标题栏按钮手动检查（force=true）：绕过**渠道**门禁真去查一次；无论成败
+ *   都给用户可见反馈。
  *
- * 注意 force 绕的只是渠道，不是「版本号能不能比较」：版本号必须是可数值比较的
- * 真实版本（`_version.py` 的 `APP_VERSION`，与 tauri.conf.json 同源）。若把它
- * 写成 `0.0.0+dev` 这类占位串，手动检查会被判为无意义比较而直接返回 ——
- * 按钮的菊花与 3 秒提示都正常，却永远显示「已是最新版本」，无从察觉。
+ * 后端返回的是 status 四态（up_to_date / update_available / skipped / failed），
+ * 不是「有没有新版」的布尔值 —— 后者会把「网络失败」「GitHub 限流」
+ * 「版本号是占位串」统统显示成「已是最新版本」。手动检查必须把这四种情况
+ * 分开说清楚，用户才知道是该重试、该换版本、还是确实已经最新。
  *
  * 单飞行：checkingUpdate 兼作锁。GitHub 未认证 API 限流是 60 次/小时，
- * 连点几下就会开始返回 403，而 403 与「没有新版本」在响应里长得一样，
- * 用户只会看到「已是最新」这种错误结论。
+ * 连点几下就会开始返回 403 —— 现在它会如实显示「限流」，而不是「已是最新」。
  */
 async function checkUpdate(force = false) {
   if (checkingUpdate.value) return;
@@ -463,10 +463,12 @@ async function checkUpdate(force = false) {
   try {
     const result = await invoke<{
       update_available: boolean;
+      status: string;
+      message: string;
       latest_version: string;
       release_url: string;
     }>("check_update", { force });
-    if (result.update_available) {
+    if (result.status === "update_available") {
       updateLatestVersion.value = result.latest_version;
       updateReleaseUrl.value = result.release_url;
       showUpdateDialog.value = true;
@@ -476,7 +478,13 @@ async function checkUpdate(force = false) {
           showUpdateNotice(`发现新版本 ${result.latest_version}`, false);
       }
     } else if (force) {
-      announce = () => showUpdateNotice("已是最新版本", false);
+      // 只有真正比对完、且本地不落后才说「已是最新」；
+      // 失败（网络 / 限流 / 远端异常）与跳过（版本号不可比较）都如实说原因。
+      const upToDate = result.status === "up_to_date";
+      const text = upToDate
+        ? "已是最新版本"
+        : result.message || "检查更新失败，请稍后重试";
+      announce = () => showUpdateNotice(text, !upToDate);
     }
   } catch (e) {
     // 自动检查保持静默：启动阶段弹错误只会干扰用户点账号

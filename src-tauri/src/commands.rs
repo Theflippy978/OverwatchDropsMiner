@@ -1383,7 +1383,15 @@ pub struct ShutdownResult {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateCheckResult {
+    /// 仅当 status == "update_available" 时为真。保留这个布尔值是为了让
+    /// 调用方不必认识 status 的词表就能做最粗的判断。
     pub update_available: bool,
+    /// 四选一：up_to_date / update_available / skipped / failed。
+    /// **不要把它压回布尔值** —— 那样「网络失败」「GitHub 限流」「版本号不可比较」
+    /// 就又会和「已是最新」混在一起，界面向用户撒谎。
+    pub status: String,
+    /// 面向用户的说明，失败与跳过时非空。
+    pub message: String,
     pub latest_version: String,
     pub release_url: String,
 }
@@ -1414,11 +1422,21 @@ pub fn check_update(
     let safe = RELEASE_URL_ALLOWED_PREFIXES
         .iter()
         .any(|p| raw.starts_with(p));
+    // sidecar 没给 status 时按 failed 处理：缺失状态说明链路有问题，
+    // 这时候报「已是最新」比报「检查失败」危险得多。
+    let status = resp
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("failed")
+        .to_string();
     Ok(UpdateCheckResult {
-        update_available: resp
-            .get("update_available")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        update_available: status == "update_available",
+        status,
+        message: resp
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         latest_version: resp
             .get("latest_version")
             .and_then(|v| v.as_str())

@@ -1506,9 +1506,19 @@ class PythonSidecar:
     async def _check_update(self, params: dict) -> dict:
         # force 由前端手动按钮传入：启动时的自动检查不传（仍受 update_channel
         # 门禁，dev 包不去打扰 GitHub API），用户主动点才绕过。
+        #
+        # 返回 status 而不是一个「有没有新版」的布尔值：把网络失败、GitHub 限流、
+        # 版本号不可比较统统压成「没有新版」，界面就会显示「已是最新版本」——
+        # 那是向用户撒谎，而且开发者完全无从察觉。
+        # 实测复现：本机未认证配额耗尽（60/60）时，旧代码下点「检查更新」
+        # 拿到的是 {"update_available": false} → 胶囊显示「已是最新版本」，
+        # 而远端其实已经有 v1.2.0。
         force = bool(params.get("force", False))
         try:
-            from python_sidecar.backend.browser.update_checker import check_latest_release
+            from python_sidecar.backend.browser.update_checker import (
+                STATUS_FAILED,
+                check_latest_release,
+            )
             from python_sidecar.backend._version import (
                 APP_VERSION,
                 UPDATE_CHANNEL,
@@ -1518,8 +1528,8 @@ class PythonSidecar:
             # 必须丢到线程里：check_latest_release 是同步 urllib（8s 超时），
             # 直接在事件循环里调会让这 8 秒内所有在途 IPC 都无法响应、
             # 扫码轮询定时器也不触发。wait_for 的 10s 略大于 urllib 的 8s，
-            # 让「网络慢」表现为 None（无更新）而不是抛超时异常。
-            result = await asyncio.wait_for(
+            # 让「网络慢」落在外层超时上而不是把异常抛给前端。
+            outcome = await asyncio.wait_for(
                 asyncio.to_thread(
                     check_latest_release,
                     app_version=APP_VERSION,
@@ -1531,15 +1541,16 @@ class PythonSidecar:
                 ),
                 timeout=10.0,
             )
-            if result is None:
-                return {"update_available": False}
-            return {
-                "update_available": True,
-                "latest_version": result.latest_version,
-                "release_url": result.release_url,
-            }
+            payload: dict = {"status": outcome.status, "message": outcome.message}
+            if outcome.result is not None:
+                payload["latest_version"] = outcome.result.latest_version
+                payload["release_url"] = outcome.result.release_url
+            return payload
         except (asyncio.TimeoutError, TimeoutError):
-            return {"update_available": False}
+            return {
+                "status": STATUS_FAILED,
+                "message": "检查更新超时（超过 10 秒），请稍后重试",
+            }
         except Exception as e:
             return {"error": f"检查更新失败: {_safe_error(e)}"}
 
