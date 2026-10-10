@@ -3,6 +3,7 @@
 </p>
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL%20v3-blue.svg" alt="License: GPL v3"></a>
+  <a href="https://github.com/Theflippy978/OverwatchDropsMiner/releases"><img src="https://img.shields.io/badge/version-1.2.0-2ea44f.svg" alt="Version 1.2.0"></a>
   <a href="https://tauri.app"><img src="https://img.shields.io/badge/Tauri-2-24C8DB.svg" alt="Tauri 2"></a>
   <a href="https://vuejs.org"><img src="https://img.shields.io/badge/Vue-3-42b883.svg" alt="Vue 3"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.14-3776AB.svg" alt="Python 3.14"></a>
@@ -32,6 +33,8 @@
 | **浏览器自动捕获** | 一键从 Edge / Chrome 自动读取登录态 |
 | **自动领取奖励** | 掉宝任务完成后自动领取，支持 Gotify / 企业微信 / Server酱 等多渠道通知 |
 | **实时进度追踪** | 以 B 站服务器计时为准，断线自动暂停、重连续累 |
+| **账号拖拽排序** | 直接拖动账号行调整顺序，顺序立即保存 |
+| **方向键区域导航** | ↑/↓ 在标题栏、账号列表、配置卡、挂宝进度卡之间跳转 |
 | **深浅色主题** | 首次启动跟随系统，支持一键切换 |
 | **分账号日志** | 多线程日志按账号分流，界面实时显示 |
 | **凭据加密** | Cookie 经 Windows DPAPI 加密后落盘，明文不落磁盘 |
@@ -47,7 +50,7 @@
 ### 方式一：下载发布版（推荐）
 
 前往 [Releases](https://github.com/Theflippy978/OverwatchDropsMiner/releases) 下载
-`OverwatchDropsMiner-win-v1.1.0.zip`（约 48 MB），**解压即用、免安装**。
+`OverwatchDropsMiner-win-v1.2.0.zip`（约 47.5 MB），**解压即用、免安装**。
 
 压缩包内含两个文件，**必须放在同一目录**（解压后默认就在一起，请勿只复制其中一个）：
 
@@ -63,9 +66,10 @@
 <details>
 <summary><b>校验下载完整性</b></summary>
 
+每个 Release 的正文里都附有该版本的 SHA256，对照即可：
+
 ```powershell
-Get-FileHash .\OverwatchDropsMiner-win-v1.1.0.zip -Algorithm SHA256
-# 应为 41350D6A72B10343859FD76631CBE5D0FE0424266E33FDD90D744BAFB125AD85
+Get-FileHash .\OverwatchDropsMiner-win-v1.2.0.zip -Algorithm SHA256
 ```
 
 </details>
@@ -75,7 +79,7 @@ Get-FileHash .\OverwatchDropsMiner-win-v1.1.0.zip -Algorithm SHA256
 <details>
 <summary><b>展开：源码运行与打包步骤</b></summary>
 
-**环境要求**：Windows 10/11 · Node.js 22+ · pnpm · Python 3.14 · Rust 工具链（含 MSVC）
+**环境要求**：Windows 10/11 · Node.js 20.19+ 或 22.12+ · pnpm · Python 3.14 · Rust 工具链（含 MSVC）
 
 ```powershell
 git clone https://github.com/Theflippy978/OverwatchDropsMiner.git
@@ -85,23 +89,33 @@ pnpm install
 pnpm tauri dev          # 开发模式
 ```
 
-打包发布版：
+**打包发布版**：
 
 ```powershell
-# 改过 python_sidecar/ 后必须用它重打 sidecar，否则程序仍跑旧 Python 代码
-pwsh -NoProfile -File tests/build-release.ps1
+# 第 1 步：把 Python sidecar 打成独立 exe
+# --name 必须带 -x86_64-pc-windows-msvc 后缀，Tauri 的 externalBin 按这个名字找它；
+# --paths . 也不能省，否则 python_sidecar.backend.* 的绝对导入解析失败。
+python -m PyInstaller --onefile --clean --noconfirm `
+    --name python_sidecar-x86_64-pc-windows-msvc `
+    --distpath src-tauri/binaries --workpath build/pyinstaller --specpath build/pyinstaller `
+    --paths . `
+    --hidden-import selenium.webdriver.edge.options `
+    --hidden-import selenium.webdriver.edge.service `
+    --hidden-import selenium.webdriver.edge.webdriver `
+    python_sidecar/main.py
 
-# 把两个产物压成发布包
-Compress-Archive `
-  -Path src-tauri/target/release/overwatch-drops-miner.exe,
-        src-tauri/target/release/python_sidecar.exe `
-  -DestinationPath dist/OverwatchDropsMiner-win-v1.1.0.zip -Force
+# 第 2 步：构建主程序（会带上一步的 sidecar）
+pnpm tauri build
 ```
 
 > [!WARNING]
-> 裸 `pnpm tauri build` **不会**重新打包 Python，只编译 Rust 并复制已有的
-> `src-tauri/binaries/*.exe`。改过 `python_sidecar/` 却只跑它会得到
-> 「构建成功、行为未变」的产物。
+> **`pnpm tauri build` 自己不会重新打包 Python** —— 它只编译 Rust 并复制
+> `src-tauri/binaries/` 里已有的 sidecar。改过 `python_sidecar/` 却跳过第 1 步，
+> 会得到「构建成功、行为没变」的产物。
+>
+> 第 1 步的产物必须落在 `src-tauri/binaries/` 且带 triple 后缀；
+> 若写成裸 `--name python_sidecar`，会产出 `binaries/python_sidecar.exe` 这个
+> 没人取用的孤儿文件，程序照旧跑旧代码。
 
 </details>
 
@@ -111,16 +125,16 @@ Compress-Archive `
 
 ### 第一步：录入账号（三选一）
 
-- [ ] **扫码登录** —— 点击「添加账号 → 扫码登录」，用哔哩哔哩手机客户端扫码
-- [ ] **手动粘贴** —— 从浏览器复制 Cookie 后粘贴
-- [ ] **浏览器自动捕获** —— 点击「浏览器自动捕获」，从 Edge / Chrome 读取登录态
+- **扫码登录** —— 点击「添加账号 → 扫码登录」，用哔哩哔哩手机客户端扫码
+- **手动粘贴** —— 从浏览器复制 Cookie 后粘贴
+- **浏览器自动捕获** —— 点击「浏览器自动捕获」，从 Edge / Chrome 读取登录态
 
 ### 第二步：配置挂机
 
 | 配置项 | 默认值 | 说明 |
 | :--- | :--- | :--- |
 | 房间号 | `23612045` | 支持多个，用逗号分隔；可用「自动跳转」捕获 |
-| 任务 ID | 空 | 可留空由浏览器嗅探自动获取 |
+| 任务 ID | 空 | 可留空，用「自动获取模式1 / 模式2」取得 |
 | 线程数 | `60` | 单账号连接数，**上限 256** |
 | 重连延迟 | `8` 秒 | 断线后重连间隔 |
 | 查询间隔 | `30` 秒 | 向 B 站查询任务进度的周期 |
@@ -128,6 +142,9 @@ Compress-Archive `
 ### 第三步：启动
 
 选择账号 → 点击「启动」。任务进度、B 站有效观看时长与掉宝进度会实时刷新。
+
+> [!TIP]
+> 账号列表支持**拖拽排序**；方向键可以在标题栏、账号列表、配置卡、挂宝进度卡之间跳转。
 
 ---
 
@@ -178,6 +195,7 @@ OverwatchDropsMiner/
 │   ├── components/               # 业务组件（账号列表 / 配置卡 / 日志 / 进度）
 │   ├── components/ui/            # shadcn-vue 基础组件
 │   ├── stores/                   # Pinia 状态管理
+│   ├── lib/                      # 类型、行内提示、IPC 错误归一、方向键区域导航
 │   └── App.vue                   # 根组件（主题 / 窗口几何 / 生命周期）
 ├── src-tauri/                    # Rust 层
 │   └── src/
@@ -187,8 +205,7 @@ OverwatchDropsMiner/
 ├── python_sidecar/               # Python sidecar（全部业务代码）
 │   ├── main.py                   # IPC 主循环与命令分发
 │   └── backend/                  # 挂宝 / 账号 / 浏览器嗅探 / B 站客户端
-├── img/                          # README 素材（hero.svg / run.png / app.ico）
-└── tests/                        # 本地门禁与测试（不入库，仅本机运行）
+└── img/                          # README 素材（hero.svg / run.png / app.ico）
 ```
 
 ---
@@ -226,16 +243,16 @@ Cookie 可能已过期。重新用「扫码登录」或「浏览器自动捕获�
 </details>
 
 <details>
-<summary><b>找不到浏览器 / 自动捕获失败</b></summary>
+<summary><b>自动获取任务 ID 失败 / 找不到浏览器</b></summary>
 
-「自动获取模式2」依赖本机的 Edge 或 Chrome。若都没装、或被安全软件拦截，
-可以改用**不需要浏览器**的方式：
+**建议优先用「自动获取模式1」** —— 它是纯 HTTP 解析直播间页面，**不需要浏览器**，
+先填好房间号再点即可。
 
-**先试「自动获取模式1」** —— 它是纯 HTTP 抓取直播间页面，完全不启动浏览器。
-前提是**先填好房间号**（任务 ID 就挂在直播间页面上）。若房间没有正在进行的
-掉宝活动，它会返回「未解析到掉宝任务分组」，这不是故障。
+不过 B 站可能随时改版，导致模式1 的解析规则失效。如果它提示
+「未解析到掉宝任务分组」，说明这次没解析到，改用**「自动获取模式2」**兜底 ——
+模式2 走浏览器嗅探，依赖电脑上安装的 Edge 或 Chrome。
 
-**模式1 也不可用时，手动填写任务 ID：**
+模式1、模式2 都用不了时，可以**手动填写任务 ID**：
 
 1. 浏览器打开 `https://live.bilibili.com/<房间号>`，进入正在做掉宝活动的直播间；
 2. 按 `F12` 打开开发者工具 → **网络 / Network** 面板；
@@ -246,6 +263,10 @@ Cookie 可能已过期。重新用「扫码登录」或「浏览器自动捕获�
 
 也可以直接粘贴整条带参数的 URL —— 程序会自动从 `task_ids=` 后面截取，
 无需手动裁剪。
+
+> [!TIP]
+> **如果模式1 在你这里确实失效了，欢迎提 [Issue](https://github.com/Theflippy978/OverwatchDropsMiner/issues) 反馈。**
+> B 站改版后解析规则需要跟着更新，有反馈才能尽快修好。
 
 **想彻底不用浏览器**：填好房间号 + 任务 ID 后，关闭「自动获取」相关操作直接启动即可 ——
 挂宝本身不依赖浏览器，只有「自动捕获 Cookie / 房间号 / 任务 ID」这些辅助功能才需要。
@@ -274,7 +295,8 @@ Cookie 可能已过期。重新用「扫码登录」或「浏览器自动捕获�
 下载新的 zip，解压后**覆盖旧目录里的两个 exe** 即可。或者点击程序右上角的更新按钮，
 按提示前往下载页面。
 
-配置与账号不会丢 —— 它们存在 `%APPDATA%\OverwatchDropsMiner\`，与程序目录无关。
+配置、账号、以及你拖出来的账号顺序都不会丢 —— 它们存在
+`%APPDATA%\OverwatchDropsMiner\`，与程序目录无关。
 
 </details>
 
@@ -284,13 +306,17 @@ Cookie 可能已过期。重新用「扫码登录」或「浏览器自动捕获�
 
 | 项 | 值 |
 | :--- | :--- |
-| 当前版本 | **v1.1.0** |
-| 发布包 | `OverwatchDropsMiner-win-v1.1.0.zip`（47.5 MB） |
-| 包内文件 | `overwatch-drops-miner.exe` + `python_sidecar.exe` |
+| 当前版本 | **v1.2.0** |
+| 发布包 | `OverwatchDropsMiner-win-v1.2.0.zip`（47.5 MB） |
+| 包内文件 | `overwatch-drops-miner.exe`（10.2 MB）+ `python_sidecar.exe`（44.7 MB） |
 | 平台 | Windows 10 / 11（x64） |
-| 主程序 SHA256 | `D252B67FE5D4095FF208E77BC3AE24D6AB1F636B4E1E582686A4B0A50267BBE0` |
-| 侧车 SHA256 | `7C94F91CAAD6BD9495470F7D1C5181F71C3F55DA024852E17655B48891BD5D72` |
-| 发布包 SHA256 | `41350D6A72B10343859FD76631CBE5D0FE0424266E33FDD90D744BAFB125AD85` |
+| 校验值 | 见 [Release 页](https://github.com/Theflippy978/OverwatchDropsMiner/releases) 正文的 SHA256 |
+
+---
+
+## 更新日志
+
+各版本的变更说明与校验值见 [Releases](https://github.com/Theflippy978/OverwatchDropsMiner/releases)。
 
 ---
 
