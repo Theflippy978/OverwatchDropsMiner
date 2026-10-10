@@ -22,6 +22,12 @@ STATUS_UPDATE_AVAILABLE = "update_available"
 STATUS_SKIPPED = "skipped"
 STATUS_FAILED = "failed"
 
+# 自动检查的最小间隔。GitHub 未认证接口只有 60 次/小时，而「每次启动查一次」
+# 在爱重启的用户手里几十次就耗尽了 —— 耗尽后所有检查都会失败（修复前还会
+# 谎称「已是最新」）。每天一次足够：本项目的发布节奏以天计，而手动按钮
+# 随时可用、不受这个间隔约束。
+AUTO_CHECK_MIN_INTERVAL_SECONDS = 24 * 60 * 60
+
 
 @dataclass(slots=True)
 class UpdateCheckResult:
@@ -36,6 +42,9 @@ class UpdateCheckOutcome:
     status: str
     result: UpdateCheckResult | None = None
     message: str = ""
+    # 是否**真的向 GitHub 发过请求**。调用方据此决定要不要记「上次检查时间」：
+    # 被渠道门禁或占位版本号拦下的 skipped 根本没打扰远端，不该占用当天额度。
+    requested: bool = False
 
     @property
     def update_available(self) -> bool:
@@ -118,6 +127,49 @@ def skip_reason(app_version: str, update_channel: str, *, force: bool) -> str:
     return ""
 
 
+def should_auto_check_now(
+    last_checked_at: float | None,
+    *,
+    now: float,
+    min_interval: float = AUTO_CHECK_MIN_INTERVAL_SECONDS,
+) -> bool:
+    """自动检查是否到了该跑的时候。
+
+    **手动点按钮不走这个判断** —— 用户主动要看结果时不该被节流拦住。
+
+    时钟被往回调过（``now < last_checked_at``）时放行并按新时间重记：
+    否则一次误调系统时间就会把自动检查锁死到「未来某天」之后。
+    """
+    if last_checked_at is None:
+        return True
+    if now < last_checked_at:
+        return True
+    return (now - last_checked_at) >= min_interval
+
+
+def parse_state(raw: str) -> float | None:
+    """从状态文件内容里取出上次检查时间。
+
+    任何坏数据（空文件、被截断、字段类型不对）都当作「从没检查过」——
+    宁可多查一次，也不要因为一个坏文件把自动检查永久卡住。
+    """
+    try:
+        data = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("last_checked_at")
+    # bool 是 int 的子类，必须先排掉，否则 True 会被当成时间戳 1.0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def dump_state(when: float) -> str:
+    return json.dumps({"last_checked_at": when}, ensure_ascii=False)
+
+
 def parse_update_payload(
     payload: dict[str, Any],
     *,
@@ -150,6 +202,11 @@ def check_latest_release(
 ) -> UpdateCheckOutcome:
     """查一次远端最新 release，**永不抛异常**，一切情况都体现在 status 上。
 
+    两道门禁彼此独立，各管一件事：
+    * ``should_check_update`` —— **该不该查**（渠道 + 版本号可比较性），在这里；
+    * ``should_auto_check_now`` —— **自动检查今天查过没有**，由调用方在进入本函数
+      之前判断（手动点按钮不走它）。
+
     失败信息只用固定文案与异常类型名，**不回显远端内容**：``URLError.reason``
     之类的字符串来自网络层，直接塞进界面等于让远端决定我们显示什么。
     """
@@ -159,6 +216,26 @@ def check_latest_release(
             message=skip_reason(app_version, update_channel, force=force),
         )
 
+    outcome = _request_latest_release(
+        app_version=app_version,
+        latest_release_api=latest_release_api,
+        releases_url=releases_url,
+        timeout=timeout,
+    )
+    # 走到这里说明**真的打扰了 GitHub** —— 无论成败都算「查过一次」。
+    # 失败也记时间是有意的：限流时越试越糟，而手动按钮随时可用。
+    outcome.requested = True
+    return outcome
+
+
+def _request_latest_release(
+    *,
+    app_version: str,
+    latest_release_api: str,
+    releases_url: str,
+    timeout: float,
+) -> UpdateCheckOutcome:
+    """真正发请求的那一半，只被 ``check_latest_release`` 调用。"""
     request = urllib.request.Request(
         latest_release_api,
         headers={

@@ -9,6 +9,7 @@ import math
 import sys
 import os
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -175,6 +176,32 @@ class FrontendLogHandler(logging.Handler):
             })
         except Exception:
             self.handleError(record)
+
+
+def _read_update_state(path) -> float | None:
+    """读「上次自动检查更新时间」。
+
+    文件不存在、内容坏掉、字段类型不对 —— 一律当作「从没查过」。
+    宁可多查一次，也不要因为一个坏文件把自动检查永久卡住。
+    """
+    from python_sidecar.backend.browser.update_checker import parse_state
+
+    try:
+        return parse_state(path.read_text(encoding="utf-8"))
+    except OSError:
+        return None
+
+
+def _write_update_state(path, when: float) -> None:
+    """写节流状态。**失败只记日志、不抛** —— 写不了状态最多是明天多查一次，
+    让「检查更新」因为这个失败是说不过去的。"""
+    from python_sidecar.backend.browser.update_checker import dump_state
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(dump_state(when), encoding="utf-8")
+    except OSError:
+        logger.warning("写入更新检查状态失败", exc_info=True)
 
 
 class PythonSidecar:
@@ -1458,7 +1485,6 @@ class PythonSidecar:
 
     def _account_poll_loop(self, stop_event: threading.Event) -> None:
         """账号轮询线程（200ms）：回收死线程、发送状态变化事件"""
-        import time
         while not stop_event.is_set():
             try:
                 if not self.miner_manager or not self.account_store:
@@ -1513,11 +1539,18 @@ class PythonSidecar:
         # 实测复现：本机未认证配额耗尽（60/60）时，旧代码下点「检查更新」
         # 拿到的是 {"update_available": false} → 胶囊显示「已是最新版本」，
         # 而远端其实已经有 v1.2.0。
+        #
+        # 自动检查另有「每天最多一次」的节流（状态落 update_check.json）：
+        # GitHub 未认证接口只有 60 次/小时，而「每次启动查一次」在爱重启的
+        # 用户手里几十次就耗尽了，耗尽后所有检查都会失败。
+        # **手动按钮不受节流约束** —— 用户主动要看结果时不该被拦住。
         force = bool(params.get("force", False))
         try:
             from python_sidecar.backend.browser.update_checker import (
                 STATUS_FAILED,
+                STATUS_SKIPPED,
                 check_latest_release,
+                should_auto_check_now,
             )
             from python_sidecar.backend._version import (
                 APP_VERSION,
@@ -1525,6 +1558,17 @@ class PythonSidecar:
                 LATEST_RELEASE_API,
                 RELEASES_URL,
             )
+            from python_sidecar.backend.paths import get_update_state_path
+
+            state_path = get_update_state_path()
+            if not force and not should_auto_check_now(
+                _read_update_state(state_path), now=time.time()
+            ):
+                return {
+                    "status": STATUS_SKIPPED,
+                    "message": "自动检查每天最多一次，本次跳过（可点按钮手动检查）",
+                }
+
             # 必须丢到线程里：check_latest_release 是同步 urllib（8s 超时），
             # 直接在事件循环里调会让这 8 秒内所有在途 IPC 都无法响应、
             # 扫码轮询定时器也不触发。wait_for 的 10s 略大于 urllib 的 8s，
@@ -1541,12 +1585,22 @@ class PythonSidecar:
                 ),
                 timeout=10.0,
             )
+            # 只有**真的打扰了 GitHub** 才记时间：被渠道门禁或占位版本号拦下的
+            # skipped 根本没发请求，不该占用当天的额度。
+            if outcome.requested:
+                _write_update_state(state_path, time.time())
             payload: dict = {"status": outcome.status, "message": outcome.message}
             if outcome.result is not None:
                 payload["latest_version"] = outcome.result.latest_version
                 payload["release_url"] = outcome.result.release_url
             return payload
         except (asyncio.TimeoutError, TimeoutError):
+            # 超时说明请求已经发出去了（线程还卡在 urllib 里），同样算查过一次，
+            # 否则每次启动都会重试、把配额耗在同一个必然超时的端点上。
+            try:
+                _write_update_state(get_update_state_path(), time.time())
+            except NameError:
+                pass
             return {
                 "status": STATUS_FAILED,
                 "message": "检查更新超时（超过 10 秒），请稍后重试",

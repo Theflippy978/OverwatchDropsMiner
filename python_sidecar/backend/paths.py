@@ -6,6 +6,7 @@ from pathlib import Path
 CONFIG_DIR_ENV_VAR = "OW_CONFIG_DIR"
 APP_DATA_DIR_NAME = "OverwatchDropsMiner"
 ACCOUNTS_FILE_NAME = "accounts.json"
+UPDATE_STATE_FILE_NAME = "update_check.json"
 
 
 def is_isolated() -> bool:
@@ -25,6 +26,16 @@ def get_config_dir() -> Path:
 
 def get_accounts_path() -> Path:
     return get_config_dir() / ACCOUNTS_FILE_NAME
+
+
+def get_update_state_path() -> Path:
+    """自动更新检查的节流状态（上次检查时间）。
+
+    **刻意不放进 config.json**：那是用户可见、可导入导出的配置，
+    而「上次检查于何时」是纯粹的本机运行状态 —— 混进去会让导出文件
+    带上一堆与用户无关的字段，也会让「导入配置」意外重置检查节奏。
+    """
+    return get_config_dir() / UPDATE_STATE_FILE_NAME
 
 
 # 本模块曾有 create_qsettings / QSETTINGS_FILE_NAME，是 Qt GUI 时代的遗留。
