@@ -24,7 +24,8 @@
  * 粘贴的三级回退见 insertFromClipboard 的注释 —— 这是本组件唯一
  * 不能靠静态检查保证正确的地方。
  */
-import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
+import { useEventListener, useTimeoutFn } from "@vueuse/core";
 import { ClipboardPaste, ClipboardCopy, ClipboardType, RotateCcw, MousePointerClick } from "lucide-vue-next";
 
 type MenuKey = "undo" | "copy" | "paste" | "pasteText" | "selectAll";
@@ -91,7 +92,15 @@ function writeToTarget(text: string) {
  * 3. 都不行时提示用户用 Ctrl+V，而不是让菜单项点了没反应。
  */
 const clipboardHint = ref("");
-let hintTimer: number | null = null;
+/** 剪贴板提示 4 秒后自动消失。start() 的语义是「先清掉上一次的计时再重新计时」，
+ *  与原先的 clearTimeout + setTimeout 等价；清理由作用域托管。 */
+const { start: scheduleHintHide } = useTimeoutFn(
+  () => {
+    clipboardHint.value = "";
+  },
+  4000,
+  { immediate: false },
+);
 
 async function insertFromClipboard(asPlainText: boolean) {
   const el = target.value;
@@ -113,11 +122,7 @@ async function insertFromClipboard(asPlainText: boolean) {
     // 落到提示
   }
   clipboardHint.value = "浏览器未授权读取剪贴板，请用 Ctrl+V";
-  if (hintTimer !== null) clearTimeout(hintTimer);
-  hintTimer = window.setTimeout(() => {
-    clipboardHint.value = "";
-    hintTimer = null;
-  }, 4000);
+  scheduleHintHide();
 }
 
 /** execCommand 的目标必须是当前焦点所在元素，否则作用在 body 上：
@@ -223,25 +228,16 @@ function onScrollOrResize() {
   if (open.value) close();
 }
 
-onMounted(() => {
-  // 捕获阶段：抢在组件自身可能存在的 contextmenu handler 之前。
-  document.addEventListener("contextmenu", onDocumentContextMenu, { capture: true });
-  document.addEventListener("pointerdown", onPointerDown, { capture: true });
-  document.addEventListener("keydown", onKeyDown, { capture: true });
-  window.addEventListener("scroll", onScrollOrResize, { capture: true });
-  window.addEventListener("resize", onScrollOrResize);
-  window.addEventListener("blur", onScrollOrResize);
-});
-
-onUnmounted(() => {
-  document.removeEventListener("contextmenu", onDocumentContextMenu, { capture: true });
-  document.removeEventListener("pointerdown", onPointerDown, { capture: true });
-  document.removeEventListener("keydown", onKeyDown, { capture: true });
-  window.removeEventListener("scroll", onScrollOrResize, { capture: true });
-  window.removeEventListener("resize", onScrollOrResize);
-  window.removeEventListener("blur", onScrollOrResize);
-  if (hintTimer !== null) clearTimeout(hintTimer);
-});
+// 捕获阶段：抢在组件自身可能存在的 contextmenu handler 之前。
+// 注册在 setup 同步阶段（比 onMounted 更早），对本组件更安全 ——
+// 监听先于任何渲染与交互存在。摘除由 useEventListener 随作用域托管，
+// 因此不再需要成对地手写 add/remove。
+useEventListener(document, "contextmenu", onDocumentContextMenu, { capture: true });
+useEventListener(document, "pointerdown", onPointerDown, { capture: true });
+useEventListener(document, "keydown", onKeyDown, { capture: true });
+useEventListener(window, "scroll", onScrollOrResize, { capture: true });
+useEventListener(window, "resize", onScrollOrResize);
+useEventListener(window, "blur", onScrollOrResize);
 </script>
 
 <template>
@@ -270,7 +266,7 @@ onUnmounted(() => {
         class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm
                transition-colors hover:bg-accent hover:text-accent-foreground
                focus-visible:bg-accent focus-visible:outline-none
-               disabled:pointer-events-none disabled:opacity-40"
+               disabled:pointer-events-none disabled:opacity-50"
         @click="run(item.key)"
       >
         <component :is="item.icon" class="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
@@ -284,7 +280,7 @@ onUnmounted(() => {
       </button>
       <p
         v-if="clipboardHint"
-        class="border-t border-border px-2 py-1.5 text-[11px] text-signal-warning"
+        class="notice-appear border-t border-border px-2 py-1.5 text-[11px] text-signal-warning"
         role="status"
       >
         {{ clipboardHint }}

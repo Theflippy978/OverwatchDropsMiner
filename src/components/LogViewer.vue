@@ -5,6 +5,7 @@ import type { StoredLog } from "@/stores/logs";
 import { useAccountsStore } from "@/stores/accounts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Select, SelectItem } from "@/components/ui/select";
 
 const logsStore = useLogsStore();
 const accountsStore = useAccountsStore();
@@ -42,12 +43,11 @@ function remarkOf(accountId: string): string {
  * 会把后半句整段染蓝。半角逗号必须留在值里 —— 房间号是
  * `[23612045,21452505]` 这种紧凑形态。
  *
- * 标签表是**跨文件契约**，两侧都有门禁（2026-10-05 起）：
- * 后端侧 `tests/test_log_field_labels.py` 用 ast 扫全部 sidecar 源码，
- * 既禁止 `key=value`，也要求「`标签：占位符`」里的标签必须出现在下面这张表里；
- * 前端侧 `tests/test_ui_regressions.py` 断言本表不含已废弃的同义标签、
- * 且身份色只给 `账号`。此前只有后端侧有门禁，所以「后端加了标签、
- * 前端忘了加」会静默不着色，同一个房间号也会因标签不同而颜色不同。
+ * 标签表是**跨文件契约**，两侧都有门禁（2026-10-05 起，此前只有后端侧有，
+ * 所以「后端加了标签、前端忘了加」会静默不着色，同一个房间号因标签不同而颜色不同）：
+ * 后端要求进日志流的文案不得出现 `key=value`（Cookie、URL、base64 都含「=」），
+ * 且「`标签：占位符`」里的标签必须出现在下面这张表里；
+ * 前端侧要求本表不含已废弃的同义标签、且身份色只给 `账号`。
  */
 const FIELD_LABELS = [
   "账号",
@@ -273,8 +273,8 @@ function formatTime(timestamp: string) {
  *
  * 用 Map 而不是给 StoredLog 加字段：日志的格式化规则（FIELD_LABELS /
  * ACCOUNT_KEYS / VALUE_STOP_CHARS）定义在本文件，而 StoredLog 在 store 层。
- * 直接搬去 store 会破坏 tests/test_ui_regressions.py::LogFieldColoringTest
- * 与 tests/check_log_regex.mjs 的既有断言（它们都从本文件读取这些常量）。
+ * 这几个常量的**定义位置本身是被外部校验的**（脚本按文件名读本文件的源码），
+ * 搬去 store 会让那层校验静默失效 —— 不报错，只是不再检查。
  *
  * 缓存必须随列表裁剪而修剪，否则 seq 单调递增会让 Map 无限增长（内存泄漏）。
  * 修剪在下面 `logRows` 的尾部完成，不需要额外定时器。
@@ -355,27 +355,31 @@ function handleClear() {
              既与正文几乎同大、字重又与 AccountList 不一致）。 -->
         <CardTitle class="text-[15px] font-semibold">运行日志</CardTitle>
         <div class="flex items-center gap-2">
-          <!-- focus-visible:ring 不能省：紧邻的「清空」按钮走 Button 组件、
-               自带 focus-visible:ring-2，而原生 select 此前没有任何焦点样式 ——
-               键盘 Tab 过来时焦点完全不可见（WCAG 2.4.7）。 -->
-          <select
+          <!-- 换成自绘 Select 是为了与「添加账号」菜单共用同一套进出场动画：
+               原生 select 的展开列表由系统绘制，CSS 管不到它，风格会割裂。
+               换来的代价有两条，都不要忘记：
+               * 焦点样式与键盘行为原先由系统提供，现在由 Select.vue 自己补；
+               * 多了一层浮层动画。若它显得迟钝，该调的是 Select.vue 里的
+                 duration token，而不是换回原生控件。 -->
+          <Select
             id="log-account-filter"
             aria-label="按账号过滤日志"
-            class="h-7 rounded-md border border-input bg-background px-2 text-xs
-                   transition-colors hover:border-ring
-                   focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            :value="logsStore.filterAccountId ?? ''"
-            @change="logsStore.setFilter(($event.target as HTMLSelectElement).value || null)"
+            :model-value="logsStore.filterAccountId ?? ''"
+            class="max-w-[168px]"
+            @update:model-value="logsStore.setFilter(($event as string) || null)"
           >
-            <option value="">全部账号</option>
-            <option
+            <!-- 空串 = 「全部账号」（store 侧是 null）。哨兵串的归一化与
+                 出口反归一都在 ui/select 封装层里成对做完，调用方只见空串，
+                 这里的 `|| null` 才成立。原理见 ui/select/constants.ts。 -->
+            <SelectItem value="">全部账号</SelectItem>
+            <SelectItem
               v-for="acc in accountsStore.accounts"
               :key="acc.id"
               :value="acc.id"
             >
               {{ acc.remark }}
-            </option>
-          </select>
+            </SelectItem>
+          </Select>
           <Button
             size="sm"
             variant="ghost"
@@ -433,11 +437,14 @@ function handleClear() {
           <!-- 遍历 logRows（已缓存的派生数据）而不是 filteredLogs：
                时间格式化与结构化分段都在 computed 里按 seq 缓存，
                模板只负责渲染，不再逐行重跑正则与 ICU。 -->
+          <!-- transition-colors：日志行 hover 变底色此前是瞬变，
+               与账号行/菜单项那些有过渡的可点元素不一致（一行行扫过去时
+               瞬变更像闪烁）。 -->
           <div
             v-for="row in logRows"
             :key="row.log.seq"
             class="flex min-h-[var(--log-row-h)] items-center gap-2 rounded px-1
-                   leading-[var(--log-row-h)] hover:bg-accent/40"
+                   leading-[var(--log-row-h)] transition-colors hover:bg-accent/40"
           >
             <span class="shrink-0 tabular-nums text-muted-foreground/80">
               {{ row.time }}

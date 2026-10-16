@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, watch, onUnmounted } from "vue";
+import { ref, computed, watch } from "vue";
+import { useTimeoutPoll, useTransition } from "@vueuse/core";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
+import { Tooltip } from "@/components/ui/tooltip";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { useTasksStore } from "@/stores/tasks";
@@ -12,12 +13,12 @@ import { useLogsStore } from "@/stores/logs";
 import { useTimedNotice } from "@/lib/notice";
 import { TASK_STATUS_CLAIMED } from "@/lib/types";
 import { textProgressBar } from "@/lib/progress";
+import {
+  DURATION_TASK_RE,
+  hasMeaningfulCheckPoints as shouldShowCheckPoints,
+  visibleTasks,
+} from "@/lib/task-view";
 import type { CheckPoint, TaskItem } from "@/lib/types";
-
-/** 时长任务标题正则：与后端 `browser/task_presenter.py` 的 DURATION_TASK_RE 同源。
-    后端用宽松前缀 ^(.+?)\d+分钟$，此处必须同样宽松，
-    否则「累计观看60分钟」这类标题后端会成组、前端当普通任务，两边形态不一致。 */
-const DURATION_TASK_RE = /^.+?\d+分钟$/;
 
 /** 未选中账号时的空任务集（模块级常量，避免每次求值建新对象） */
 const EMPTY_TASKS = {
@@ -81,25 +82,44 @@ const {
  *  （两者都有时只显示 error），见模板中的 `actionError || actionHint`。 */
 const { text: actionHint, show: showActionHint, clear: clearActionHint } = useTimedNotice();
 
+/** 掉宝进度补间的时长与缓动。
+ *
+ *  **必须与 style.css 的 @theme token 保持同值**：`--duration-slow` = 400ms、
+ *  `--ease-inout` = cubic-bezier(0.4, 0, 0.2, 1)。
+ *  这里是 JS 补间、那边是 CSS 过渡，两者不共享变量，改一处不改另一处就会
+ *  出现「填充条与文字快慢不一」—— 而没有任何测试会因此变红。
+ *
+ *  为什么不直接读 CSS 变量：useTransition 每帧都要这两个值，getComputedStyle
+ *  触发重排，1 秒轮询下每轮都读会明显拖慢渲染。
+ *  要同源就得靠 review 时对照这两处，故把对应关系写死在这条注释里。
+ *  改成真同源的前提是先把 token 提到 TS 常量、再由 CSS 引用它，
+ *  那是另一个改动，不值得为这两个数引入构建期耦合。 */
+const PROGRESS_TWEEN_MS = 400;
+const PROGRESS_TWEEN_EASING = [0.4, 0, 0.2, 1] as const;
+
 const statusLine = ref("");
-const progressPercent = ref(0);
+/** 后端下发的原始百分比（整数）。 */
+const progressPercentRaw = ref(0);
+/** 显示用的补间值。
+ *
+ *  掉宝进度此前是「填充条靠 CSS 过渡平滑、百分比文字瞬变」—— 同一个控件里
+ *  两种节奏，数字看着像在跳。现在改成**一个补间源驱动三处**（填充条宽度、
+ *  双层文字的 clip-path、百分比文本），三者天然同步，也不会出现
+ *  「JS 补间 + CSS 过渡」叠加成双重缓动。 */
+const progressPercent = useTransition(progressPercentRaw, {
+  duration: PROGRESS_TWEEN_MS,
+  transition: [...PROGRESS_TWEEN_EASING],
+});
 const loginInvalidated = ref(false);
 const { text: statusError, show: showStatusError } = useTimedNotice();
 const { text: claimHint, show: showClaimHint } = useTimedNotice();
 
-let statusTimer: number | null = null;
-/** in-flight 守卫：定时器在慢响应未回时再次触发会并发两个
-    get_account_status（后端无短超时），迟到响应乱序覆盖显示。 */
+/** in-flight 守卫：轮询与手动刷新（handleRefresh）都会调 fetchStatus，
+    两者撞上时会并发两个 get_account_status（后端无短超时），迟到响应乱序
+    覆盖显示。撞上时后来的那次直接落空 —— 轮询周期只有 1s，下一次必然覆盖，
+    不会出现「点了手动刷新永远没反应」。 */
 let statusFetching = false;
-/** 在途期间又有人要状态（手动刷新 / 轮询 tick / 1s 定时器）。
-    原实现是「在途就直接 return」—— 1s 定时器几乎永远占着 in-flight，
-    手动刷新的那次请求因此被静默丢弃，顶部四字段与掉宝进度条停留在上一次
-    的结果，用户看到的就是「点了手动刷新没反应」。改为记一个待办，
-    由在途那次在 finally 里续跑一次：永不丢请求，也不会并发。 */
-let statusStale = false;
 let statusFailures = 0;
-/** 「在途结束后续跑」的定时器句柄（见 fetchStatus 的 finally） */
-let staleRetryTimer: number | null = null;
 
 const hasTasks = computed(() => tasks.value.length > 0);
 
@@ -153,19 +173,13 @@ const statusBadgeText = computed(() => {
   return `${name}（待机）`;
 });
 
-/** 任务级百分比。**必须截断而非四舍五入**：后端
-    `browser/task_presenter.py` 的 `_progress_percent` 用 `int()` 截断，
-    前端若用 Math.round，999/1000 会显示成「100%」并画满进度条，
-    而任务其实还没完成（后端同一行文字仍是 99%）。两端口径必须一致，
-    否则用户会看到「已 100% 却没自动领取」的矛盾。 */
-function percentOf(task: TaskItem) {
-  if (task.target <= 0) return 0;
-  return Math.min(100, Math.floor((task.progress / task.target) * 100));
-}
-
 /** 检查点进度百分比。limit_value 为 0 时返回 0，避免除零得到 NaN
     —— NaN 会被模板渲染成「NaN%」，而后台不报错。
-    截断口径同 percentOf（对齐后端 `_progress_percent` 的 `int()`）。 */
+    **必须截断而非四舍五入**：后端 `browser/task_presenter.py` 的
+    `_progress_percent` 用 `int()` 截断，前端若用 Math.round，999/1000
+    会显示成「100%」并画满进度条，而任务其实还没完成（后端同一行文字
+    仍是 99%）。两端口径必须一致，否则用户会看到「已 100% 却没自动领取」
+    的矛盾。 */
 function percentOfCheckpoint(cp: CheckPoint) {
   if (cp.limit_value <= 0) return 0;
   return Math.min(100, Math.floor((cp.cur_value / cp.limit_value) * 100));
@@ -187,13 +201,8 @@ function statusClass(status: string) {
   return "bg-muted text-muted-foreground";
 }
 
-function shouldShowCheckPoints(task: TaskItem): boolean {
-  const cps = task.check_points;
-  if (!cps || cps.length === 0) return false;
-  if (cps.length > 1) return true;
-  const cp = cps[0];
-  return cp.alias !== task.title || cp.cur_value !== task.progress || cp.limit_value !== task.target;
-}
+/** 「有无有意义检查点」的判据在 lib/task-view.ts（零 import，可被 Node 直测）。
+ *  模板与 plainTasks 都用它，本文件不再另立第二套口径。 */
 
 /**
  * 检查点状态胶囊的文案。
@@ -304,10 +313,9 @@ const durationGroups = computed(() => groupDurationTasks(tasks.value));
 
 const hasDuration = computed(() => hasDurationTasks(tasks.value));
 
-/** 普通任务（过滤掉已被时长分组消费的），模板不再自己 filter */
-const plainTasks = computed(() =>
-  tasks.value.filter((t) => !DURATION_TASK_RE.test(t.title))
-);
+/** 本活动「该显示」的任务列表。判据（含为什么不能用标题词、为什么隐藏不影响
+ *  领取）全部写在 lib/task-view.ts，本文件只调用，不复述。 */
+const plainTasks = computed(() => visibleTasks(tasks.value));
 
 /** 时长任务组内检查点按 limit_value 升序的副本，按组前缀缓存 */
 const sortedDurationCheckpoints = computed(() => {
@@ -319,6 +327,38 @@ const sortedDurationCheckpoints = computed(() => {
     );
   }
   return map;
+});
+
+/** 中间那一格（文字进度条 + 「0/600」）的两列定义。
+ *
+ *  第二列必须**定宽**，两个理由彼此独立、各挡一次回归：
+ *  · 不能随内容变：同卡内「0/60」比「0/600」窄，整组宽度逐行不同 →
+ *    条子左边缘错开（用户报过一次「居中你弄那去了」）。
+ *  · 不能写死 px：旧写法留 56px，而本卡最长的那串只要 ~30px，多出的 25px
+ *    全落在数字**右侧** → 居中的是盒子、墨迹看着偏左（用户报「仍然没居中」）。
+ *  取「本卡最长的那串」做定宽：既逐行同宽，又几乎不留余量。
+ *
+ *  ch = 当前字体「0」的宽度，数字段带 tabular-nums 故每位恰为 1ch；
+ *  斜杠按 ~0.6 位估的（**未逐字核过**，改字体或字号后要目视确认）。
+ *  这里必须是**一个确定值**（不能写成 minmax(估算, max-content)）：全卡共用同一个
+ *  字符串，各行才等宽；若让某行按自己的墨迹加宽，条子左边缘又会逐行错开。
+ *  位数取 cur/limit **位数之和**的最大值，所以「360/360」与「0/600」
+ *  两种写法都会被算进去。 */
+const numberGroupCols = computed(() => {
+  let digits = 0;
+  const scan = (cps: CheckPoint[]) => {
+    for (const cp of cps) {
+      digits = Math.max(
+        digits,
+        String(cp.cur_value).length + String(cp.limit_value).length,
+      );
+    }
+  };
+  for (const list of sortedDurationCheckpoints.value.values()) scan(list);
+  for (const task of plainTasks.value) {
+    if (shouldShowCheckPoints(task)) scan(task.check_points);
+  }
+  return `auto ${digits + 0.6}ch`;
 });
 
 async function handleRefresh() {
@@ -346,11 +386,8 @@ async function handleClaim() {
 async function fetchStatus() {
   const accountId = props.accountId;
   if (!accountId) return;
-  if (statusFetching) {
-    // 已在途：记下「还要再来一次」，由在途那次收尾时续跑。
-    statusStale = true;
-    return;
-  }
+  // 已在途（手动刷新撞上轮询）：这一次落空，下一次轮询在 1s 内必到
+  if (statusFetching) return;
   statusFetching = true;
   try {
     // 走 accountsStore.getStatus 而不是自己 invoke：此前同一个 IPC 有两套
@@ -360,7 +397,7 @@ async function fetchStatus() {
     // 迟到响应会污染当前显示（旧账号的分钟数/进度出现在新账号页）
     if (props.accountId !== accountId) return;
     statusLine.value = status.status_line;
-    progressPercent.value = status.progress ? status.progress.percent : 0;
+    progressPercentRaw.value = status.progress ? status.progress.percent : 0;
     loginInvalidated.value = status.login_invalidated;
     // 成功即清零：这个计数器要表达的是「**连续**失败」，只加不减会让
     // 几小时里分散的三次偶发失败凑成一次「账号可能已被外部删除」的误报。
@@ -391,23 +428,6 @@ async function fetchStatus() {
     }
   } finally {
     statusFetching = false;
-    if (statusStale) {
-      statusStale = false;
-      // 至少隔一个轮询周期再续跑。
-      //
-      // 原先是在 finally 里直接 void fetchStatus()：当 get_account_status
-      // 单次耗时 ≥ 1s 时，1 秒定时器每次 tick 都会撞上 in-flight 并置
-      // statusStale，在途一结束立刻续跑 → **无间隔连续 IPC**，
-      // sidecar 越慢请求越密，形成正反馈。
-      //
-      // 用 setTimeout 而不是立即调用，让节奏重新落回固定周期；
-      // 句柄必须保存，卸载时要清掉（否则组件卸载后仍打一次 IPC）。
-      if (staleRetryTimer !== null) clearTimeout(staleRetryTimer);
-      staleRetryTimer = window.setTimeout(() => {
-        staleRetryTimer = null;
-        void fetchStatus();
-      }, STATUS_REFRESH_INTERVAL_MS);
-    }
   }
 }
 
@@ -468,26 +488,28 @@ watch(storeHint, (message) => {
  */
 const STATUS_REFRESH_INTERVAL_MS = 1000;
 
-function startStatusTimer() {
-  stopStatusTimer();
-  // 未运行的账号不轮询（mount 路径此前绕过了 running 判定）
-  if (!props.accountId || !props.running) return;
-  void fetchStatus();
-  statusTimer = window.setInterval(() => {
-    void fetchStatus();
-  }, STATUS_REFRESH_INTERVAL_MS);
-}
-
-function stopStatusTimer() {
-  if (statusTimer) {
-    clearInterval(statusTimer);
-    statusTimer = null;
-  }
-}
+/** 状态轮询。
+ *
+ *  useTimeoutPoll 的调度是 `await fn(); start()` —— **fn 落定之前不排下一次**。
+ *  这正是原先 statusFetching + statusStale + finally 里那个「续跑定时器」
+ *  手工实现的东西：setInterval 无条件 tick，慢响应时每次 tick 都撞上在途，
+ *  而收尾时又立刻续跑一次 → 两条调度叠加，sidecar 越慢请求越密（正反馈）。
+ *  交给它之后节奏严格落回固定周期，statusStale / staleRetryTimer /
+ *  startStatusTimer / stopStatusTimer 这一整套簿记都不再需要。
+ *
+ *  immediateCallback 必须显式开（默认 false）：否则丢掉「启动/换账号后
+ *  立刻刷一次」，顶部四字段与掉宝进度条要空等一个周期才出现。
+ *  immediate 关掉：轮询的启停由下面的 watch 按 running 决定，不在 setup
+ *  阶段就开跑。 */
+const { pause: pauseStatusPoll, resume: resumeStatusPoll } = useTimeoutPoll(
+  fetchStatus,
+  STATUS_REFRESH_INTERVAL_MS,
+  { immediate: false, immediateCallback: true },
+);
 
 function clearWatchState() {
   statusLine.value = "";
-  progressPercent.value = 0;
+  progressPercentRaw.value = 0;
   loginInvalidated.value = false;
   statusFailures = 0;
   // 换账号/停止时把上一个账号留下的行内提示一并收掉：
@@ -497,17 +519,6 @@ function clearWatchState() {
   // 「已排队下一次刷新」这类文案已不属于当前账号。
   clearActionError();
   clearActionHint();
-  // 换账号/停止时把「还要再刷一次」的待办一并丢弃：它属于上一个账号，
-  // 带到新账号上会打一次多余的请求并可能覆盖刚设置的状态。
-  statusStale = false;
-  // **已经排上队的续跑定时器也必须取消**：只清 statusStale 标志是不够的
-  // —— 定时器一旦 setTimeout 就独立于标志存在，到点仍会执行 fetchStatus，
-  // 而那时读到的已是新账号的 accountId，正好产生注释里说要避免的那次
-  // 「多余的请求并覆盖刚设置的状态」。
-  if (staleRetryTimer !== null) {
-    clearTimeout(staleRetryTimer);
-    staleRetryTimer = null;
-  }
 }
 
 // 轮询周期随「任务查询间隔」变化，与 App.vue 的任务刷新共用同一个字段，
@@ -527,35 +538,28 @@ watch(
     const prevAccountId = prev?.[0];
     if (!accountId) {
       // 取消选中/账号被删：停轮询并清空上一个账号的观看态
-      stopStatusTimer();
+      pauseStatusPoll();
       clearWatchState();
       return;
     }
     // 换账号时必须清空，否则会短暂显示上一个账号的观看数据
     if (accountId !== prevAccountId) clearWatchState();
     if (running) {
-      startStatusTimer();
+      resumeStatusPoll();
       // 启动挂宝后立刻刷一次任务进度：启动前的任务列表是上一次运行残留的
       // （甚至是昨天的任务 ID），用户点下「启动」后第一眼看到的进度条与
       // 胶囊必须属于本次运行，否则会以为配置没生效。
       void handleRefresh();
     } else {
       // 停止后不再轮询，并清空观看态，避免残留上一次的进度
-      stopStatusTimer();
+      pauseStatusPoll();
       clearWatchState();
     }
   },
   { immediate: true }
 );
 
-onUnmounted(() => {
-  stopStatusTimer();
-  // 续跑用的定时器必须一并清理：否则组件卸载后仍会打一次 IPC
-  if (staleRetryTimer !== null) {
-    clearTimeout(staleRetryTimer);
-    staleRetryTimer = null;
-  }
-});
+// 轮询在组件卸载时由 useTimeoutPoll 随作用域自动 pause，无需手写 onUnmounted。
 </script>
 
 <template>
@@ -568,7 +572,9 @@ onUnmounted(() => {
 
        卡片内部那两个 min-h-0 不是可选优化，见 CardContent 处的长注释：
        没有它们，「内容高度逐环上传」会让卡片高度被内容顶高、无法由内容决定。 -->
-  <Card data-nav-region="progress" data-nav-order="4" class="flex flex-col">
+  <!-- card-hover：与账号栏、配置卡、日志卡统一 —— 此前只有这一张卡没有
+       hover 时的边框提亮，鼠标扫过右列三张卡时它是唯一不响应的。 -->
+  <Card data-nav-region="progress" data-nav-order="4" class="card-hover flex flex-col">
     <CardHeader class="px-4 pb-2 pt-3">
       <div class="flex flex-wrap items-center gap-2">
         <!-- 与另两张卡统一为 15px + font-semibold（原为 11pt + font-bold，
@@ -580,43 +586,50 @@ onUnmounted(() => {
         >
           未选择账号
         </span>
+        <!-- transition-colors：运行/失效/待机三态切换时底色与文字色原本是瞬变的
+             （全项目只有 TitleBar 的状态胶囊有过渡）。 -->
         <span
           v-else
-          class="rounded-full px-2 py-0.5 text-xs"
+          class="rounded-full px-2 py-0.5 text-xs transition-colors"
           :class="running ? 'bg-signal-success/10 text-signal-success' : (loginInvalidated ? 'bg-signal-danger/10 text-signal-danger' : 'bg-muted text-muted-foreground')"
         >
           {{ statusBadgeText }}
         </span>
         <div class="flex-1"></div>
-        <div class="flex items-center gap-1.5">
-          <Checkbox
-            id="auto-claim"
-            :model-value="configStore.config.auto_claim_rewards"
-            aria-label="自动领取奖励"
-            title="检测到任务达到 100% 后自动领取；领取失败会在后续刷新时重试"
-            @update:model-value="configStore.config.auto_claim_rewards = $event === 'indeterminate' ? true : $event"
-          />
-          <Label for="auto-claim" class="cursor-pointer text-xs">自动领取</Label>
-        </div>
-        <Button
-          size="sm"
-          class="h-7 rounded-md px-3 text-xs"
-          :disabled="claiming || !hasTasks || !accountId"
-          :title="actionBlockReason"
-          @click="handleClaim()"
+        <Tooltip
+          label="检测到任务达到 100% 后自动领取；领取失败会在后续刷新时重试"
         >
-          {{ claimButtonText }}
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          class="h-7 rounded-md px-3 text-xs"
-          :disabled="refreshing || !accountId"
-          :title="!accountId ? '请先在左侧选择账号' : undefined"
-          @click="handleRefresh"
-        >
-          {{ refreshing ? "刷新中..." : "手动刷新" }}
-        </Button>
+          <div class="flex items-center gap-1.5">
+            <Checkbox
+              id="auto-claim"
+              :model-value="configStore.config.auto_claim_rewards"
+              aria-label="自动领取奖励"
+              @update:model-value="configStore.config.auto_claim_rewards = $event === 'indeterminate' ? true : $event"
+            />
+            <Label for="auto-claim" class="cursor-pointer text-xs">自动领取</Label>
+          </div>
+        </Tooltip>
+        <Tooltip :label="actionBlockReason" :wrap="claiming || !hasTasks || !accountId">
+          <Button
+            size="sm"
+            class="h-7 rounded-md px-3 text-xs"
+            :disabled="claiming || !hasTasks || !accountId"
+            @click="handleClaim()"
+          >
+            {{ claimButtonText }}
+          </Button>
+        </Tooltip>
+        <Tooltip :label="!accountId ? '请先在左侧选择账号' : ''" :wrap="refreshing || !accountId">
+          <Button
+            size="sm"
+            variant="outline"
+            class="h-7 rounded-md px-3 text-xs"
+            :disabled="refreshing || !accountId"
+            @click="handleRefresh"
+          >
+            {{ refreshing ? "刷新中..." : "手动刷新" }}
+          </Button>
+        </Tooltip>
       </div>
     </CardHeader>
     <!-- min-h-0（CardContent + 内层容器）不是可选优化。
@@ -687,47 +700,64 @@ onUnmounted(() => {
           aria-label="掉宝进度"
           aria-valuemin="0"
           aria-valuemax="100"
-          :aria-valuenow="progressPercent"
+          :aria-valuenow="Math.round(progressPercent)"
         >
+          <!-- 三处都读同一个补间值，因此不再各自写 CSS 过渡：
+               过渡交给 progressPercent（useTransition）统一驱动，
+               否则会变成「JS 补间 + CSS 过渡」的双重缓动，比原来还慢。 -->
           <div
-            class="h-full bg-primary transition-[width] duration-[var(--duration-slow)] ease-[var(--ease-inout)]"
+            class="h-full bg-primary"
             :style="{ width: `${progressPercent}%` }"
           />
           <span
             class="absolute inset-0 flex items-center justify-center px-2.5 text-xs font-semibold text-primary-foreground"
           >
-            掉宝进度 {{ progressPercent }}%
+            掉宝进度 {{ Math.round(progressPercent) }}%
           </span>
           <span
-            class="absolute inset-0 flex items-center justify-center px-2.5 text-xs font-semibold text-foreground transition-[clip-path] duration-[var(--duration-slow)] ease-[var(--ease-inout)]"
+            class="absolute inset-0 flex items-center justify-center px-2.5 text-xs font-semibold text-foreground"
             :style="{ clipPath: `inset(0 0 0 ${progressPercent}%)` }"
           >
-            掉宝进度 {{ progressPercent }}%
+            掉宝进度 {{ Math.round(progressPercent) }}%
           </span>
         </div>
 
-        <!-- 任务展示区：**贴合内容**，不吸收任何多余高度。
+        <!-- 任务展示区：**固定 210px**（用户 2026-10-15 定：剩下的垂直空间给任务区，
+             任务区高度恒定，多出来的任务在区内滚动）。
 
              为什么不能有 `flex-1`：右列 grid 原本给本卡一行
              `minmax(364px, 1fr)`，剩下的高度全被 `flex-1` 的任务区吃掉，
              检查点只有 6 行时列表底部多出 40~60px 空白。那段空白是
              **拉伸出来的**，不是内容高度 —— 所以把 min-h 从 220 一路降到 190
              对它一点作用都没有（用户连着两轮报「还是有很大的间距」）。
-             现在右列三行全部按内容取高（见 App.vue 那一行的
-             `grid-rows-[auto_auto_auto] content-start`），本区不再有
-             `flex-1`，高度富余时落在日志卡下方。
+             现在右列三行全部按内容取高（见 App.vue 的 grid-rows），
+             本区不再有 `flex-1`，高度富余时落在日志卡下方。
 
-             min-h-[170px] 只在内容不足时起作用：一组时长任务典型是
-             6 个检查点（B站「观看直播」当前 60/120/240/360/360/600 分共 6 条），
-             逐行算下来约 180px，所以 6 个检查点时 min-h 不生效、零空白；
-             少于 6 个时面板仍有 170px 保底，不会缩成一条缝。
+             ⚠ min-h 与 max-h 必须**写同一个值**，两个都不能省：
+               * 只写 min-h → 内容多时向下延伸，把日志栏挤没（用户实测报过）；
+               * 只写 max-h → CSS 规范里 min-height 优先于 max-height，
+                 若日后有人把 min-h 调大，上限会静默失效、既不封顶也不滚动；
+               * 门禁要求保留 `min-h-[`（高度保底），所以两个都写。
 
-             overflow-y-auto 现在不会真的触发（没有高度上限就不产生溢出），
-             保留它是无害的双保险：将来若给本区加 max-height，内部滚动立刻可用。
-             检查点非常多时改为由右列统一滚动，这与「展开日志时日志向下伸出
-             视口下半部分、靠滚轮下翻」是同一套机制。 -->
-        <div class="scroll-subtle min-h-[170px] overflow-y-auto rounded-md border border-input bg-input/40 p-2">
-          <div v-if="hasTasks" class="space-y-3">
+             210 来自实测反推（估算在本项目已错过两次）：最小窗口 1030×868 下
+             实测得线性关系  日志面板高 = 275 − 任务区高
+             （任务区 170 → 面板 105；226 → 49，斜率恰为 1，因为多出来的高度
+             全部来自彼此抢空间的三张卡）。
+             **但按这个关系算出的 65px 面板，实测只放得下一行日志**（一行需
+             行高 24 + 内边距 12 + 边框 2 = 38，两行需 64 —— 差额出在截距 275
+             本身：算它时用的是「右列可视 832」，没扣掉日志卡的卡头）。
+             用户看过实窗口后拍板「一行也行，就这样设计」，故 210 保留。
+             ⚠ 想真放进两行，得把任务区再降 ~30px 并重新实测截距；
+             改任一来源（--log-row-h、日志卡头/内边距、状态四格行、卡头、
+             配置卡高度、最小窗口尺寸）都会让 275 这个截距变化，必须重新实测。 -->
+        <div class="scroll-subtle min-h-[210px] max-h-[210px] overflow-y-auto rounded-md border border-input bg-input/40 p-2">
+          <!-- 有任务 / 空态之间加过渡。父容器的最小高度（上面那个固定值）
+               保证 out-in 期间不会塌陷，两个分支的高度差因此不会变成
+               「整块跳一下」。
+               注释刻意不复写高度类名：Tailwind v4 按源码原始文本扫描，
+               注释里出现的类名会被真生成进产物 CSS 成为死规则。 -->
+          <Transition name="panel-switch" mode="out-in">
+          <div v-if="hasTasks" key="tasks" class="space-y-3">
           <!-- 时长任务聚合 -->
           <div v-if="hasDuration" class="space-y-2">
             <div v-for="(group, index) in durationGroups" :key="group.prefix" class="space-y-1">
@@ -739,85 +769,88 @@ onUnmounted(() => {
                    （注释刻意不写缩进的 Tailwind 类名：Tailwind v4 按源码
                    原始文本扫描，注释里的类名会被生成进产物 CSS） -->
               <div class="space-y-1 border-l-2 border-border pl-3">
-                <!-- 检查点单行三段：左=总时间+任务ID，中=文字进度条+##/##+百分比，
+                <!-- 检查点单行三段：左=总时间+任务ID，中=文字进度条+数字，
                      右=状态+奖励。
 
-                     三段全部**固定列宽**。此前第 2、3 段用
-                     `auto` / `1fr`：宽度由内容决定，于是「60/60」比「360/360」
-                     窄 21px、「已完成」比「已领取」宽，同一份数据在不同行之间
-                     完全对不上竖线，扫读时每行都得重新找位置。
+                     **「进度条+数字」要居中，唯一可行的写法是左右两格各占一半
+                     富余（两条相等的可压缩轨道）、中间按内容取宽。** 一侧 1fr、
+                     另一侧 auto 时 1fr 会吃掉全部富余、把中间推到边上 ——
+                     普通任务行上一版正是那种列结构，所以用户两轮反馈
+                     「仍然不作为一个整体居中」。
 
-                     中段用 `minmax(240px, 1fr)` 而不是 `1fr`/`minmax(0,1fr)`：
-                     1fr 让中段在左右两段之间居中，内部三列
-                     （进度条 auto / ##/## 定宽 / 百分比定宽）保证每行内部对齐。
-                     进度条列写 auto 而不是写死 px：它是 22 个等宽字符
-                     （`[####################]`，宽度恒定），内容宽度即精确宽度，
-                     写死 px 反而会在字体回退时与实际渲染脱节。
-                     **下限必须写死 240px**：写 minmax(0,1fr) 时这一列能被压到
-                     237px 以下，里面的 min-w-max 组并不撑开轨道（轨道下限是 0），
-                     而是居中溢出 —— 左右各压 18px 到相邻列上，
-                      与「可压缩容器装不可压缩内容」是同一种病，
-                      而且因为是居中溢出，scrollWidth 都不变，扫描器查不出来。 -->
+                     **两条轨道的下限必须是 0**（可压缩），否则别名/任务 ID
+                     一长就把那一格撑到内容宽、中心点整体偏移 —— 与
+                     「可压缩容器装不可压缩内容」是同一种病，而且因为溢出被
+                     居中分配在轨道内，scrollWidth 都不变，扫描器查不出来。
+
+                     段内各列仍是定宽：以前由内容决定时「60/60」比「360/360」
+                     窄 21px、「已完成」比「已领取」宽，同一份数据在不同行之间
+                     对不上竖线，扫读时每行都得重新找位置。 -->
                 <div
                   v-for="cp in sortedDurationCheckpoints.get(group.prefix) ?? []"
                   :key="cp.sid"
-                  class="grid grid-cols-[72px_minmax(240px,1fr)_auto] items-center gap-x-2 gap-y-0.5 py-0.5 text-xs"
+                  class="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-x-2 gap-y-0.5 py-0.5 text-xs"
                 >
-                  <div class="flex w-[72px] shrink-0 items-center gap-1.5">
-                    <span class="font-medium tabular-nums text-foreground">
+                  <div class="flex min-w-0 items-center gap-1.5">
+                    <span class="shrink-0 font-medium tabular-nums text-foreground">
                       {{ cp.limit_value }}分
                     </span>
-                    <span
-                      class="font-mono text-[11px] text-muted-foreground"
-                      :title="cp.sid"
-                    >
-                      {{ cp.sid.slice(-4) }}
+                    <Tooltip :label="cp.sid">
+                      <span class="font-mono text-[11px] text-muted-foreground">
+                        {{ cp.sid.slice(-4) }}
+                      </span>
+                    </Tooltip>
+                  </div>
+                  <!-- 整条进度条都是灰阶：填充段与后面的数字同色，未填充的
+                       `-` 再淡一档。此前填充段用 signal-info 蓝，蓝色进度条夹在
+                       两串灰数字中间会显得是另一个控件 —— 用户要的是「进度条和
+                       它的数字读起来是一件事」，填充/未填充改由 `#` 与 `-` 的
+                       字形本身承担。两处形态（时长任务组 / 普通任务）必须一致。
+
+                       「紧贴 + 逐行对齐 + 整体居中」三个条件同时成立靠两件事：
+                       数字列定宽取**本卡最长的那串**（见 numberGroupCols），
+                       以及左右两格等分富余（见上面那段）。
+                       数字在列内左对齐：右对齐会让它贴住列的右边界，与条子之间
+                       隔一段随位数变化的空白，看着就是"没紧贴"。列间 4px。 -->
+                  <div
+                    class="grid min-w-max items-center gap-1"
+                    :style="{ gridTemplateColumns: numberGroupCols }"
+                  >
+                    <span class="font-mono text-[11px] leading-none tracking-tighter">
+                      <span class="text-muted-foreground/70">[</span><span class="text-muted-foreground">{{ barFilled(cp) }}</span><span class="text-muted-foreground/50">{{ barEmpty(cp) }}</span><span class="text-muted-foreground/70">]</span>
+                    </span>
+                    <span class="tabular-nums text-muted-foreground">
+                      {{ cp.cur_value }}/{{ cp.limit_value }}
                     </span>
                   </div>
-                  <div class="flex min-w-0 items-center justify-center">
-                    <!-- 文字进度条整条都是灰阶：`#` 与后面的「60/60」「100%」
-                         同为 text-muted-foreground，未填充的 `-` 再淡一档
-                         （muted-foreground/50）。此前 `#` 用 signal-info 蓝，
-                         蓝色进度条夹在两串灰数字中间会显得是另一个控件，
-                         而这一行的进度数字就在它右边 60px 处 —— 用户要的是
-                         「进度条和它的数字读起来是一件事」。
-                         填充/未填充的区分改由 `#` 与 `-` 的字形本身承担。
-                         两处形态（时长任务组 / 普通任务）必须一致。 -->
-                    <div class="grid min-w-max grid-cols-[auto_64px_36px] items-center gap-2">
-                      <span class="font-mono text-[11px] leading-none tracking-tighter">
-                        <span class="text-muted-foreground/70">[</span><span class="text-muted-foreground">{{ barFilled(cp) }}</span><span class="text-muted-foreground/50">{{ barEmpty(cp) }}</span><span class="text-muted-foreground/70">]</span>
-                      </span>
-                      <span class="text-right tabular-nums text-muted-foreground">
-                        {{ cp.cur_value }}/{{ cp.limit_value }}
-                      </span>
-                      <span class="text-right tabular-nums text-muted-foreground">
-                        {{ percentOfCheckpoint(cp) }}%
-                      </span>
-                    </div>
-                  </div>
-                  <div class="flex shrink-0 items-center justify-end gap-1.5">
+                  <div class="flex min-w-0 items-center justify-end gap-1.5">
                     <span
-                      class="shrink-0 rounded-full px-1.5 py-0.5 text-[11px] font-medium"
+                      class="shrink-0 rounded-full px-1.5 py-0.5 text-[11px] font-medium transition-colors"
                       :class="checkPointStatusClass(cp)"
                     >
                       {{ checkPointStatus(cp) }}
                     </span>
-                    <!-- 奖励名固定预留 8 个汉字（96px @text-xs）+ 「×N」16px。
-                         此前没有宽度约束，`truncate` 在 grid 的 auto 列里
-                         实际不生效（列宽由内容撑开），奖励名一长就把整行
-                         顶宽、把中段的百分比挤出可视区。
-                         min-w-0 挂在名字上而不是外层：外层是 shrink-0 的
-                         定宽盒子，截断必须发生在名字本身。 -->
-                    <span
+                    <!-- 奖励名列定宽 88px：5 个汉字（12px/字 = 60px）+ 间隔 2px
+                         + 「×N」约 16px，再留 10px 富余（字体度量各档略有出入）。
+                         可截断字数由用户 2026-10-15 定为 5 个（原 8 字要预留
+                         112px，会把中段挤得没地方）。
+                         上一版按 76px 算小了：扣掉间隔与 ×N 只剩 58px，
+                         满 5 字的名字（如「香蕉猫头像」）被截成省略号。
+                         没有宽度约束时截断类在「宽度由内容决定」的列里根本不生效
+                         （列被内容撑开），奖励名一长就把整行顶宽。
+                         min-w-0 挂在名字上而不是外层：外层是 shrink-0 的定宽盒子，
+                         截断必须发生在名字本身。 -->
+                    <Tooltip
                       v-if="cp.award_name"
-                      class="flex w-28 shrink-0 items-baseline gap-0.5"
-                      :title="`${cp.award_name} ×${cp.award_count}`"
+                      :label="`${cp.award_name} ×${cp.award_count}`"
                     >
-                      <span class="min-w-0 flex-1 truncate text-muted-foreground">
-                        {{ cp.award_name }}
+                      <span class="flex w-[88px] shrink-0 items-baseline gap-0.5">
+                        <span class="min-w-0 flex-1 truncate text-muted-foreground">
+                          {{ cp.award_name }}
+                        </span>
+                        <span class="shrink-0 text-muted-foreground">×{{ cp.award_count }}</span>
                       </span>
-                      <span class="shrink-0 text-muted-foreground">×{{ cp.award_count }}</span>
-                    </span>
+                    </Tooltip>
                   </div>
                 </div>
               </div>
@@ -838,87 +871,73 @@ onUnmounted(() => {
                   {{ task.progress }} / {{ task.target }}
                 </span>
                 <span
-                  class="rounded-full px-1.5 py-0.5 text-[11px] font-medium"
+                  class="rounded-full px-1.5 py-0.5 text-[11px] font-medium transition-colors"
                   :class="statusClass(task.status)"
                 >
                   {{ task.status }}
                 </span>
               </div>
             </div>
-            <!-- 必须绑 `:model-value`，不是 `:value`：
-                 Progress 是对 reka-ui ProgressRoot 的封装，而 ProgressRoot
-                 只声明了 `modelValue`（node_modules/reka-ui/dist/Progress/
-                 ProgressRoot.js 的 props 里没有 `value`）。写成 `:value` 时
-                 它变成未被声明的 fallthrough attr 落到 DOM 上，组件内部读的
-                 props.modelValue 恒为默认值 0 → 指示条 translateX(-100%)
-                 被整体移出可视区，这条进度条**永远是空轨道**，
-                 而控制台不报任何错。 -->
-            <Progress :model-value="percentOf(task)" class="mt-1.5 h-1.5" />
+            <!-- 此前这里是一条 Progress 细轨道（h-1.5）。删掉的理由：
+                 任务级进度已由下方逐检查点的 `[####----] 0/60` 精确表达，
+                 这条轨道在 0% 时是**一条纯灰线**，用户认作「分割线」而不是进度条
+                 （2026-10-15 实测反馈），而它承载的信息量为零。
+                 顶部那条「掉宝进度」大条仍在（它是整体指标，且做了双层文字保证
+                 100% 时也可读），本卡不需要第二条。 -->
 
-            <!-- 检查点明细：与时长任务组的胶囊行**逐列同宽**。
-                 第 1 列是别名（可长、可截断），所以是 1fr；
-                 第 2、3 列的内部结构与列宽和上面完全一致，
-                 两处形态必须一模一样，否则时长任务与普通任务的检查点
-                 在同一张卡里会呈现两套对齐基准。 -->
+            <!-- 检查点明细：与时长任务组的胶囊行**列结构完全一致**
+                 （两处形态必须一模一样，否则时长任务与普通任务的检查点
+                 在同一张卡里会呈现两套对齐基准）。
+                 三段中只有中间那格按内容取宽、左右两格等分富余，
+                 居中与逐行对齐都靠它，理由见时长任务组那段的说明。
+                 别名（第 1 格）可长、可截断。 -->
             <div v-if="shouldShowCheckPoints(task)" class="mt-2 space-y-1 border-l-2 border-border pl-3">
               <div
                 v-for="cp in task.check_points"
                 :key="cp.sid"
-                class="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-2 gap-y-0.5 text-xs"
+                class="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-x-2 gap-y-0.5 text-xs"
               >
-                <span class="truncate text-muted-foreground">{{ cp.alias }}</span>
-                <div class="flex min-w-0 items-center justify-center">
-                  <div class="grid min-w-max grid-cols-[auto_64px_36px] items-center gap-2">
-                    <span class="font-mono text-[11px] leading-none tracking-tighter">
-                      <span class="text-muted-foreground/70">[</span><span class="text-muted-foreground">{{ barFilled(cp) }}</span><span class="text-muted-foreground/50">{{ barEmpty(cp) }}</span><span class="text-muted-foreground/70">]</span>
-                    </span>
-                    <span class="text-right tabular-nums text-muted-foreground">
-                      {{ cp.cur_value }}/{{ cp.limit_value }}
-                    </span>
-                    <span class="text-right tabular-nums text-muted-foreground">
-                      {{ percentOfCheckpoint(cp) }}%
-                    </span>
-                  </div>
+                <Tooltip :label="cp.alias">
+                  <span class="block min-w-0 truncate text-muted-foreground">{{ cp.alias }}</span>
+                </Tooltip>
+                <div
+                  class="grid min-w-max items-center gap-1"
+                  :style="{ gridTemplateColumns: numberGroupCols }"
+                >
+                  <span class="font-mono text-[11px] leading-none tracking-tighter">
+                    <span class="text-muted-foreground/70">[</span><span class="text-muted-foreground">{{ barFilled(cp) }}</span><span class="text-muted-foreground/50">{{ barEmpty(cp) }}</span><span class="text-muted-foreground/70">]</span>
+                  </span>
+                  <span class="tabular-nums text-muted-foreground">
+                    {{ cp.cur_value }}/{{ cp.limit_value }}
+                  </span>
                 </div>
-                <div class="flex shrink-0 items-center justify-end gap-1.5">
+                <div class="flex min-w-0 items-center justify-end gap-1.5">
                   <span
-                    class="shrink-0 rounded-full px-1.5 py-0.5 text-[11px] font-medium"
+                    class="shrink-0 rounded-full px-1.5 py-0.5 text-[11px] font-medium transition-colors"
                     :class="checkPointStatusClass(cp)"
                   >
                     {{ checkPointStatus(cp) }}
                   </span>
-                  <span
+                  <Tooltip
                     v-if="cp.award_name"
-                    class="flex w-28 shrink-0 items-baseline gap-0.5"
-                    :title="`${cp.award_name} ×${cp.award_count}`"
+                    :label="`${cp.award_name} ×${cp.award_count}`"
                   >
-                    <span class="min-w-0 flex-1 truncate text-muted-foreground">
-                      {{ cp.award_name }}
+                    <span class="flex w-[88px] shrink-0 items-baseline gap-0.5">
+                      <span class="min-w-0 flex-1 truncate text-muted-foreground">
+                        {{ cp.award_name }}
+                      </span>
+                      <span class="shrink-0 text-muted-foreground">×{{ cp.award_count }}</span>
                     </span>
-                    <span class="shrink-0 text-muted-foreground">×{{ cp.award_count }}</span>
-                  </span>
+                  </Tooltip>
                 </div>
               </div>
             </div>
-
-            <!-- 奖励：扁平 chip 而非带边框的盒子，减少嵌套层级 -->
-            <div
-              v-if="task.rewards.length > 0"
-              class="mt-2 flex flex-wrap gap-1.5 border-l-2 border-border pl-3"
-            >
-              <span
-                v-for="reward in task.rewards"
-                :key="reward.name"
-                class="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground"
-              >
-                {{ reward.name }} ×{{ reward.count }}
-              </span>
-            </div>
           </div>
         </div>
-          <div v-else class="py-4 text-center text-sm text-muted-foreground">
+          <div v-else key="empty" class="py-4 text-center text-sm text-muted-foreground">
             {{ !accountId ? "请先在左侧选择账号" : (refreshing ? "正在查询任务进度..." : "暂无任务进度，点击\"手动刷新\"") }}
           </div>
+          </Transition>
         </div>
 
         <!-- 任务提示。两类消息走**两个独立通道**（各自计时、互不重置）：
@@ -933,7 +952,7 @@ onUnmounted(() => {
              两者不能都涂成红色：过程提示被染红会让用户以为出错了。 -->
         <p
           v-if="actionError || actionHint"
-          class="whitespace-pre-wrap break-all font-mono text-xs"
+          class="notice-appear whitespace-pre-wrap break-all font-mono text-xs transition-colors"
           :class="actionError ? 'text-signal-danger' : 'text-muted-foreground'"
           :role="actionError ? 'alert' : 'status'"
         >

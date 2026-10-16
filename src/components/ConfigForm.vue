@@ -7,10 +7,22 @@ import { useConfigStore, TaskIdsAlteredError } from "@/stores/config";
 import { useAccountsStore } from "@/stores/accounts";
 import { useTimedNotice } from "@/lib/notice";
 import { formatIpcError } from "@/lib/ipc-error";
+import {
+  MAX_THREAD_COUNT,
+  RECONNECT_DELAY_DEFAULT_SECONDS,
+  RECONNECT_DELAY_MAX_SECONDS,
+  RECONNECT_DELAY_MIN_SECONDS,
+  TASK_QUERY_INTERVAL_DEFAULT_SECONDS,
+  TASK_QUERY_INTERVAL_MAX_SECONDS,
+  TASK_QUERY_INTERVAL_MIN_SECONDS,
+  THREAD_COUNT_DEFAULT,
+  THREAD_COUNT_MIN,
+} from "@/lib/config-limits";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { Tooltip } from "@/components/ui/tooltip";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -103,6 +115,34 @@ interface TaskGroup {
 
 const fetchingRoom = ref(false);
 const fetchingTasks = ref(false);
+
+/** 任务 ID 输入框的 hover 说明：按内容切换（用户 2026-10-14 敲定）。
+ *  空 → 讲「可以怎么自动获取」；有内容 → 那串 ID 常被截断，补全其完整值。 */
+const taskIdsTooltip = computed(() => {
+  const raw = configStore.config.task_ids_text.trim();
+  return raw
+    ? raw
+    : "可留空。点「自动获取模式1」用纯 HTTP 抓取直播间页面（需先填房间号）；点「自动获取模式2」用浏览器嗅探，并同时自动获取房间号。";
+});
+
+/** 三个数值输入的取值边界说明。数字一律取 config-limits.ts 的常量 ——
+ *  写死数字就等于在本文件里抄一份，上限一改这里就与钳制值打架（这正是
+ *  本轮抽常量要根治的旧病）。 */
+const threadLimitTooltip = computed(
+  () =>
+    `线程数取值 ${THREAD_COUNT_MIN}–${MAX_THREAD_COUNT}，默认 ${THREAD_COUNT_DEFAULT}。` +
+    `这里是每个房间的线程数，总连接数 = 房间数 × 线程数，同样不得超过 ${MAX_THREAD_COUNT}。`,
+);
+const reconnectLimitTooltip = computed(
+  () =>
+    `重连延迟取值 ${RECONNECT_DELAY_MIN_SECONDS}–${RECONNECT_DELAY_MAX_SECONDS} 秒，` +
+    `默认 ${RECONNECT_DELAY_DEFAULT_SECONDS}。断线后每隔这么久重连一次。`,
+);
+const intervalLimitTooltip = computed(
+  () =>
+    `查询间隔取值 ${TASK_QUERY_INTERVAL_MIN_SECONDS}–${TASK_QUERY_INTERVAL_MAX_SECONDS} 秒，` +
+    `默认 ${TASK_QUERY_INTERVAL_DEFAULT_SECONDS}。多久向 B 站查一次任务进度。`,
+);
 const {
   text: fetchError,
   show: showFetchError,
@@ -145,8 +185,20 @@ async function retryLoadConfig() {
   }
 }
 
+/** 保存 / 导入 / 导出 三者的共用进行中标志。
+ *
+ *  三者写的是同一份配置，且导入/导出会弹出**系统文件对话框** —— 期间再点
+ *  另一个会开出第二个对话框，或让两次写入互相覆盖。
+ *
+ *  此前这三个按钮没有任何进行中反馈：点下保存后界面纹丝不动，直到 3 秒后
+ *  提示出现，用户会以为没点上而反复点（与 ConfirmDialog 那边用
+ *  「文案变化 + disabled + 锁宽」表达加载态是同一套做法）。 */
+const busy = ref<null | "save" | "import" | "export">(null);
+
 /** 真正落盘当前编辑（关窗也会 save，但显式保存让用户不依赖关窗行为） */
 async function handleSave() {
+  if (busy.value) return;
+  busy.value = "save";
   clearSaveNotice();
   try {
     await configStore.save();
@@ -163,10 +215,14 @@ async function handleSave() {
       return;
     }
     showSaveNotice(formatIpcError(e), true);
+  } finally {
+    busy.value = null;
   }
 }
 
 async function handleExport() {
+  if (busy.value) return;
+  busy.value = "export";
   clearSaveNotice();
   try {
     const filePath = await save({
@@ -178,10 +234,14 @@ async function handleExport() {
     showSaveNotice("配置已导出", false);
   } catch (e) {
     showSaveNotice(formatIpcError(e, "导出配置失败"), true);
+  } finally {
+    busy.value = null;
   }
 }
 
 async function handleImport() {
+  if (busy.value) return;
+  busy.value = "import";
   clearSaveNotice();
   try {
     const filePath = await open({
@@ -194,6 +254,8 @@ async function handleImport() {
     showSaveNotice("配置已导入", false);
   } catch (e) {
     showSaveNotice(formatIpcError(e, "导入配置失败"), true);
+  } finally {
+    busy.value = null;
   }
 }
 
@@ -549,35 +611,44 @@ function cancelBrowserPicker() {
                  现在这句约 206px，在默认侧栏 240（input 约 389px）下完整显示。
                  被删掉的「模式1 需先有房间号」并没有丢：本卡片底部的说明行写着
                  「模式1：纯 HTTP 抓取直播间页面（需先填房间号）」，输入框的
-                 title 也带完整说明，两处都不遮挡任何可见文字。 -->
-            <Input
-              id="taskIds"
-              v-model="configStore.config.task_ids_text"
-              placeholder="可留空: 可用浏览器嗅探自动获取"
-              title="可留空。点「自动获取模式1」用纯 HTTP 抓取直播间页面（需先填房间号）；点「自动获取模式2」用浏览器嗅探，并同时自动获取房间号。"
-              class="h-8 min-w-0 text-sm"
-            />
+                 hover 提示也带完整说明，两处都不遮挡任何可见文字。 -->
+            <Tooltip :label="taskIdsTooltip" align="start">
+              <Input
+                id="taskIds"
+                v-model="configStore.config.task_ids_text"
+                placeholder="可留空: 可用浏览器嗅探自动获取"
+                class="h-8 min-w-0 text-sm"
+              />
+            </Tooltip>
             <div class="flex gap-1.5">
-              <Button
-                size="sm"
-                variant="outline"
-                class="h-8 min-w-[92px] text-sm"
-                :disabled="fetchingTasks || fetchingRoom"
-                :title="fetchingRoom ? '任务 ID 捕获进行中，请稍候' : undefined"
-                @click="handleFetchTaskIdsMode1"
+              <Tooltip
+                :label="fetchingRoom ? '任务 ID 捕获进行中，请稍候' : ''"
+                :wrap="fetchingTasks || fetchingRoom"
               >
-                {{ fetchingTasks && pendingAction === "task1" ? "捕获中..." : "自动获取模式1" }}
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                class="h-8 min-w-[92px] text-sm"
-                :disabled="fetchingTasks || fetchingRoom"
-                :title="fetchingRoom ? '任务 ID 捕获进行中，请稍候' : undefined"
-                @click="handleFetchTaskIdsMode2"
+                <Button
+                  size="sm"
+                  variant="outline"
+                  class="h-8 min-w-[92px] text-sm"
+                  :disabled="fetchingTasks || fetchingRoom"
+                  @click="handleFetchTaskIdsMode1"
+                >
+                  {{ fetchingTasks && pendingAction === "task1" ? "捕获中..." : "自动获取模式1" }}
+                </Button>
+              </Tooltip>
+              <Tooltip
+                :label="fetchingRoom ? '任务 ID 捕获进行中，请稍候' : ''"
+                :wrap="fetchingTasks || fetchingRoom"
               >
-                {{ fetchingTasks ? "捕获中..." : "自动获取模式2" }}
-              </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  class="h-8 min-w-[92px] text-sm"
+                  :disabled="fetchingTasks || fetchingRoom"
+                  @click="handleFetchTaskIdsMode2"
+                >
+                  {{ fetchingTasks ? "捕获中..." : "自动获取模式2" }}
+                </Button>
+              </Tooltip>
             </div>
           </div>
 
@@ -623,48 +694,54 @@ function cancelBrowserPicker() {
         <fieldset class="space-y-2">
           <legend class="sr-only">运行参数</legend>
           <div class="grid grid-cols-[repeat(3,minmax(160px,1fr))] items-center">
-            <div class="flex items-center justify-self-start gap-2">
-              <Label
-                for="threads"
-                class="w-[var(--cfg-label-w)] shrink-0 text-left text-sm"
-              >线程数</Label>
-              <Input
-                id="threads"
-                v-model="configStore.config.thread_count_text"
-                type="number"
-                min="1"
-                max="256"
-                class="h-8 w-[68px] shrink-0 text-sm"
-              />
-            </div>
-            <div class="flex items-center justify-self-center gap-2">
-              <Label
-                for="reconnect"
-                class="w-[var(--cfg-label-w)] shrink-0 text-left text-sm"
-              >重连延迟(s)</Label>
-              <Input
-                id="reconnect"
-                v-model="configStore.config.reconnect_delay_text"
-                type="number"
-                min="1"
-                max="3600"
-                class="h-8 w-[68px] shrink-0 text-sm"
-              />
-            </div>
-            <div class="flex items-center justify-self-end gap-2">
-              <Label
-                for="interval"
-                class="w-[var(--cfg-label-w)] shrink-0 text-left text-sm"
-              >查询间隔(s)</Label>
-              <Input
-                id="interval"
-                v-model="configStore.config.task_query_interval_text"
-                type="number"
-                min="10"
-                max="3600"
-                class="h-8 w-[68px] shrink-0 text-sm"
-              />
-            </div>
+            <Tooltip :label="threadLimitTooltip" align="start">
+              <div class="flex items-center justify-self-start gap-2">
+                <Label
+                  for="threads"
+                  class="w-[var(--cfg-label-w)] shrink-0 text-left text-sm"
+                >线程数</Label>
+                <Input
+                  id="threads"
+                  v-model="configStore.config.thread_count_text"
+                  type="number"
+                  :min="THREAD_COUNT_MIN"
+                  :max="MAX_THREAD_COUNT"
+                  class="h-8 w-[68px] shrink-0 text-sm"
+                />
+              </div>
+            </Tooltip>
+            <Tooltip :label="reconnectLimitTooltip" align="start">
+              <div class="flex items-center justify-self-center gap-2">
+                <Label
+                  for="reconnect"
+                  class="w-[var(--cfg-label-w)] shrink-0 text-left text-sm"
+                >重连延迟(s)</Label>
+                <Input
+                  id="reconnect"
+                  v-model="configStore.config.reconnect_delay_text"
+                  type="number"
+                  :min="RECONNECT_DELAY_MIN_SECONDS"
+                  :max="RECONNECT_DELAY_MAX_SECONDS"
+                  class="h-8 w-[68px] shrink-0 text-sm"
+                />
+              </div>
+            </Tooltip>
+            <Tooltip :label="intervalLimitTooltip" align="start">
+              <div class="flex items-center justify-self-end gap-2">
+                <Label
+                  for="interval"
+                  class="w-[var(--cfg-label-w)] shrink-0 text-left text-sm"
+                >查询间隔(s)</Label>
+                <Input
+                  id="interval"
+                  v-model="configStore.config.task_query_interval_text"
+                  type="number"
+                  :min="TASK_QUERY_INTERVAL_MIN_SECONDS"
+                  :max="TASK_QUERY_INTERVAL_MAX_SECONDS"
+                  class="h-8 w-[68px] shrink-0 text-sm"
+                />
+              </div>
+            </Tooltip>
           </div>
 
           <!-- 复选框单独一行：它们是行为开关而非数值参数，混在数值里会让人
@@ -700,16 +777,40 @@ function cancelBrowserPicker() {
           </p>
         </fieldset>
 
-        <!-- 操作按钮 -->
+        <!-- 操作按钮。三者共用同一个进行中标志（见 busy 的说明）。
+             保存显示进行中文案：它是纯 IPC，期间界面上没有任何系统 UI，
+             不给文案用户就完全看不到它在跑。导入/导出不改文案 ——
+             此刻用户正在系统文件对话框里，应用内的文案不是他的焦点，
+             但同样禁用，防重入。
+
+             min-w 取「配置」四字宽（text-sm 的 4 个汉字 + 内边距）：
+             进行中文案更短，不锁宽按钮会先缩一下、完成后再弹回去。 -->
         <div class="flex items-center gap-2">
-          <Button size="sm" class="h-8 text-sm" @click="handleSave">
-            保存配置
+          <Button
+            size="sm"
+            class="h-8 min-w-[80px] text-sm"
+            :disabled="busy !== null"
+            @click="handleSave"
+          >
+            {{ busy === "save" ? "保存中…" : "保存配置" }}
           </Button>
-          <Button size="sm" variant="outline" class="h-8 text-sm" @click="handleImport">
-            导入配置
+          <Button
+            size="sm"
+            variant="outline"
+            class="h-8 min-w-[80px] text-sm"
+            :disabled="busy !== null"
+            @click="handleImport"
+          >
+            {{ busy === "import" ? "导入中…" : "导入配置" }}
           </Button>
-          <Button size="sm" variant="outline" class="h-8 text-sm" @click="handleExport">
-            导出配置
+          <Button
+            size="sm"
+            variant="outline"
+            class="h-8 min-w-[80px] text-sm"
+            :disabled="busy !== null"
+            @click="handleExport"
+          >
+            {{ busy === "export" ? "导出中…" : "导出配置" }}
           </Button>
         </div>
 
@@ -724,7 +825,7 @@ function cancelBrowserPicker() {
         </p>
         <p
           v-if="saveNotice"
-          class="break-all rounded-md px-2.5 py-1.5 text-xs"
+          class="notice-appear break-all rounded-md px-2.5 py-1.5 text-xs"
           :class="saveNoticeError ? 'bg-signal-danger/10 text-signal-danger' : 'bg-signal-success/10 text-signal-success'"
           role="status"
         >
@@ -732,7 +833,7 @@ function cancelBrowserPicker() {
         </p>
         <p
           v-if="testResult"
-          class="break-all rounded-md px-2.5 py-1.5 text-xs"
+          class="notice-appear break-all rounded-md px-2.5 py-1.5 text-xs"
           :class="testResult === '已发送' ? 'bg-signal-success/10 text-signal-success' : 'bg-signal-danger/10 text-signal-danger'"
           role="status"
         >
@@ -769,7 +870,7 @@ function cancelBrowserPicker() {
           <label
             v-for="(group, index) in pendingGroups"
             :key="`${group.label}-${group.task_ids[0] ?? index}`"
-            class="flex cursor-pointer items-center gap-2 rounded-md border p-2 text-sm"
+            class="flex cursor-pointer items-center gap-2 rounded-md border p-2 text-sm transition-colors"
             :class="
               index === selectedGroupIndex
                 ? 'border-primary bg-accent/60'
@@ -813,7 +914,7 @@ function cancelBrowserPicker() {
             v-for="browser in availableBrowsers"
             :key="browser"
             type="button"
-            class="flex w-full items-center gap-2 rounded-md border p-2 text-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
+            class="flex w-full items-center gap-2 rounded-md border p-2 text-sm text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
             :class="
               browser === defaultBrowser
                 ? 'border-primary bg-accent/60'

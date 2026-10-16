@@ -18,7 +18,7 @@
  *  横向没有「相邻区域」的概念，硬跨只会跳到别的栏，违反直觉。
  *
  *  本文件只做 DOM 胶水；所有判定逻辑在 `nav-geometry.ts`（零 import，
- *  因此 `tests/check_region_nav.mjs` 能用 Node 直接 import 真代码来测）。
+ *  所以外部 Node 脚本能直接 import 真代码来测，不必复刻一遍）。
  */
 import {
   groupIntoRows,

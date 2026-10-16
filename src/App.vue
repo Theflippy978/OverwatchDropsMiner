@@ -1,5 +1,13 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
+import {
+  useIntervalFn,
+  refDebounced,
+  usePreferredDark,
+  useResizeObserver,
+  watchThrottled,
+} from "@vueuse/core";
+import { SplitterGroup, SplitterPanel, SplitterResizeHandle } from "reka-ui";
 import { getCurrentWindow, primaryMonitor, availableMonitors, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { useAccountsStore } from "@/stores/accounts";
@@ -18,6 +26,11 @@ import ConfirmDialog from "@/components/ConfirmDialog.vue";
 import { NOTICE_AUTO_HIDE_MS } from "@/lib/notice";
 import { formatIpcError } from "@/lib/ipc-error";
 import { installRegionNav } from "@/lib/region-nav";
+import {
+  TASK_QUERY_INTERVAL_DEFAULT_SECONDS,
+  TASK_QUERY_INTERVAL_MAX_SECONDS,
+  TASK_QUERY_INTERVAL_MIN_SECONDS,
+} from "@/lib/config-limits";
 
 const accountsStore = useAccountsStore();
 const configStore = useConfigStore();
@@ -27,9 +40,10 @@ const darkMode = ref(false);
 const showQrLogin = ref(false);
 const qrError = ref("");
 const themeFollowSystem = ref(true);
-/** 系统主题的监听句柄。**不是定时器** —— 原实现是 5 秒轮询，
-    2026-10-10 改为 matchMedia 的 change 事件（见 startSystemThemeWatch）。 */
-let themeMedia: MediaQueryList | null = null;
+/** 系统主题。**响应式**：usePreferredDark 内部走 matchMedia 的 change 事件，
+ *  不是轮询 —— 原实现是 5 秒 setInterval 轮询，用户切系统主题后最长 5 秒才跟上。
+ *  从手写 MediaQueryList 句柄换成它，顺带消灭了「装/卸监听 + 空值守卫」那套簿记。 */
+const systemDark = usePreferredDark();
 /** 上一次**请求**切换到的主题；`null` = 还没有过手动/系统切换。
  *
  *  存在的唯一理由：`applyThemeWithTransition` 把 `darkMode.value` 的赋值推迟到
@@ -37,6 +51,19 @@ let themeMedia: MediaQueryList | null = null;
  *  `darkMode.value` 拿到的还是旧值 —— 两次算出的目标相同，结果只切了一次。
  *  用这个变量当基准，连点才能真的来回切。 */
 let themeRequested: boolean | null = null;
+/** 主题 View Transition 是否正在进行。
+ *
+ *  存在的理由（2026-10-14 CDP 实测）：VT 期间浏览器把命中测试落到 `<html>` 上
+ *  （快照层不属于 DOM），所以按钮**收不到**第二次点击 —— 实测间隔 60/120/220ms
+ *  时事件都派发到了 `hit: 'HTML'`、`onBtn: false`，而 VT 实测耗时 265~290ms，
+ *  300ms 以上才正常。用户的手感是「连点有卡卡的感觉、按了没反应」。
+ *
+ *  这个拦不住（不是我们的覆盖层吃点击，`::view-transition{pointer-events:none}`
+ *  早就加了），所以退而求其次：**把它显示出来** —— 过渡期间按钮降透明度、
+ *  光标换成忙碌态，用户知道「正在切」而不是「我是不是没点上」。
+ *  刻意**不真禁用按钮**：禁用会让正在聚焦的按钮丢焦点，方向键落回 body、
+ *  打断区域导航（这条由 UI 回归门禁锁住）。 */
+const themeTransitioning = ref(false);
 
 /** 方向键区域导航的卸载函数（见 onMounted / onUnmounted）。
  *  它挂的是 document 级 keydown，必须在卸载时摘掉 —— 否则热重载或
@@ -102,10 +129,6 @@ function saveTheme(theme: string) {
   }
 }
 
-function detectSystemTheme(): boolean {
-  return window.matchMedia("(prefers-color-scheme: dark)").matches;
-}
-
 const showUpdateDialog = ref(false);
 const updateLatestVersion = ref("");
 const updateReleaseUrl = ref("");
@@ -126,6 +149,13 @@ const CHECK_MIN_VISIBLE_MS = 350;
 /** 检查结果提示，由标题栏中段胶囊承载；空串 = 退回显示运行状态 */
 const updateNotice = ref("");
 const updateNoticeError = ref(false);
+/** 胶囊 `:title` 的附加上下文（后端 detail：HTTP 状态码、异常类型）。
+ *
+ *  与 updateNotice 分开存而不是拼进它：胶囊正文是定宽的（宽度与字数预算
+ *  见 TitleBar.vue 的胶囊注释与后端 constants.py 的那份常量），
+ *  detail 是排障用的长信息，拼上去会溢出。两者在 TitleBar 里分别接到
+ *  正文与 title 上。只在失败/跳过时有值。 */
+const updateNoticeDetail = ref("");
 /** 提示自动消失的定时器句柄 */
 let updateNoticeTimer: number | null = null;
 /** 运行中尝试关闭窗口时的模态提示（替代阻塞 WebView 的原生 alert） */
@@ -151,7 +181,7 @@ function applySavedTheme() {
     darkMode.value = savedTheme === "dark";
     themeFollowSystem.value = false;
   } else {
-    darkMode.value = detectSystemTheme();
+    darkMode.value = systemDark.value;
   }
 }
 
@@ -221,16 +251,10 @@ onMounted(async () => {
   await runStep("账号列表", () => accountsStore.fetchAccounts());
   await runStep("配置加载", () => configStore.ensureLoaded());
 
-  loadSidebarWidth();
-  window.addEventListener("pointermove", onSidebarResizeMove);
-  window.addEventListener("pointerup", onSidebarResizeEnd);
-  startSystemThemeWatch();
   // 方向键区域导航：把 ↑/↓ 从「只有账号列表能用」扩展到全界面。
   // 在这里装而不是各组件各装一份 —— 它本质是**跨区块**的导航，
   // 属主只能是应用级；组件级安装会变成多个 listener 互相抢按键。
   uninstallRegionNav = installRegionNav();
-  startConfigSync();
-  startTaskRefresh();
   updateTimer = window.setTimeout(() => void checkUpdate(false), 3000);
 });
 
@@ -247,24 +271,18 @@ onUnmounted(() => {
   if (showFallbackTimer !== null) clearTimeout(showFallbackTimer);
   if (updateTimer !== null) clearTimeout(updateTimer);
   if (updateNoticeTimer !== null) clearTimeout(updateNoticeTimer);
-  if (taskRefreshDebounce !== null) clearTimeout(taskRefreshDebounce);
-  if (sidebarPersistHandle !== null) cancelAnimationFrame(sidebarPersistHandle);
   // 主题过渡改用 View Transitions 后，不再有摘类定时器与轮询需要清理
   // （过渡由浏览器托管，没有我们持有的句柄）。
-  window.removeEventListener("pointermove", onSidebarResizeMove);
-  window.removeEventListener("pointerup", onSidebarResizeEnd);
-  stopSystemThemeWatch();
+  // 配置同步 / 任务刷新 / 系统主题监听 / 拖拽把手监听的清理由 VueUse 随
+  // 作用域托管，这里不再逐个摘除。
   uninstallRegionNav?.();
   uninstallRegionNav = null;
-  stopConfigSync();
-  stopTaskRefresh();
   accountsStore.dispose();
   logsStore.dispose();
 });
 
 let closeHandlerRegistered = false;
 let closing = false;
-let configSyncTimer: number | null = null;
 let configSyncInFlight = false;
 let showFallbackTimer: number | null = null;
 let updateTimer: number | null = null;
@@ -362,76 +380,64 @@ function registerCloseHandler() {
   });
 }
 
-function startConfigSync() {
-  if (configSyncTimer !== null) return;
-  configSyncTimer = window.setInterval(() => {
-    if (!anyRunning.value) return;
-    // in-flight 去重：任一账号响应超 2s 时，tick 会无上限地叠加并发
-    // invoke，把 Rust 侧 tokio 工作线程与 sidecar 都压垮。
-    if (configSyncInFlight) return;
-    configSyncInFlight = true;
-    invoke("sync_config_to_miners")
-      .catch((e) => {
-        // 原来完全吞掉错误：sidecar 挂掉时用户只看到「改了配置不生效」，
-        // 没有任何线索。
-        console.error("同步配置到矿工失败:", e);
-      })
-      .finally(() => {
-        configSyncInFlight = false;
-      });
-  }, 2000);
-}
+/** 配置同步：每 2 秒把当前配置推给正在运行的矿工。
+ *
+ *  定时器交给 useIntervalFn —— 它随组件作用域自动清理，因此不再需要
+ *  手写 setInterval + 句柄 + 「已在跑就不再起」的幂等守卫那一套。 */
+useIntervalFn(() => {
+  if (!anyRunning.value) return;
+  // in-flight 去重：任一账号响应超 2s 时，tick 会无上限地叠加并发
+  // invoke，把 Rust 侧 tokio 工作线程与 sidecar 都压垮。
+  if (configSyncInFlight) return;
+  configSyncInFlight = true;
+  invoke("sync_config_to_miners")
+    .catch((e) => {
+      // 原来完全吞掉错误：sidecar 挂掉时用户只看到「改了配置不生效」，
+      // 没有任何线索。
+      console.error("同步配置到矿工失败:", e);
+    })
+    .finally(() => {
+      configSyncInFlight = false;
+    });
+}, 2000);
 
-function stopConfigSync() {
-  if (configSyncTimer !== null) {
-    clearInterval(configSyncTimer);
-    configSyncTimer = null;
-  }
-}
-
-let taskRefreshTimer: number | null = null;
-
-function startTaskRefresh() {
-  stopTaskRefresh();
-  const interval = Math.max(10, Math.min(3600, parseInt(configStore.config.task_query_interval_text, 10) || 30));
-  taskRefreshTimer = window.setInterval(() => {
-    const runningAccounts = accountsStore.accounts.filter((a) => a.running);
-    for (const account of runningAccounts) {
-      void useTasksStore().refreshTasks(account.id, false);
-    }
-  }, interval * 1000);
-}
-
-function stopTaskRefresh() {
-  if (taskRefreshTimer !== null) {
-    clearInterval(taskRefreshTimer);
-    taskRefreshTimer = null;
-  }
-}
-
-/** 「任务查询间隔」改动的防抖句柄 */
-let taskRefreshDebounce: number | null = null;
-
-// 「任务查询间隔」改动后按新周期重建定时器（带防抖）。
-//
-// 输入框是 ConfigForm 的 v-model，**每敲一个字符**就会触发这个 watch。
-// 无防抖时每次击键都 clearInterval + setInterval，把已经走过一半的计时
-// 整个归零 —— 用户慢慢输入「3600」的过程中，自动任务刷新可能长时间不触发。
-// 另外输入过程中的中间态也不该生效：清空输入框时 parseInt("") 得到 NaN，
-// 落到 `|| 30` 会瞬时把周期跳成 30s。
-//
-// 300ms 是「打字停顿」的量级：足够合并连续击键，又不会让用户觉得
-// 「改完了没反应」。真正生效仍由 startTaskRefresh 里的钳制保证范围合法。
-watch(
-  () => configStore.config.task_query_interval_text,
-  () => {
-    if (taskRefreshDebounce !== null) clearTimeout(taskRefreshDebounce);
-    taskRefreshDebounce = window.setTimeout(() => {
-      taskRefreshDebounce = null;
-      startTaskRefresh();
-    }, 300);
-  }
+/** 「任务查询间隔」（毫秒），带 300ms 防抖。
+ *
+ *  输入框是 ConfigForm 的 v-model，**每敲一个字符**就会改这个值。
+ *  没有防抖时每次击键都会重建定时器，把已经走过一半的计时整个归零 ——
+ *  用户慢慢输入「3600」的过程中，自动任务刷新可能长时间不触发。
+ *  输入过程中的中间态也不该生效：清空输入框时 parseInt("") 得到 NaN，
+ *  落到默认值兜底才不会把周期跳成一个意外的小值。
+ *
+ *  300ms 是「打字停顿」的量级：足够合并连续击键，又不会让用户觉得
+ *  「改完了没反应」。这里的范围钳制取自 lib/config-limits.ts，
+ *  与 config.ts 保存时同源 —— 不要在这重写数字。 */
+const taskQueryIntervalMs = refDebounced<number>(
+  computed(
+    () =>
+      Math.max(
+        TASK_QUERY_INTERVAL_MIN_SECONDS,
+        Math.min(
+          TASK_QUERY_INTERVAL_MAX_SECONDS,
+          parseInt(configStore.config.task_query_interval_text, 10) ||
+            TASK_QUERY_INTERVAL_DEFAULT_SECONDS,
+        ),
+      ) * 1000,
+  ),
+  300,
 );
+
+/** 按「任务查询间隔」周期性刷新所有运行中账号的任务。
+ *
+ *  useIntervalFn 在 interval 是 ref/getter 时会**监视它、变化即重建定时器**
+ *  （clear + 重建），这正是原先 watch + 手写防抖 + startTaskRefresh 那段
+ *  在做的事；清理由作用域托管，所以 stopTaskRefresh 也一并消失。 */
+useIntervalFn(() => {
+  const runningAccounts = accountsStore.accounts.filter((a) => a.running);
+  for (const account of runningAccounts) {
+    void useTasksStore().refreshTasks(account.id, false);
+  }
+}, () => taskQueryIntervalMs.value);
 
 /**
  * 更新检查。
@@ -454,7 +460,14 @@ watch(
 async function checkUpdate(force = false) {
   if (checkingUpdate.value) return;
   checkingUpdate.value = true;
-  if (force) showUpdateNotice("正在检查…", false);
+  if (force) {
+    // 进入「正在检查」先清掉上一次的排障 detail：胶囊正文此时换成「正在检查…」，
+    // 若 title 还留着上次失败的原因，hover 会显示「正在检查…：GitHub 返回 HTTP 403」
+    // 这种自相矛盾的话。detail 只能在这里清，不能挪进 showUpdateNotice ——
+    // 那会连带本次刚设的新值一起清掉（见 showUpdateNotice 的注释）。
+    updateNoticeDetail.value = "";
+    showUpdateNotice("正在检查…", false);
+  }
   const startedAt = performance.now();
   // 结果提示**不能**在 invoke 返回时就写 —— 本地开发包的 invoke 1~2ms 就返回，
   // 写进去会把「正在检查…」立刻顶掉，用户连一帧都看不到。
@@ -465,6 +478,7 @@ async function checkUpdate(force = false) {
       update_available: boolean;
       status: string;
       message: string;
+      detail?: string;
       latest_version: string;
       release_url: string;
     }>("check_update", { force });
@@ -481,9 +495,18 @@ async function checkUpdate(force = false) {
       // 只有真正比对完、且本地不落后才说「已是最新」；
       // 失败（网络 / 限流 / 远端异常）与跳过（版本号不可比较）都如实说原因。
       const upToDate = result.status === "up_to_date";
-      const text = upToDate
-        ? "已是最新版本"
-        : result.message || "检查更新失败，请稍后重试";
+      // **胶囊只显示后端的 message**，detail 不许拼进来。
+      // 胶囊是定宽的，宽度预算只在后端常量里写一份
+      // （python_sidecar/backend/constants.py 的 CAPSULE_MESSAGE_MAX_CHARS，
+      // 像素真相见 TitleBar.vue 的胶囊注释），这里不复述数字。
+      // 而 detail 是「HTTP 403」这类排障信息，长度不可控；拼上去必然溢出 ——
+      // 2026-10-13 用户报告「还是显示超过 6 个字」，就是因为上一版在这里
+      // 用 join("：") 把两者拼成了一串，胶囊与 title 拿到的是同一个长句。
+      //
+      // 现在二者分离：胶囊显示 message，detail 由 updateNoticeDetail 单独
+      // 带给 TitleBar 作 title，需要完整原因的用户 hover 即可看到。
+      const text = upToDate ? "已是最新版本" : result.message || "检查更新失败";
+      updateNoticeDetail.value = upToDate ? "" : result.detail || "";
       announce = () => showUpdateNotice(text, !upToDate);
     }
   } catch (e) {
@@ -515,6 +538,9 @@ announce?.();
  *
  * 复用 notice.ts 的时长常量而非另定一个：配置保存/导入等提示都按 3 秒，
  * 用户已经形成「提示会自己消失」的预期，这里改成别的时长会显得不一致。
+ *
+ * detail 不在这里清：它由 checkUpdate 在调本函数前按本次结果现填，
+ * 清空会连带正确的那次结果一起丢掉。
  */
 function showUpdateNotice(text: string, isError: boolean) {
   if (updateNoticeTimer !== null) clearTimeout(updateNoticeTimer);
@@ -523,6 +549,8 @@ function showUpdateNotice(text: string, isError: boolean) {
   updateNoticeTimer = window.setTimeout(() => {
     updateNoticeTimer = null;
     updateNotice.value = "";
+    // 正文消失时 title 的上下文也要跟着走，否则 hover 空白处仍弹出旧原因
+    updateNoticeDetail.value = "";
   }, NOTICE_AUTO_HIDE_MS);
 }
 
@@ -683,34 +711,68 @@ function updateTheme() {
  *    * 连抓 13 帧检查视口四角与中心的亮度差，**未发现边缘闪白**
  *      （视口边缘闪白这一疑点至此实测排除）。
  *
- *  **降级**：API 不可用（老 WebView2）或用户开启「减少动效」时，直接切 ——
- *  与 MDN 的官方示例一致（先判 `document.startViewTransition` 是否存在）。 */
+ *  **降级**：仅「API 不可用（老 WebView2）」时直接切 ——
+ *  与 MDN 的官方示例一致（先判 `document.startViewTransition` 是否存在）。
+ *  系统「减少动态效果」不触发降级，见函数内注释。 */
 function applyThemeWithTransition(next: boolean) {
   // 同步记下「请求切到哪」：`startViewTransition` 的回调是**异步**跑的，
   // 连点两次时第二次读 `darkMode.value` 还是旧值 → 两次算出的 next 相同 →
   // 只切了一次（双击看起来像没反应）。`toggleTheme` 用这个值当基准。
   themeRequested = next;
 
-  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const applyNow = () => {
     darkMode.value = next;
     updateTheme();
   };
 
-  // 降级路径：不支持 View Transitions 或用户要求减少动效 → 直接切
-  if (reduced || typeof document.startViewTransition !== "function") {
+  // 降级路径：老 WebView2 没有 View Transitions API 时直接切
+  // （与 MDN 的官方示例一致，先判 `document.startViewTransition` 是否存在）。
+  //
+  // **刻意不因「系统减少动态效果」而降级**（2026-10-13 用户明确要求）：
+  // 圆形揭示是本项目唯一的大幅动效，且它从用户刚点的那个按钮扩散开 ——
+  // 是有明确指向性的视觉反馈，不是装饰。系统那个开关针对的是
+  // 「满屏乱飞 / 大幅位移」那类动效，把一个 220ms 的定点揭示也关掉属于
+  // 过度降级：用户得到的是「点了主题按钮、屏幕硬闪一下」。
+  // 真要为它降级的话，判据应该是「本次切换的位移距离」，而不是系统开关。
+  if (typeof document.startViewTransition !== "function") {
     applyNow();
     return;
   }
+
+  // 从这里起才置「进行中」：上面的降级分支不产生 VT、也就不会冻结命中测试，
+  // 提前置位会让按钮永久停在禁用态（finally 没有对应的 finished 来摘）。
+  themeTransitioning.value = true;
 
   // **回调必须 await 到 Vue 把 DOM 更新完**：`startViewTransition` 会等回调返回的
   // promise 落定之后才拍「新快照」，而 Vue 的组件更新是**微任务**（`nextTick`）。
   // 不 await 的话新快照可能仍是旧状态 —— 具体表现是标题栏那个日/月图标
   // （`TitleBar` 的 `:dark="darkMode"`）在整段揭示动画里显示旧图标，
   // 动画结束后才「啪」地翻过来。
+  // 圆心对齐标题栏的主题按钮：写死的百分比在窗口尺寸变化、或按钮位置被
+  // 调整之后就会偏，而「揭示从哪一点扩散」是这段动效的全部观感来源。
+  // 拿不到按钮元素时保留 CSS 里的兜底值。
+  const themeToggle = document.querySelector<HTMLElement>("[data-theme-toggle]");
+  if (themeToggle) {
+    const rect = themeToggle.getBoundingClientRect();
+    const origin = document.documentElement.style;
+    origin.setProperty(
+      "--vt-origin-x",
+      `${(((rect.left + rect.width / 2) / window.innerWidth) * 100).toFixed(2)}%`,
+    );
+    origin.setProperty(
+      "--vt-origin-y",
+      `${(((rect.top + rect.height / 2) / window.innerHeight) * 100).toFixed(2)}%`,
+    );
+  }
+
   document.startViewTransition(async () => {
     applyNow();
     await nextTick();
+    // finished 在过渡被 skip/abort 时会 reject，而 .finally() 返回的新 promise
+    // 会沿用这个 reject —— 不 catch 就是一条未处理的 promise rejection
+    // （本项目日志门禁会把 console.error 记进日志流）。
+  }).finished.catch(() => undefined).finally(() => {
+    themeTransitioning.value = false;
   });
 }
 function toggleTheme() {
@@ -725,36 +787,21 @@ function toggleTheme() {
   // applySavedTheme 读到反的主题，表现为「切到浅色、重启变深色」。
   saveTheme(next ? "dark" : "light");
   applyThemeWithTransition(next);
-  stopSystemThemeWatch();
 }
 
-/** 系统主题跟随：用 matchMedia 的 change 事件，**不再轮询**。
+/** 跟随系统主题变化。
  *
- *  原实现是 `setInterval(..., 5000)` 轮询 matchMedia，两个问题：
- *    ① 用户在系统里切主题后，本程序最长 **5 秒**才跟上，看起来像没生效；
- *    ② 常驻定时器在窗口不可见时也照跑。
- *  而 matchMedia 本身就支持 change 事件 —— 用事件既省一个常驻定时器，
- *  又让跟随延迟从「最多 5s」降到即时。
+ *  监听交给 usePreferredDark（内部走 matchMedia 的 change 事件，**不是轮询**）：
+ *  更早的实现是 5 秒 setInterval 轮询，用户在系统里切主题后最长 5 秒才跟上。
  *
- *  函数名从 `…Polling` 改为 `…Watch`：留着旧名字会误导下一个读者去找定时器
- *  改名是为了让下一个读者不必再去找那个已经不存在的定时器。 */
-function onSystemThemeChange(event: MediaQueryListEvent) {
+ *  从手写的 start/stopSystemThemeWatch 换成 watch：清理由 Vue 托管，
+ *  不再有「忘了卸监听」或「重复装监听」的可能，也就不需要那对函数了。 */
+watch(systemDark, (isDark) => {
   // 用户手动选过主题就不再跟随（与轮询版的判据一致）
   if (!themeFollowSystem.value) return;
   // 跟随系统变化也走过渡：否则用户在系统里切主题、本程序却是硬切
-  applyThemeWithTransition(event.matches);
-}
-
-function startSystemThemeWatch() {
-  if (themeMedia) return;
-  themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
-  themeMedia.addEventListener("change", onSystemThemeChange);
-}
-
-function stopSystemThemeWatch() {
-  themeMedia?.removeEventListener("change", onSystemThemeChange);
-  themeMedia = null;
-}
+  applyThemeWithTransition(isDark);
+});
 
 async function handleQrSuccess(cookie: string) {
   qrError.value = "";
@@ -783,14 +830,21 @@ function selectAccount(accountId: string) {
  *  **没有图标条模式**：曾加过「拖窄折叠成 52px 图标条」，用户明确取消后
  *  彻底删除（`SIDEBAR_RAIL` / `SIDEBAR_COLLAPSE_AT` / `toggleSidebar` /
  *  `pendingSidebarCollapse` 与 AccountList 的 `collapsed` 分支全部随之移除）。
- *  取消后拖拽语义回归单一：宽度 = 松手时的指针位置，夹在 [200, 420]。 */
+ *  取消后拖拽语义回归单一：宽度 = 松手时的面板宽度，夹在 [200, 420]。
+ *
+ *  三个常量以 `size-unit="px"` 交给 reka 的 Splitter：它的 px 模式在组尺寸
+ *  变化时会重算百分比以**保持像素不变**（reka-ui 的 utils/units.js
+ *  `recalculateLayoutForPixelPanels`），语义与原先手写的 `width: Npx` 一致 ——
+ *  窗口拉宽时侧栏不会跟着变宽。 */
 const SIDEBAR_MIN = 200;
 const SIDEBAR_MAX = 420;
 const SIDEBAR_DEFAULT = 240;
 const SIDEBAR_KEY = "ui/sidebar_width";
 
 const sidebarWidth = ref(SIDEBAR_DEFAULT);
-const resizingSidebar = ref(false);
+/** 侧栏面板元素。宽度不再由我们写内联 style 决定 —— Splitter 拥有布局，
+ *  我们只把它的实际宽度镜像回来。 */
+const sidebarEl = ref<HTMLElement | null>(null);
 
 function loadSidebarWidth() {
   try {
@@ -814,102 +868,96 @@ function loadSidebarWidth() {
   }
 }
 
-/** 拖拽中按帧写入：pointermove 每秒可触发上百次 */
-let sidebarPersistHandle: number | null = null;
-function persistSidebarWidth() {
-  if (sidebarPersistHandle !== null) return;
-  sidebarPersistHandle = window.requestAnimationFrame(() => {
-    sidebarPersistHandle = null;
+// **必须在 setup 阶段读，不能留在 onMounted**：SplitterPanel 的 `default-size`
+// 只在面板注册时读一次，等挂载后再改 sidebarWidth 已经晚了（面板会停在默认宽）。
+loadSidebarWidth();
+
+/** 把 Splitter 的实际宽度镜像回 sidebarWidth。
+ *
+ *  鼠标拖拽与键盘调整（SplitterResizeHandle 自带方向键支持）都会改 flex
+ *  布局，两条路径都由 ResizeObserver 收口 —— 比监听 reka 的 resize 事件更可靠，
+ *  也不必去猜它 emit 出来的尺寸是什么单位。 */
+useResizeObserver(sidebarEl, (entries) => {
+  const width = entries[0]?.contentRect.width;
+  if (width) sidebarWidth.value = Math.round(width);
+});
+
+/** 拖拽中按节流写入：拖拽每秒可触发上百次。
+ *
+ *  watchThrottled 是「最多每 16ms 一次 + 尾沿补一次」：比原先的
+ *  requestAnimationFrame 合并多一次尾沿写，保证松手后最后那个宽度一定落盘，
+ *  也因此不需要在拖拽结束处再显式写一次。 */
+watchThrottled(
+  sidebarWidth,
+  (width) => {
     try {
-      localStorage.setItem(SIDEBAR_KEY, String(Math.round(sidebarWidth.value)));
+      localStorage.setItem(SIDEBAR_KEY, String(Math.round(width)));
     } catch {
       /* 忽略写入失败 */
     }
-  });
-}
-
-function onSidebarResizeMove(event: PointerEvent) {
-  if (!resizingSidebar.value) return;
-  // 用鼠标 X 减去 root 左边界：不依赖事件落在哪个元素上，
-  // 拖出侧栏范围时也不会断
-  const rootLeft = document
-    .querySelector<HTMLElement>("[data-sidebar-host]")
-    ?.getBoundingClientRect().left ?? 0;
-  sidebarWidth.value = Math.min(
-    SIDEBAR_MAX,
-    Math.max(SIDEBAR_MIN, event.clientX - rootLeft)
-  );
-}
-
-function onSidebarResizeEnd() {
-  if (!resizingSidebar.value) return;
-  resizingSidebar.value = false;
-  document.body.style.cursor = "";
-  document.body.style.userSelect = "";
-  persistSidebarWidth();
-}
-
-function onSidebarResizeStart(event: PointerEvent) {
-  // 只响应主键，避免右键/中键也进入拖拽态
-  if (event.button !== 0) return;
-  resizingSidebar.value = true;
-  // 拖拽期间禁用全局光标与选中，否则会选中文本、鼠标在侧栏上变成 text
-  document.body.style.cursor = "col-resize";
-  document.body.style.userSelect = "none";
-  event.preventDefault();
-}
-
-const sidebarStyle = computed(() => ({
-  width: `${Math.round(sidebarWidth.value)}px`,
-}));
+  },
+  { throttle: 16 },
+);
 </script>
 
 <template>
-  <div
-    class="flex h-screen flex-col overflow-hidden bg-background text-foreground"
-    data-sidebar-host
-  >
+  <div class="flex h-screen flex-col overflow-hidden bg-background text-foreground">
     <!-- 自绘标题栏（配合 decorations:false）。原本的顶栏信息已并入其中 -->
     <TitleBar
       :running-count="runningCount"
       :dark="darkMode"
       :checking-update="checkingUpdate"
       :update-notice="updateNotice"
+      :update-notice-detail="updateNoticeDetail"
       :update-notice-error="updateNoticeError"
+      :theme-transitioning="themeTransitioning"
       @toggle-theme="toggleTheme"
       @check-update="checkUpdate(true)"
     />
 
-    <!-- 主内容：左栏可拖拽宽度 + 右栏网格 -->
+    <!-- 主内容：左栏可拖拽宽度 + 右栏网格。
+         宽度分割交给 reka 的 Splitter（而不是手写 pointerdown + window 级
+         move/up）：它自带命中区域、拖拽光标、键盘调整与边界钳制，
+         px 模式又保证侧栏是固定像素宽而不是随窗口缩放。 -->
     <main class="flex min-h-0 flex-1">
-      <!-- 账号列表：宽度由用户拖拽决定，space-x 由侧栏内部自行管理 -->
-      <div
-        class="relative shrink-0 border-r border-border"
-        :style="sidebarStyle"
-      >
-        <AccountList
-          :selected-id="selectedAccountId"
-          @select="selectAccount"
-          @qr-login="showQrLogin = true"
-        />
+      <SplitterGroup direction="horizontal" class="min-h-0 min-w-0 flex-1">
+        <!-- 账号列表：宽度由 Splitter 管理，space-x 由侧栏内部自行管理 -->
+        <SplitterPanel
+          :size-unit="'px'"
+          :min-size="SIDEBAR_MIN"
+          :max-size="SIDEBAR_MAX"
+          :default-size="sidebarWidth"
+          as-child
+        >
+          <div ref="sidebarEl" class="relative min-h-0 border-r border-border">
+            <AccountList
+              :selected-id="selectedAccountId"
+              @select="selectAccount"
+              @qr-login="showQrLogin = true"
+            />
+          </div>
+        </SplitterPanel>
 
-        <!-- 拖拽把手：放在侧栏右缘内侧，hover 时高亮 2px 竖条。
-             用 pointerdown + window 级 move/up，而不是 HTML5 drag：
-             后者无法控制宽度、且拖拽时 iframe/webview 下容易失效。 -->
-        <div
-          class="group absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize
-                 transition-colors hover:bg-signal-info/40"
-          :class="resizingSidebar ? 'bg-signal-info/60' : ''"
-          role="separator"
+        <!-- 拖拽把手：视觉仍是窄竖条，但命中区域由 reka 的 hitAreaMargins
+             撑开（默认 15/5px），比手写版更容易抓住；hover 与拖拽态读它
+             暴露的 data-resize-handle-state，不再需要本地 resizing 布尔。
+
+             focus-visible 的 ring 不能省：SplitterResizeHandle 是 role="slider"
+             且自带 tabindex，键盘方向键就能调宽 —— 这是把手换成 reka 组件后
+             **唯一新增的能力**（手写版只响应鼠标）。它若不显示焦点，用户按 Tab
+             走到这里看不出焦点在哪，等于新增能力不可发现。配色沿用主题按钮那一套
+             ring token；用 inset 是因为把手只有 6px 宽，外扩的 ring 会盖住相邻面板。 -->
+        <SplitterResizeHandle
+          class="z-10 w-1.5 cursor-col-resize transition-colors
+                 hover:bg-signal-info/40 data-[resize-handle-state=drag]:bg-signal-info/60
+                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset
+                 focus-visible:ring-ring"
           aria-orientation="vertical"
           aria-label="拖拽调整账号栏宽度"
           :aria-valuenow="Math.round(sidebarWidth)"
           :aria-valuemin="SIDEBAR_MIN"
           :aria-valuemax="SIDEBAR_MAX"
-          tabindex="0"
-          @pointerdown="onSidebarResizeStart"
         />
-      </div>
 
       <!-- 右栏：配置 / 挂宝进度 / 日志。用 grid 而非单列 flex ——
            单列时三块内容天然均分高度，日志一展开就把任务进度压扁。
@@ -930,21 +978,27 @@ const sidebarStyle = computed(() => ({
            content-start 仍需保留：内容**溢出**时（窗口不够高）它让轨道
            从顶部开始排布而不是被拉伸压缩，日志卡因此永远从任务卡下沿
            开始、只向下延伸，不会出现「展开日志时日志卡整体上移」。 -->
-      <div
-        class="grid min-h-0 min-w-0 flex-1 scroll-hidden content-start grid-rows-[auto_auto_1fr]
-               gap-2.5 overflow-y-auto p-2.5"
-      >
-        <ConfigForm class="row-span-1" />
+        <SplitterPanel class="min-h-0 min-w-0">
+          <!-- SplitterPanel 会给自己挂一条 inline 的 overflow: hidden
+               （reka 的 computePanelFlexBoxStyle 硬编码），inline 优先于 class，
+               所以滚动不能写在面板自己身上 —— 交给里面这一层，与 Splitter 解耦。 -->
+          <div
+            class="grid h-full min-h-0 scroll-hidden content-start grid-rows-[auto_auto_1fr]
+                   gap-2.5 overflow-y-auto p-2.5"
+          >
+            <ConfigForm class="row-span-1" />
 
-        <TaskProgress
-          class="row-span-1"
-          :account-id="selectedAccountId"
-          :running="selectedAccount?.running ?? false"
-          :remark="selectedAccount?.remark ?? ''"
-        />
+            <TaskProgress
+              class="row-span-1"
+              :account-id="selectedAccountId"
+              :running="selectedAccount?.running ?? false"
+              :remark="selectedAccount?.remark ?? ''"
+            />
 
-        <LogViewer class="row-span-1" />
-      </div>
+            <LogViewer class="row-span-1" />
+          </div>
+        </SplitterPanel>
+      </SplitterGroup>
     </main>
 
     <!-- 全局右键策略的唯一属主：吞掉 WebView2 原生菜单，只在输入框上

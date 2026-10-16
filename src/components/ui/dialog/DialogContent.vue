@@ -31,8 +31,12 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits)
 
 <template>
   <DialogPortal>
+    <!-- 遮罩比内容略快（150ms vs 220ms）是刻意的层次：遮罩先就位，
+         内容再落上去，观感上像「内容落在已有的暗底上」而不是两者一起淡入。
+         这里补的是时长与缓动来源 —— 原先两者都走 tw-animate-css 的默认值
+         （150ms + CSS 关键字 ease），现在统一引用项目 token。 -->
     <DialogOverlay
-      class="fixed inset-0 z-50 bg-overlay data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0"
+      class="fixed inset-0 z-50 bg-overlay duration-[var(--duration-fast)] ease-[var(--ease-inout)] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0"
     />
     <DialogContent
       v-bind="forwarded"
@@ -49,7 +53,11 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits)
           // 扫描，注释里出现的类名会被当真生成进产物 CSS —— 实测这两个
           // 类名在产物里真的各生成了一条规则（而 class 属性里零使用），
           // 属死规则。
-          'fixed left-1/2 top-1/2 z-50 grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 border bg-background p-6 shadow-lg duration-[var(--duration-normal)] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 sm:rounded-lg',
+          // 缓动也收口到 token：tw-animate-css 的进出场动画默认走 CSS 关键字
+          // ease，与项目的「进入用 ease-enter、退出用 ease-exit」不一致。
+          // 它读的是 --tw-ease 变量，所以 Tailwind 的缓动工具类能接管；
+          // 进出场要分别给，同一个元素上缓动是单向的。
+          'fixed left-1/2 top-1/2 z-50 grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 border bg-background p-6 shadow-lg duration-[var(--duration-normal)] ease-[var(--ease-enter)] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:ease-[var(--ease-exit)] data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 sm:rounded-lg',
           props.class,
         )"
     >

@@ -22,6 +22,7 @@ import {
   AlertTriangle,
 } from "lucide-vue-next";
 import appIcon from "../../src-tauri/icons/128x128.png";
+import { Tooltip } from "@/components/ui/tooltip";
 
 const props = defineProps<{
   /** 运行中的账号数，0 表示未运行 */
@@ -36,8 +37,18 @@ const props = defineProps<{
    * 并排显示会让胶囊撑到把标题栏挤变形。
    */
   updateNotice: string;
+  /** 检查失败的排障细节（HTTP 状态码等）。只进 `:title`，不进胶囊正文 ——
+      detail 长度不可控，而正文是定宽的（尺寸与预算见下面 capsuleTitle
+      与胶囊宽度那一整块注释，那里是本文件内唯一写这些数字的地方）。
+      为空时 title 退回显示正文本身，不会出现「正文：」这种尾巴。 */
+  updateNoticeDetail: string;
   /** 提示是否出错（决定胶囊配色） */
   updateNoticeError: boolean;
+  /** 主题 View Transition 进行中（按钮据此显示禁用态）。
+   *  为什么需要它：过渡期间浏览器把命中测试落到 `<html>`，按钮收不到点击，
+   *  不给出视觉反馈用户只会以为「没点上」。理由与实测数据在 App.vue 的
+   *  `themeTransitioning` 声明处。 */
+  themeTransitioning?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -110,6 +121,28 @@ const statusText = computed(() =>
     它同时是 <Transition> 的 key —— 每次变化都会让内容整组重新挂载并播放动画。 */
 const capsuleText = computed(() => props.updateNotice || statusText.value);
 
+/** 胶囊 hover 时显示的完整说明。
+ *
+ *  正文与 title 分家的原因见下面「胶囊固定宽度」那一块：正文定宽且会被
+ *  truncate，而「为什么失败」的完整原因要能查到。detail 只在失败/跳过时非空。 */
+const capsuleTitle = computed(() => {
+  const detail = props.updateNoticeDetail;
+  return detail ? `${capsuleText.value}：${detail}` : capsuleText.value;
+});
+
+/** 主题按钮的标签：无障碍名与 tooltip 文案同一来源，避免两处各写一份会漂移
+ *  （原实现 aria-label 与 title 就是同一条动态表达式的两次手写）。 */
+const themeLabel = computed(() =>
+  props.themeTransitioning
+    ? "正在切换主题…"
+    : props.dark
+      ? "切换到浅色主题"
+      : "切换到深色主题",
+);
+
+/** 最大化/还原按钮同理，一个状态两处用。 */
+const maximizeLabel = computed(() => (isMaximized.value ? "还原" : "最大化"));
+
 /** 胶囊固定宽度：写在模板的 `w-[132px]` 上（Tailwind 任意值），
     不再用 JS 算 —— 算出来的宽度会随文案变，误差就是抖动本身。
 
@@ -129,10 +162,15 @@ const capsuleText = computed(() => props.updateNotice || statusText.value);
     h-[22px] 的来历：内容高 17px（11px 字号 × line-height 1.5）
     + 上下各 2.5px 内边距 = 22。标题栏高 36px，居中后上下各留 7px。
 
-    **不要给文字加 `truncate`**：宽度既然够宽，切字只会在超长异常文案时
-    发生，那时应该看到完整的错误信息而不是被切掉一半。
-    改尺寸前用 canvas measureText 量最宽一档文案、再用
-    getBoundingClientRect 核对实际渲染宽度，别凭感觉调。 */
+    **文字要加 `truncate` + `min-w-0`**：只写 `max-w-[110px]` 而不裁切时，
+    超宽文字会**原样溢出**——胶囊虽定宽 132px，文字仍会画出边界
+     （2026-10-13 用户报告「检查更新失败还是显示超过 6 个字」即此）。
+     配套的约定在上一层：胶囊只显示短 message，完整原因进 `:title`
+     （App.vue 的 updateNoticeDetail），所以 truncate 切到的是极端情况，
+     正常情况下不该有任何东西被切。
+
+     改尺寸前用 canvas measureText 量最宽一档文案、再用
+     getBoundingClientRect 核对实际渲染宽度，别凭感觉调。 */
 
 /**
  * 结果态图标：出错用警示三角，成功用对勾，检查中用旋转箭头。
@@ -180,7 +218,8 @@ onUnmounted(() => {
  * 普通文档流里会各占一行，把胶囊撑高一倍。绝对定位后它们叠在同一处。
  *
  * 动画只做位移 + 淡入淡出，不做弹跳 —— 标题栏是常驻区域，弹跳会持续
- * 干扰视线。reduced-motion 下 style.css 会把时长压到 0.001ms 整体关掉。
+ * 干扰视线。（本项目不做 prefers-reduced-motion 降级，理由见 style.css
+ * 里那条反向门禁的注释。）
  *
  * 六个 key 必须是 `enterFromClass` / `leaveToClass` 这种**带 Class 后缀**的
  * 全名，漏掉后缀会让整组动画静默失效：
@@ -267,21 +306,29 @@ const capsuleAnim = {
          提示清空、自动退回运行状态。选这个位置是因为它是标题栏里
          唯一不承载操作的视觉位，且横向居中天然抢到视线。 -->
     <div class="flex flex-1 items-center justify-center" data-tauri-drag-region>
-      <span
-        data-tauri-drag-region="false"
-        class="pointer-events-none relative inline-flex h-[22px] w-[132px]
-               shrink-0 items-center justify-center gap-1.5 rounded-full
-               border px-2.5 text-[11px] leading-none
-               transition-colors duration-[var(--duration-normal)]"
-        :class="updateNotice && updateNoticeError
-          ? 'border-signal-danger/40 bg-signal-danger/10 text-signal-danger'
-          : updateNotice
-            ? 'border-signal-success/40 bg-signal-success/10 text-signal-success'
-            : 'border-border bg-muted/60 text-muted-foreground'"
-        :title="capsuleText"
-        role="status"
-        aria-live="polite"
-      >
+      <!-- `deep` 而不是 `false`：胶囊要能 hover 出 tooltip（见下），所以不能
+           `pointer-events-none`；而一旦它能接收指针事件，标 `false` 就会让这
+           132px 变成**拖不动窗口的死区**。tauri 的 drag.js 里 `deep` 的语义是
+           「子树内任意点击都算拖拽区」—— 于是鼠标能悬停出 tooltip，按下照样拖窗。
+           （2026-10-14 用户实测「悬停胶囊没有 tooltip」的根因就是 pointer-events-none
+           让元素根本收不到指针事件。）
+           tooltip 浮层 Portal 到 body、不在本 span 子树内，所以 `deep` 不会把
+           「指针移到 tooltip 上」误算成拖窗。 -->
+      <Tooltip :label="capsuleTitle">
+        <span
+          data-tauri-drag-region="deep"
+          class="relative inline-flex h-[22px] w-[132px]
+                 shrink-0 items-center justify-center gap-1.5 rounded-full
+                 border px-2.5 text-[11px] leading-none
+                 transition-colors duration-[var(--duration-normal)]"
+          :class="updateNotice && updateNoticeError
+            ? 'border-signal-danger/40 bg-signal-danger/10 text-signal-danger'
+            : updateNotice
+              ? 'border-signal-success/40 bg-signal-success/10 text-signal-success'
+              : 'border-border bg-muted/60 text-muted-foreground'"
+          role="status"
+          aria-live="polite"
+        >
         <!-- 图标与文字必须放在**同一个** <Transition> 里：
              两个独立 Transition 各播各的，时序无法对齐，会出现
              「新文字配旧图标」的错帧。而且 key 要绑在整组内容上 ——
@@ -305,13 +352,15 @@ const capsuleAnim = {
               ]"
               aria-hidden="true"
             />
-            <!-- 不要加 truncate：胶囊固定 132px（见上面的宽度注释），
-                 常见文案都装得下；加 truncate 只会让超长异常文案被首尾切掉，
-                 而那种情况下用户需要的恰恰是完整的错误信息。 -->
-            <span class="max-w-[110px]">{{ capsuleText }}</span>
+            <!-- truncate + min-w-0 必须成对（缺 min-w-0 时 max-width 会被
+                 flex 子项的默认 min-width:auto 撑开而失效）。
+                 为什么这里要留一道裁切、以及它与「文案短 + 完整原因进 tooltip」的
+                 分工，写在上面「胶囊固定宽度」那一块，不在此复述。 -->
+            <span class="min-w-0 max-w-[110px] truncate">{{ capsuleText }}</span>
           </span>
         </Transition>
-      </span>
+        </span>
+      </Tooltip>
     </div>
 
     <!-- 右：检查更新 + 主题切换 + 窗口三键。窗口键宽度 44px 与
@@ -321,69 +370,85 @@ const capsuleAnim = {
          （用户想点关闭时容易偏一格），把低频的检查按钮隔在主题按钮外侧
          多了一道缓冲。 -->
     <div class="flex shrink-0 items-center" data-tauri-drag-region="false">
-      <button
-        type="button"
-        class="flex h-9 w-9 items-center justify-center text-muted-foreground
-               transition-colors hover:bg-accent hover:text-foreground
-               focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring
-               disabled:pointer-events-none disabled:opacity-50"
-        :disabled="checkingUpdate"
-        aria-label="检查更新"
-        title="检查更新"
-        @click="emit('check-update')"
-      >
-        <RefreshCw
-          class="h-4 w-4"
-          :class="checkingUpdate ? 'animate-spin' : ''"
-          aria-hidden="true"
-        />
-      </button>
-      <button
-        type="button"
-        class="flex h-9 w-9 items-center justify-center text-muted-foreground
-               transition-colors hover:bg-accent hover:text-foreground
-               focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-        :aria-label="dark ? '切换到浅色主题' : '切换到深色主题'"
-        :title="dark ? '切换到浅色主题' : '切换到深色主题'"
-        @click="emit('toggle-theme')"
-      >
-        <Sun v-if="dark" class="h-4 w-4" aria-hidden="true" />
-        <Moon v-else class="h-4 w-4" aria-hidden="true" />
-      </button>
-      <button
-        type="button"
-        class="flex h-9 w-11 items-center justify-center text-muted-foreground
-               transition-colors hover:bg-accent hover:text-foreground
-               focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-        aria-label="最小化"
-        title="最小化"
-        @click="minimize"
-      >
-        <Minus class="h-3.5 w-3.5" aria-hidden="true" />
-      </button>
-      <button
-        type="button"
-        class="flex h-9 w-11 items-center justify-center text-muted-foreground
-               transition-colors hover:bg-accent hover:text-foreground
-               focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-        :aria-label="isMaximized ? '还原' : '最大化'"
-        :title="isMaximized ? '还原' : '最大化'"
-        @click="toggleMaximize"
-      >
-        <Copy v-if="isMaximized" class="h-3.5 w-3.5" aria-hidden="true" />
-        <Square v-else class="h-3.5 w-3.5" aria-hidden="true" />
-      </button>
-      <button
-        type="button"
-        class="flex h-9 w-11 items-center justify-center text-muted-foreground
-               transition-colors hover:bg-destructive hover:text-destructive-foreground
-               focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-        aria-label="关闭"
-        title="关闭"
-        @click="close"
-      >
-        <X class="h-4 w-4" aria-hidden="true" />
-      </button>
+      <!-- 检查更新进行中按钮是 disabled，disabled 元素收不到 pointer 事件，
+           所以传 wrap（外层 span 承载 hover），否则灰按钮上没有 tooltip。 -->
+      <Tooltip label="检查更新" :wrap="checkingUpdate">
+        <button
+          type="button"
+          class="flex h-9 w-9 items-center justify-center text-muted-foreground
+                 transition-colors hover:bg-accent hover:text-foreground
+                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring
+                 disabled:pointer-events-none disabled:opacity-50"
+          :disabled="checkingUpdate"
+          aria-label="检查更新"
+          @click="emit('check-update')"
+        >
+          <RefreshCw
+            class="h-4 w-4"
+            :class="checkingUpdate ? 'animate-spin' : ''"
+            aria-hidden="true"
+          />
+        </button>
+      </Tooltip>
+      <!-- data-theme-toggle 供 App.vue 的 View Transition 读位置算「揭示」圆心：
+           圆心要落在用户点的这个按钮上。用 data 属性而不是类名或 ref，
+           是为了让「谁触发主题切换」与「圆心在哪」这两件事不靠约定耦合。 -->
+      <Tooltip :label="themeLabel">
+        <button
+          type="button"
+          data-theme-toggle
+          :aria-busy="props.themeTransitioning ? 'true' : undefined"
+          class="flex h-9 w-9 items-center justify-center text-muted-foreground
+                 transition-colors duration-[var(--duration-fast)]
+                 hover:bg-accent hover:text-foreground
+                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+          :class="props.themeTransitioning
+            ? 'cursor-progress opacity-40'
+            : 'cursor-pointer'"
+          :aria-label="themeLabel"
+          @click="emit('toggle-theme')"
+        >
+          <Sun v-if="dark" class="h-4 w-4" aria-hidden="true" />
+          <Moon v-else class="h-4 w-4" aria-hidden="true" />
+        </button>
+      </Tooltip>
+      <Tooltip label="最小化">
+        <button
+          type="button"
+          class="flex h-9 w-11 items-center justify-center text-muted-foreground
+                 transition-colors hover:bg-accent hover:text-foreground
+                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+          aria-label="最小化"
+          @click="minimize"
+        >
+          <Minus class="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+      </Tooltip>
+      <Tooltip :label="maximizeLabel">
+        <button
+          type="button"
+          class="flex h-9 w-11 items-center justify-center text-muted-foreground
+                 transition-colors hover:bg-accent hover:text-foreground
+                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+          :aria-label="maximizeLabel"
+          @click="toggleMaximize"
+        >
+          <Copy v-if="isMaximized" class="h-3.5 w-3.5" aria-hidden="true" />
+          <Square v-else class="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+      </Tooltip>
+      <Tooltip label="关闭">
+        <button
+          type="button"
+          class="flex h-9 w-11 items-center justify-center text-muted-foreground
+                 transition-colors hover:bg-destructive hover:text-destructive-foreground
+                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+          aria-label="关闭"
+          @click="close"
+        >
+          <X class="h-4 w-4" aria-hidden="true" />
+        </button>
+      </Tooltip>
     </div>
   </header>
 </template>

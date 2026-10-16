@@ -3,6 +3,17 @@ import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { GuiConfigValues } from "@/lib/types";
 import { formatIpcError } from "@/lib/ipc-error";
+import {
+  MAX_THREAD_COUNT,
+  RECONNECT_DELAY_DEFAULT_SECONDS,
+  RECONNECT_DELAY_MAX_SECONDS,
+  RECONNECT_DELAY_MIN_SECONDS,
+  TASK_QUERY_INTERVAL_DEFAULT_SECONDS,
+  TASK_QUERY_INTERVAL_MAX_SECONDS,
+  TASK_QUERY_INTERVAL_MIN_SECONDS,
+  THREAD_COUNT_DEFAULT,
+  THREAD_COUNT_MIN,
+} from "@/lib/config-limits";
 
 function clampInt(value: string, defaultVal: number, min: number, max: number): string {
   const n = parseInt(value, 10);
@@ -42,17 +53,6 @@ export function taskIdsFingerprint(value: string): string {
     .join(",");
 }
 
-/** 线程数 / 总连接数上限（用户决策值 256）。
- *  四处必须同源，改一处必须同步其余三处：
- *    ① 本常量
- *    ② `python_sidecar/backend/config.py` 的 `MAX_TOTAL_CONNECTIONS`
- *    ③ `python_sidecar/main.py` 的 `MAX_THREAD_COUNT`（由 ② 直接 import，不重复定义）
- *    ④ `ConfigForm.vue` 里线程数输入框的 `max` 属性
- *  历史上这四处出现过 128/256 不一致，后果是「前端允许填 256、保存也成功，
- *  启动时才被 config.validate() 拒」，错误文案来自深层调用，用户无法关联因果
- *  （默认 60 线程 × 3 房间 = 180，正好落在 128 与 256 之间，最易触发）。 */
-const MAX_THREAD_COUNT = 256;
-
 /** 关闭链路的兜底配置快照 key（save() 成功后由 load() 清理） */
 const CONFIG_STASH_KEY = "config_stash";
 
@@ -77,10 +77,13 @@ export const useConfigStore = defineStore("config", () => {
   const config = ref<GuiConfigValues>({
     cookie: "",
     rooms_text: "23612045",
-    thread_count_text: "60",
-    reconnect_delay_text: "8",
+    // 三个数值字段的初始值与 save() 的钳制默认值同源（lib/config-limits.ts）：
+    // 各写一份时，后端 load_config 失败走这份兜底，而钳制用的是另一份 ——
+    // 用户看到的初始值与「清空后恢复的值」可以不一致。
+    thread_count_text: String(THREAD_COUNT_DEFAULT),
+    reconnect_delay_text: String(RECONNECT_DELAY_DEFAULT_SECONDS),
     task_ids_text: "",
-    task_query_interval_text: "30",
+    task_query_interval_text: String(TASK_QUERY_INTERVAL_DEFAULT_SECONDS),
     notify_urls_text: "",
     notify_on_task_complete: true,
     verbose: false,
@@ -208,10 +211,25 @@ export const useConfigStore = defineStore("config", () => {
     if (!loaded) {
       throw new Error("配置尚未加载完成，请稍候重试");
     }
-    // 数值字段统一钳制
-    config.value.thread_count_text = clampInt(config.value.thread_count_text, 60, 1, MAX_THREAD_COUNT);
-    config.value.reconnect_delay_text = clampInt(config.value.reconnect_delay_text, 8, 1, 3600);
-    config.value.task_query_interval_text = clampInt(config.value.task_query_interval_text, 30, 10, 3600);
+    // 数值字段统一钳制（边界全部取自 lib/config-limits.ts，不要在此写字面量）
+    config.value.thread_count_text = clampInt(
+      config.value.thread_count_text,
+      THREAD_COUNT_DEFAULT,
+      THREAD_COUNT_MIN,
+      MAX_THREAD_COUNT,
+    );
+    config.value.reconnect_delay_text = clampInt(
+      config.value.reconnect_delay_text,
+      RECONNECT_DELAY_DEFAULT_SECONDS,
+      RECONNECT_DELAY_MIN_SECONDS,
+      RECONNECT_DELAY_MAX_SECONDS,
+    );
+    config.value.task_query_interval_text = clampInt(
+      config.value.task_query_interval_text,
+      TASK_QUERY_INTERVAL_DEFAULT_SECONDS,
+      TASK_QUERY_INTERVAL_MIN_SECONDS,
+      TASK_QUERY_INTERVAL_MAX_SECONDS,
+    );
     // 任务 ID 去重（保序，见 normalizeTaskIds 的注释）
     config.value.task_ids_text = normalizeTaskIds(config.value.task_ids_text);
     // 配置验证

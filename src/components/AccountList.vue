@@ -307,13 +307,46 @@ const rowsEl = ref<HTMLElement | null>(null);
  *  改过了，那时再读「当前顺序」拿到的已经是新顺序，拿它当回滚点等于不回滚。 */
 let orderBeforeDrag: string[] = [];
 
-// 传 ref 而不是 store 上的裸数组：moveArrayElement 对 ref 走「复制→改副本→整体赋值」，
+// 传 ref 而不是 store 上的裸数组：对 ref 走「复制→改副本→整体赋值」，
 // 对裸数组走「原地 splice 再下一拍补回」—— 后者会有一拍「元素凭空少了一个」的中间态。
 const { accounts: accountsRef } = storeToRefs(accountsStore);
 
 useSortable(rowsEl, accountsRef, {
   // 容器出现/消失时自动重建：账号列表在 loading / 错误 / 空列表分支下不渲染
   watchElement: true,
+  /** 自定义 onUpdate：**只同步数组，绝不搬 DOM**。
+   *
+   *  不用 useSortable 默认的 `moveArrayElement`，它做两件事：
+   *    ① `removeNode(item)` + `insertNodeAt(from, item, oldIndex)`
+   *       —— 把 SortableJS 已经摆好的节点**搬回旧位置**；
+   *    ② `nextTick` 里改数组，让 Vue 按新顺序再排一遍。
+   *  这一来一回让 DOM 先回退再前进，而 TransitionGroup 的 move 过渡是按
+   *  「patch 前后的位置差」触发的 —— 位置差被人为造了出来，于是松手后又滑一遍
+   *  220ms。这就是用户报的「两套让位动画」的第二个那套（实测：拖拽期间只有
+   *  SortableJS 的 150ms 让位；`.no-move-anim` 一摘，全部行同时开始 220ms 过渡，
+   *  两轮复现完全一致）。
+   *
+   *  这里只改数组：SortableJS 触发 onUpdate 之前 DOM 已经在新位置，数组同步成
+   *  同一个顺序后，Vue 的 before/after 快照一致 → 位置差为零 → 不产生 move 过渡，
+   *  也就不需要再靠加/摘类压制它（`.no-move-anim` 那套补丁治的是症状）。
+   *  索引直接用 SortableJS 给的 oldIndex/newIndex：那是容器**直接子元素**的下标，
+   *  而本容器（TransitionGroup 的 tag="div"）的直接子元素正好就是账号行。 */
+  onUpdate: (e) => {
+    // SortableEvent 上这两个字段类型是 `number | undefined`（它们定义在基类
+    // 事件上、只有拖拽类事件才有），所以必须显式守卫，不能直接拿去 splice。
+    const from = e.oldIndex;
+    const to = e.newIndex;
+    if (from === undefined || to === undefined) return;
+    const next = [...accountsRef.value];
+    const [moved] = next.splice(from, 1);
+    if (!moved) return;
+    next.splice(to, 0, moved);
+    accountsRef.value = next;
+  },
+  // **这个 animation 是拖拽时唯一该有的动画**：SortableJS 靠它让兄弟行
+  // 平滑让位（读 dragRect 算目标位置，用 transform 过渡过去）。
+  // 2026-10-13 曾把它设成 0，理由是「拖拽会有两次滚动」—— 那是误诊：
+  // 关掉它只是把动画全杀了，第二套动画另有来源（见上面 onUpdate）。
   animation: 150,
   forceFallback: true,
   // 克隆体挂到 body：**它现在被 style.css 隐藏了**（`visibility: hidden`），
@@ -361,15 +394,13 @@ function clearDragUserSelect() {
 
 /** 拖拽结束后把新顺序落盘。
  *
- *  **必须先 `await nextTick()`**：useSortable 默认的 onUpdate 走 moveArrayElement，
- *  它把数组改动推迟到 `nextTick` 才赋值。在 onEnd 里同步读数组拿到的还是**旧顺序**，
- *  据此落盘等于什么都没做。
+ *  自定义 onUpdate 是**同步**改数组的，而 SortableJS 先派发 `update` 再派发
+ *  `end`（见其 `_onDrop`：两个 `_dispatchEvent` 相邻），所以进到这里时
+ *  `accountsStore.accounts` 已经是新顺序，不需要再 `await nextTick()` 等它。
  *
- *  失败时 `reorderAccounts` 回滚到 `orderBeforeDrag` —— 此时那次 nextTick 赋值
- *  已经跑完，回滚不会再被它覆盖。 */
+ *  失败时 `reorderAccounts` 回滚到 `orderBeforeDrag`。 */
 async function persistOrderAfterDrag() {
   const before = orderBeforeDrag;
-  await nextTick();
   const after = accountsStore.accounts.map((a) => a.id);
   // 拖回原位：SortableJS 也会触发 onEnd，但顺序没变，不必落盘
   if (after.length === before.length && after.every((id, i) => id === before[i])) return;
@@ -606,6 +637,10 @@ function handleBottomRemove() {
                加上它之后任何来源的焦点（点击 / Tab / 区域导航 / moveSelection）
                都会把选中带过去，两边不会再分叉。
                `@focus` 与 `@click` 同时触发是幂等的（同一个 id 重复 emit 无副作用）。 -->
+          <!-- transition-property 写成含 box-shadow 的显式列表，而不是
+               transition-colors：选中态靠 inset 阴影画边框，而 transition-colors
+               不含 box-shadow —— 于是同一行里背景色有过渡、边框阴影瞬变，
+               选中切换会「先亮背景、再硬跳边框」。 -->
           <div
             v-for="(account, index) in accountsStore.accounts"
             :key="account.id"
@@ -614,7 +649,7 @@ function handleBottomRemove() {
             :tabindex="account.id === selectedId ? 0 : -1"
             :aria-selected="account.id === selectedId"
             :aria-label="`${account.remark}，${account.running ? '运行中' : '未运行'}`"
-            class="mx-px flex cursor-pointer items-center justify-between rounded-md border border-border px-2.5 py-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            class="mx-px flex cursor-pointer items-center justify-between rounded-md border border-border px-2.5 py-2 transition-[color,background-color,border-color,box-shadow] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             :class="[
               // 运行态只由行内的状态圆点与文字颜色表达，不再叠一层边框动画：
               // 原实现在四边各铺一条独立 background-image 并各自流动，
@@ -636,11 +671,11 @@ function handleBottomRemove() {
               <!-- 运行状态由行级 aria-label 提供，圆点本身对读屏隐藏 -->
               <span
                 aria-hidden="true"
-                class="h-2 w-2 shrink-0 rounded-full"
+                class="h-2 w-2 shrink-0 rounded-full transition-colors"
                 :class="account.running ? 'bg-signal-success' : 'bg-muted'"
               />
               <p
-                class="truncate text-sm leading-tight font-medium"
+                class="truncate text-sm leading-tight font-medium transition-colors"
                 :class="account.running ? 'text-signal-success' : 'text-foreground'"
               >
                 {{ account.remark }}

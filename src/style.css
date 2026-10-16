@@ -1,14 +1,16 @@
 @import "tailwindcss";
 
-/* 弹层进出场动画。三个 ui 组件（DialogContent / DropdownMenuContent /
-   DropdownMenuSubContent）都声明了 animate-in / fade-in-0 / zoom-in-95 /
-   slide-in-from-* 这些类，此前从未安装对应插件，产物里一个 @keyframes
-   都没有 —— 结果所有弹层瞬时出现、瞬时消失，DialogContent 上那句孤零零的
-   duration-200 也因无对应 animation 而完全无作用。
+/* 弹层进出场动画。项目里的弹层组件（Dialog / DropdownMenu / Select 的浮层）
+   都声明了 animate-in / fade-in-0 / zoom-in-95 / slide-in-from-* 这些类，
+   此前从未安装对应插件，产物里一个 @keyframes 都没有 —— 结果所有弹层
+   瞬时出现、瞬时消失，DialogContent 上那句孤零零的 duration-200 也因无
+   对应 animation 而完全无作用。
    tw-animate-css 是 TailwindCSS v4 对 tailwindcss-animate 的官方替代。
 
-   （原为「四个 ui 组件」，含 DialogScrollContent —— 该组件全项目零使用，
-   已于本轮删除，故此处同步改为三个。）
+   （shadcn-vue 整包落盘时带来的 DialogScrollContent 零使用，已删除。
+   **这里刻意不列组件清单**：列过一次「两个组件」，加第三个浮层时清单没同步、
+   门禁也只盯那两个文件 —— 判据靠人记得改，就一定会漏。现在由门禁自己
+   glob 扫 ui/ 下的浮层，新增弹层无需再改任何清单。）
 
    注意必须用 @import 而非 @plugin：该包的 exports 只声明了 "style" 条件
    （没有 default/import），而 @plugin 走模块解析，在 Vite 8 下会报
@@ -216,9 +218,6 @@
    reka 的下拉菜单项都是 button，但显式写上角色选择器可防止将来有人
    把它们改成非 button 元素后失去反馈。
 
-   reduced-motion 降级由文件末尾的通配规则统一处理（transition-duration
-   被压到 0.001ms），无需在此重复。
-
    **绝对不要写进 @layer base（本项目实测踩过）**：CSS 的 @layer 优先级
    与选择器特异性无关，**后声明的 layer 整体优先**。产物里层顺序是
    base → components → utilities，而项目所有按钮的基础类都含
@@ -239,7 +238,7 @@
    哪个属性的过渡就会消失。逐个核对过本项目按钮上的工具类：
      * `.transition-colors`（Button 基础类、DropdownMenuItem、InputContextMenu、
        TitleBar 的检查更新键）→ 需要 color / background-color / border-color；
-     * `.transition-opacity`（DialogClose 的关闭按钮，hover 时 opacity-70 → 100）
+     * `.transition-opacity`（DialogContent 右上角的关闭按钮，hover 时 opacity-70 → 100）
        → **必须含 opacity**。这是第一版漏掉的一项：漏了它关闭按钮的
        hover 淡入会变成瞬变（已修正）；
      * `box-shadow`：focus-visible 的 ring 靠它过渡，且 .transition-colors
@@ -308,9 +307,13 @@ button:not(:disabled):active,
   animation: vt-reveal var(--duration-normal) var(--ease-inout) both;
   mix-blend-mode: normal;
 }
+/* 圆心由 JS 在每次切换前写入 --vt-origin-x / --vt-origin-y（对齐标题栏
+   主题按钮的中心）。写死百分比在窗口尺寸变化、或按钮位置被调整之后就会偏，
+   而「揭示从哪一点扩散」正是这段动效的全部观感来源，偏一点就看得出。
+   保留 88% / 4% 作为 JS 拿不到按钮元素时的兜底。 */
 @keyframes vt-reveal {
-  from { clip-path: circle(0% at 88% 4%); }
-  to   { clip-path: circle(150% at 88% 4%); }
+  from { clip-path: circle(0% at var(--vt-origin-x, 88%) var(--vt-origin-y, 4%)); }
+  to   { clip-path: circle(150% at var(--vt-origin-x, 88%) var(--vt-origin-y, 4%)); }
 }
 
 /* **过渡期间必须关掉覆盖层的指针事件**（2026-10-10 CDP 实测发现）。
@@ -325,15 +328,14 @@ button:not(:disabled):active,
   pointer-events: none;
 }
 
-/* 减少动效：新快照不做揭示动画。
-   `animation: none` 时它没有 clip-path，直接整幅盖住旧快照 ——
-   效果等价于「瞬时切换」，正是减少动效想要的。
-   （App.vue 里也会走「不调 startViewTransition」的降级分支，这里再兜一层。） */
-@media (prefers-reduced-motion: reduce) {
-  ::view-transition-new(root) {
-    animation: none !important;
-  }
-}
+/* 本项目**刻意不做 prefers-reduced-motion 降级**（2026-10-14 用户拍板）：
+   所有动效在任何系统设置下都全开。理由是这个工具只有一个窗口、动效都是
+   150~220ms 的定点反馈，谈不上「占用计算量」或「前庭刺激」，而降级会真的
+   弄坏功能 —— 例如 indeterminate 进度条在「只播一次」下会停在 translateX(400%)
+   即容器外，「账号运行中」这条视觉信号直接消失。
+   所以这里**不要再加回** `@media (prefers-reduced-motion: reduce)` 块；
+   动效时长一律走 @theme 里的 --duration-* / --ease-* token。 */
+
 /* ---- 骨架屏 ----
    账号列表加载期间占位（AccountList.vue）。用背景渐变平移做微光，
    而不是 opacity 闪烁：后者在深色主题下会让整块区域「呼吸」，
@@ -363,8 +365,11 @@ button:not(:disabled):active,
   animation: skeleton-sheen 1.4s var(--ease-inout) infinite;
 }
 
-/* 账号列表条目增删的进入/离开过渡。离开比进入略快：
-   元素消失时用户注意力已转移，慢速退场只会显得拖沓。 */
+/* 账号列表条目增删的进入/离开过渡。
+   时长与 .account-list-move **刻意对齐**（都是 normal 220ms）：
+   原先 leave 用 fast（150ms）、move 用 normal（220ms），差 70ms ——
+   效果是「被删那行已开始消失、其余行才刚起步滑」，两个节奏对不上，
+   用户报「不自然」。 */
 .account-list-enter-active {
   transition:
     opacity var(--duration-normal) var(--ease-enter),
@@ -372,8 +377,8 @@ button:not(:disabled):active,
 }
 .account-list-leave-active {
   transition:
-    opacity var(--duration-fast) var(--ease-exit),
-    transform var(--duration-fast) var(--ease-exit);
+    opacity var(--duration-normal) var(--ease-exit),
+    transform var(--duration-normal) var(--ease-exit);
   /* 离开项必须脱离文档流，否则它在 leave 期间仍占着原来的位置：
      下面的行被它顶住不动，等它真正移除时才整体上跳 ——
      用户看到的是「先顿一下，再跳」，而 -move 过渡的起点也因此是错的
@@ -386,18 +391,96 @@ button:not(:disabled):active,
 }
 
 /* 位置过渡：兄弟节点增删导致其他行改变位置时，让它们平滑滑到新位置。
-   此前完全没有这条规则，于是那些行是「瞬移」的 —— 这正是
-   「删一个账号，下面几行跳上来」的直接原因。
-   时长用 normal（220ms）：位移是较大范围的空间变化，
-   用 fast（150ms）会显得仓促；缓动沿用 --ease-enter（快起慢收）。 */
+   时长与缓动必须与 leave-active 一致（见上面那段注释）：用户感知的是
+   「这一组行作为整体在动」，差 70ms 就能看出快慢不一。
+
+   ⚠ 拖拽排序**不该**再出现这里 —— 它的位置变化由 SortableJS 自己的
+   `animation` 负责。曾经出现过「两套让位动画」（松手后又滑一遍 220ms），
+   当时的修法是给容器加 `.no-move-anim` 把本条压成 `transition: none`，
+   那是**治症状**：真正的来源是 useSortable 默认 onUpdate 会先把 DOM 搬回
+   旧位置、再改数组让 Vue 重排，人为造出了位置差。现在 AccountList 用自定义
+   onUpdate 只同步数组、不搬 DOM，位置差为零，本条在拖拽期间根本不会被触发，
+   那个压制类已随之删除（2026-10-14 实测三轮拖拽，220ms 过渡 0 次）。
+   若将来有人把 onUpdate 换回 moveArrayElement，第二套动画会立刻回来 ——
+   届时该修 onUpdate，而不是再加回压制类。 */
 .account-list-move {
   transition: transform var(--duration-normal) var(--ease-enter);
 }
 
+/* 位移量从 4px 提到 12px：与 .account-list-move 的实际位移（一整行 ≈46px）
+   配合。4px 在 220ms 里几乎看不出「在往下走」，只像轻微抖动；
+   12px 是「能看出方向、又不至于让淡出看起来像飞走」的折中。 */
 .account-list-enter-from,
 .account-list-leave-to {
   opacity: 0;
+  transform: translateY(-12px);
+}
+
+/* ---- 面板内容切换（同一位置上的互斥内容之间）----
+   用于「加载态 → 内容」「有任务 → 空态」「二维码三态」这类切换。
+   此前这些都是 v-if/v-else 硬切 —— 用户明确反馈「面板内容切换是硬切」。
+
+   配 <Transition mode="out-in"> 使用：先让旧内容淡出、再让新内容淡入。
+   不用默认（同时）模式：两个分支的尺寸不同，同时在场会互相挤压出抖动。
+
+   位移只有 4px 且方向相反（进从上方来、出向上方去）：面板切换不是空间变化，
+   位移大了会像「飞入」，与「原地换内容」的直觉不符。
+
+   时长：进 normal（220ms）/ 出 fast（150ms），**不是**抄账号列表那一套 ——
+   账号列表的 leave 后来为与 -move 对齐也改成 220 了，这里没有 move，
+   出得快是本条自己的决定：这两处切换都发生在「用户本来就在等」的时刻
+   （等数据、等二维码生成），进得慢不显迟钝；而元素消失时注意力已经转移，
+   快反而干净。out-in 模式下总时长是两者之和（370ms）。 */
+.panel-switch-enter-active {
+  transition:
+    opacity var(--duration-normal) var(--ease-enter),
+    transform var(--duration-normal) var(--ease-enter);
+}
+.panel-switch-leave-active {
+  transition:
+    opacity var(--duration-fast) var(--ease-exit),
+    transform var(--duration-fast) var(--ease-exit);
+}
+.panel-switch-enter-from {
+  opacity: 0;
   transform: translateY(-4px);
+}
+.panel-switch-leave-to {
+  opacity: 0;
+  transform: translateY(4px);
+}
+
+/* ---- 行内提示的出现过渡 ----
+   项目里十几处行内提示都是 v-if 硬切出现，用户明确反馈「提示弹出来得生硬」。
+
+   用 CSS 原生的 @starting-style，而不是给每处套 <Transition>：
+   前者只需给元素加一个类；后者要在十几个组件里各包一层、各配一套类名，
+   还要额外处理 v-if 的卸载时机（leave 过渡期间元素必须留在 DOM 里）。
+
+   **只管「进入」不管「离开」是有意的**：提示消失要么是 3s/10s 超时
+   （用户注意力早已转移），要么被新提示顶掉（瞬时替换反而更不突兀）。
+   这与项目既有的「离开比进入快」一脉相承 —— 这里把「快」推到极致：不播。
+
+   时长用 fast（150ms）：提示是高频、轻量的反馈，慢了会显得迟钝。
+
+   选择器直接用 role="alert"：本项目的 role="alert" **全部**都是「条件出现
+   的错误提示」（grep 过，无一处常驻），所以它天然等于「提示」这个集合，
+   不必再去十几个组件里逐个挂类。少数用 role="status" 的提示
+   （保存结果、测试通知结果、剪贴板未授权）额外挂 .notice-appear。 */
+[role="alert"],
+.notice-appear {
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity var(--duration-fast) var(--ease-enter),
+    transform var(--duration-fast) var(--ease-enter);
+}
+@starting-style {
+  [role="alert"],
+  .notice-appear {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
 }
 
 /* ---- 账号拖拽排序（SortableJS，forceFallback 模式）----
@@ -511,33 +594,12 @@ button:not(:disabled):active,
   overscroll-behavior: contain;
   scrollbar-width: none;
   -ms-overflow-style: none;
+  /* 新日志到达时是「程序化滚到底」（LogViewer 直接赋值 scrollTop），
+     平滑滚动让它跟手而不是整块瞬跳。只影响程序化滚动 —— 用户滚轮与
+     触控板不走 scroll-behavior 这条路径，手感不受影响。 */
+  scroll-behavior: smooth;
 }
 
 .log-panel::-webkit-scrollbar {
   display: none;
-}
-
-
-/* 无障碍降级：系统开启「减少动态效果」时停止所有动画 */
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.001ms !important;
-  }
-
-  /* indeterminate 进度条必须单独处理，不能沿用上面「只播一次」的降级。
-     它的终态是 translateX(400%)（@keyframes progress-indeterminate 的 100%），
-     只播一次会**停在容器外**，而容器是 overflow-hidden ——
-     于是「账号运行中」这条视觉信号在开启减少动效的用户那里彻底消失。
-     这不是「动画被关掉」那么简单：它是一个功能性指示元素不见了。
-
-     改为停在中间偏左的可见位置：既保留「有东西在跑」的静态提示，
-     又完全不产生动效。 */
-  .progress-indeterminate {
-    animation: none !important;
-    transform: translateX(33%) !important;
-  }
 }

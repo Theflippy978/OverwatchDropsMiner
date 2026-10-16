@@ -244,29 +244,35 @@ function handleCancel() {
       </DialogHeader>
 
       <div class="flex flex-col items-center gap-3 py-4">
-        <div
-          v-if="loading"
-          class="h-48 w-48 flex items-center justify-center rounded-lg border border-border bg-muted"
-        >
-          <span class="text-sm text-muted-foreground">正在生成二维码...</span>
-        </div>
-        <div
-          v-else-if="error"
-          class="h-48 w-48 flex items-center justify-center rounded-lg border border-signal-danger/40 bg-signal-danger/10 p-2"
-        >
-          <span class="text-center text-sm text-signal-danger">{{ error }}</span>
-        </div>
-        <!-- 二维码容器保持 bg-white：部分扫码 App 对低对比度识别率下降，
-             后端生成的黑白 PNG（fill_color="black", back_color="white"）
-             与容器色无关。这里刻意脱离主题令牌，不要被「统一主题」误改。 -->
-        <div v-else class="h-48 w-48 rounded-lg border border-border bg-white p-2">
-          <img
-            v-if="qrImage"
-            :src="qrImage"
-            alt="扫码登录"
-            class="h-full w-full"
-          />
-        </div>
+        <!-- 三态切换加过渡：三个容器的尺寸完全相同（都是 12rem 见方），
+             所以 out-in 不会引起布局抖动，纯粹是把硬切换成淡入淡出。 -->
+        <Transition name="panel-switch" mode="out-in">
+          <div
+            v-if="loading"
+            key="loading"
+            class="h-48 w-48 flex items-center justify-center rounded-lg border border-border bg-muted"
+          >
+            <span class="text-sm text-muted-foreground">正在生成二维码...</span>
+          </div>
+          <div
+            v-else-if="error"
+            key="error"
+            class="h-48 w-48 flex items-center justify-center rounded-lg border border-signal-danger/40 bg-signal-danger/10 p-2"
+          >
+            <span class="text-center text-sm text-signal-danger">{{ error }}</span>
+          </div>
+          <!-- 二维码容器保持 bg-white：部分扫码 App 对低对比度识别率下降，
+               后端生成的黑白 PNG（fill_color="black", back_color="white"）
+               与容器色无关。这里刻意脱离主题令牌，不要被「统一主题」误改。 -->
+          <div v-else key="qr" class="h-48 w-48 rounded-lg border border-border bg-white p-2">
+            <img
+              v-if="qrImage"
+              :src="qrImage"
+              alt="扫码登录"
+              class="h-full w-full"
+            />
+          </div>
+        </Transition>
 
         <!-- aria-live：扫码流程的关键反馈（请扫码→已扫码→已过期），
              读屏用户在把注意力转向手机 App 时回来必须能知道状态变了。

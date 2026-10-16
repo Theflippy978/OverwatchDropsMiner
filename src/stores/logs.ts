@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
+import { useTimeoutFn } from "@vueuse/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { LogEntry } from "@/lib/types";
 
@@ -15,7 +16,6 @@ export const useLogsStore = defineStore("logs", () => {
   let initialized = false;
   let nextSeq = 0;
   const buffer: StoredLog[] = [];
-  let flushTimer: number | null = null;
 
   const filteredLogs = computed(() => {
     if (!filterAccountId.value) return logs.value;
@@ -40,7 +40,6 @@ export const useLogsStore = defineStore("logs", () => {
   );
 
   function flush() {
-    flushTimer = null;
     if (buffer.length === 0) return;
     // 必须逐条 push：push(...buffer) 展开成实参会撞 V8 的参数上限
     // （约 65k~125k），超限抛 RangeError 且整批日志丢失。
@@ -56,19 +55,21 @@ export const useLogsStore = defineStore("logs", () => {
     }
   }
 
+  /** 合并窗口（120ms）。start() 的语义是「先清掉上一次的计时再重新计时」，
+   *  配合 isPending 就等价于原先那个 flushTimer 句柄 + 空值守卫；
+   *  清理由 useTimeoutFn 随 store 的 effectScope 托管。 */
+  const { start: scheduleFlush, stop: cancelFlush, isPending: flushPending } =
+    useTimeoutFn(flush, 120, { immediate: false });
+
   function addLog(entry: LogEntry) {
     buffer.push({ ...entry, seq: nextSeq++ });
-    if (flushTimer === null) {
-      flushTimer = window.setTimeout(flush, 120);
-    }
+    // 已排过一次就不再排：合并窗口内到达的日志由那一次 flush 一起写入
+    if (!flushPending.value) scheduleFlush();
   }
 
   function clear() {
     buffer.length = 0;
-    if (flushTimer !== null) {
-      clearTimeout(flushTimer);
-      flushTimer = null;
-    }
+    cancelFlush();
     logs.value = [];
   }
 
@@ -78,8 +79,8 @@ export const useLogsStore = defineStore("logs", () => {
       const kept = buffer.filter((l) => l.account_id !== accountId);
       buffer.length = 0;
       buffer.push(...kept);
-      if (kept.length > 0 && flushTimer === null) {
-        flushTimer = window.setTimeout(flush, 120);
+      if (kept.length > 0 && !flushPending.value) {
+        scheduleFlush();
       }
     }
     logs.value = logs.value.filter((l) => l.account_id !== accountId);

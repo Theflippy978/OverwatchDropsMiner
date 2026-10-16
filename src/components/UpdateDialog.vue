@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LoaderCircle } from "lucide-vue-next";
 import { formatIpcError } from "@/lib/ipc-error";
@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Tooltip } from "@/components/ui/tooltip";
 
 const open = defineModel<boolean>("open", { required: false, default: false });
 
@@ -36,16 +37,22 @@ function safeReleaseUrl(raw: string): string | null {
   }
 }
 
+/** 校验只做一次，按钮的 disabled、tooltip 与点击处理三处共用同一个结果。
+ *  原先校验藏在 handleDownload 内部：链接无效时按钮**照样可点**，用户点了
+ *  才看到一条错误 —— 而「这个链接本来就不能用」在点击前就已经确定了，
+ *  属于应当在禁用态上直接表达的信息。 */
+const releaseUrl = computed(() => safeReleaseUrl(props.releaseUrl));
+
 async function handleDownload() {
+  // 链接无效时按钮已 disabled，本函数不该被调用；保留兜底只为万一。
+  if (!releaseUrl.value) {
+    error.value = "下载链接无效或非 HTTPS，已阻止打开";
+    return;
+  }
   downloading.value = true;
   error.value = "";
   try {
-    const url = safeReleaseUrl(props.releaseUrl);
-    if (!url) {
-      error.value = "下载链接无效或非 HTTPS，已阻止打开";
-      return;
-    }
-    await openUrl(url);
+    await openUrl(releaseUrl.value);
   } catch (e) {
     error.value = formatIpcError(e, "打开下载页面失败");
   } finally {
@@ -87,14 +94,19 @@ async function handleDownload() {
 
              ⚠ 此前我加的是 `min-w-[104px]`，那是**无效防抖**：
              min-width 只是下限，内容更宽时按钮照样被撑开。 -->
-        <Button :disabled="downloading" class="min-w-[112px]" @click="handleDownload">
-          <LoaderCircle
-            class="h-4 w-4"
-            :class="downloading ? 'animate-spin' : 'invisible'"
-            aria-hidden="true"
-          />
-          前往下载
-        </Button>
+        <Tooltip
+          :label="releaseUrl ? '' : '下载链接无效或非 HTTPS，无法打开'"
+          :wrap="!releaseUrl || downloading"
+        >
+          <Button :disabled="downloading || !releaseUrl" class="min-w-[112px]" @click="handleDownload">
+            <LoaderCircle
+              class="h-4 w-4"
+              :class="downloading ? 'animate-spin' : 'invisible'"
+              aria-hidden="true"
+            />
+            前往下载
+          </Button>
+        </Tooltip>
       </DialogFooter>
     </DialogContent>
   </Dialog>

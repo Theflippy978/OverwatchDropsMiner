@@ -1,4 +1,5 @@
-import { onUnmounted, ref } from "vue";
+import { ref } from "vue";
+import { useTimeoutFn } from "@vueuse/core";
 
 /**
  * 行内提示的自动消失时长。
@@ -41,18 +42,28 @@ export const ERROR_NOTICE_AUTO_HIDE_MS = 10000;
 export function useTimedNotice(delayMs: number = NOTICE_AUTO_HIDE_MS) {
   const text = ref("");
   const isError = ref(false);
-  let timer: number | null = null;
+  /** 当前这条提示该停留多久。必须是 ref：useTimeoutFn 的 start() 不接受
+   *  时长参数，只读构造时给的那个 interval —— 而错误提示要停留更久。 */
+  const holdMs = ref(delayMs);
 
-  function clear() {
-    if (timer !== null) {
-      clearTimeout(timer);
-      timer = null;
-    }
+  function reset() {
     text.value = "";
     // isError 必须一并复位：它是「当前这条提示是不是错误」的状态，
     // 提示已清空却留着 true 会让后续任何读它的逻辑拿到过期结论
     // （例如「先 clear 再按条件 show」的写法会继承上一次的错误态）。
     isError.value = false;
+  }
+
+  /** 倒计时。start() 的语义是「先清掉上一次的计时再重新计时」，正是原先
+   *  show() 里 clearTimeout + setTimeout 那两行；组件卸载时的清理由
+   *  useTimeoutFn 随作用域托管，因此不再需要 onUnmounted。 */
+  const { start: scheduleHide, stop: cancelHide } = useTimeoutFn(reset, holdMs, {
+    immediate: false,
+  });
+
+  function clear() {
+    cancelHide();
+    reset();
   }
 
   /**
@@ -68,20 +79,11 @@ export function useTimedNotice(delayMs: number = NOTICE_AUTO_HIDE_MS) {
    * 沿用 3 秒这种「来不及读」的时长。
    */
   function show(message: string, error = false) {
-    if (timer !== null) clearTimeout(timer);
     text.value = message;
     isError.value = error;
-    const holdMs = error ? Math.max(delayMs, ERROR_NOTICE_AUTO_HIDE_MS) : delayMs;
-    timer = window.setTimeout(() => {
-      timer = null;
-      text.value = "";
-      isError.value = false;
-    }, holdMs);
+    holdMs.value = error ? Math.max(delayMs, ERROR_NOTICE_AUTO_HIDE_MS) : delayMs;
+    scheduleHide();
   }
-
-  // 组件卸载时清掉未触发的定时器：否则会对已卸载组件的 ref 写值，
-  // 在 devtools 的定时器列表里也会留一条悬挂记录。
-  onUnmounted(clear);
 
   return { text, isError, show, clear };
 }
