@@ -4,31 +4,42 @@
 # --- Python ---
 __pycache__/
 *.pyc
-# PyInstaller 中间产物与 Vite 构建产物（约 123MB + 0.5MB）
+# PyInstaller 的中间目录与 Vite 的构建产物：两者都是可由源码再生的东西，
+# 但分属不同工具链、目录名不同（build/ 归 PyInstaller，dist/ 归 Vite），
+# 故各列一条，不在 Node 段重复列 dist/。
 build/
 dist/
 # PyInstaller 生成的 .spec 会带上本机绝对路径，属机器特定文件
 *.spec
-# Python 虚拟环境（各工具链命名不一）
+# Python 虚拟环境（各工具链命名不一，三种都列）
 .venv/
 venv/
 *.venv/
 # 浏览器抓包产物，含 Cookie 与 token，绝不能入库
 *.har
 
-# 只忽略产物目录而非全局 *.exe：全局规则会连将来需要入库的合法 exe
-# （CI 夹具、驱动替身、MSI 工具）一起忽略
+# --- 可执行文件与配置 ---
+# 只忽略 *.exe 而非整个 src-tauri/binaries/：将来需要入库的合法 exe
+# （驱动替身、MSI 工具）不该被连带忽略。
+# 那条反选是给占位文件留的路：binaries/ 目前**没有任何入库文件**，目录由打包
+# 脚本里的 PyInstaller（--distpath src-tauri/binaries）现场创建，所以本机
+# 没有 .gitkeep。真需要固定住这个目录时再放一个 .gitkeep，它会因这条而入库。
 *.exe
 !/src-tauri/binaries/.gitkeep
 # 配置目录由 OW_CONFIG_DIR / %APPDATA% 决定，可能出现在任意工作目录，
 # 只忽略根目录那一处不够
 config.json
 **/config.json
-# 早期用过 AGENTS.md 承载开发约定，现已改由 plan.md 承担；
-# 保留规则防止它再次出现在工作区
-AGENTS.md
+
+# --- 不入库：本机文件 ---
+# 保留理由：两者都是操作系统/运行时在本机产生的文件，与项目内容无关
 .DS_Store
 debug.log
+# AGENTS.md 是本项目的 agent 使用说明，本机为权威副本。
+# 保留理由：内容含本机专属的路径与环境事实（具体工具版本、PATH 缺失、
+# ACL 事故档案等），且需与 ~/.agents/ 下的全局指令联动维护；
+# 入库会在 clone 后误导他人以为那些是本机的通用约定。
+AGENTS.md
 
 # --- 测试与 lint 工具缓存 ---
 .pytest_cache/
@@ -36,34 +47,43 @@ debug.log
 
 # --- Node.js ---
 node_modules/
-dist/
 # 双锁文件：已统一 pnpm（tauri.conf.json 的 beforeXxx 也改成 pnpm），
 # package-lock.json 已删除，避免解析出两套依赖树
 
 # --- Rust / Tauri ---
+# 保留理由：cargo 的构建产物目录，本机重新编译即可再生，无需入库。
+# 注：src-tauri/target/ 由 src-tauri/.gitignore 的 /target/ 覆盖（Cargo 自带），
+# 此处不必再列一条。
 target/
-src-tauri/target/
-# tauri build 自动生成的 schema（5232 行），可由 build.rs 重新产出
+# tauri build 自动生成的 schema（5232 行），可由 build.rs 重新产出。
+# 注：同样已由 src-tauri/.gitignore 的 /gen/schemas 覆盖，此处保留是
+# 为了在根目录一眼看清「哪些是生成物」。
 src-tauri/gen/schemas/
 
-# --- 不入库：本地开发资产 ---
-#
-# docs/ 是审阅报告与计划，plan.md 是设计依据。两者都是过程材料，
-# 交付物里只应有源码。
+# --- 不入库：本地过程材料 ---
+# 交付物只含源码，以下都是过程材料或工作草稿。
+# docs/ 是审阅报告与计划（UI 审查、选型调研、动效调整等）。
+# 保留理由：都是写给当下这轮改动看的工作材料，会随轮次重写；
+# 一旦入库，源码注释就会开始引用它们，而它们随时会改名或消失。
 docs/
+# plan.md 曾是设计依据，内容已整体整合进本机那份 agent 使用说明。
+# 保留理由：防止那份旧副本被重新加入工作区。
 plan.md
-
+# .scratch/ 是本地 issue tracker 的落点（工单以 markdown 文件存放）。
+# 保留理由：工单是个人工作草稿，不属于交付物。
+.scratch/
 # tests/ 是本地验证脚手架，不是交付物的一部分。
-# 其中 build-release.ps1 是打包脚本：pnpm tauri build 不会重新打包
-# Python（只编译 Rust 再复制已有的 binaries/*.exe），所以改过
-# python_sidecar/ 后必须用它重打，否则程序仍跑旧 sidecar。
+# 保留理由见下一条：其中的打包脚本是**唯一**会重新打包 Python 的入口 ——
+# pnpm tauri build 只编译 Rust 再复制已有的 binaries/*.exe，不跑 PyInstaller，
+# 所以改过 python_sidecar/ 后必须用它重打，否则程序仍跑旧 sidecar 且退出码为 0。
 tests/
 
+# --- 临时目录与残留 ---
 # 早期用的本地模拟回收站（已清空）
 .recycle/
-
-# 临时目录（曾出现 .ptmp/、ktmp_*/、probe_*/ 等未忽略的空目录，
-# 一旦有人往里写临时文件就会污染工作区）
+# 曾出现 .ptmp/、tmp/、tmp*/、ktmp_*/、probe_*/ 等未忽略的空目录，
+# 一旦有人往里写临时文件就会污染工作区。tmp*/ 是通配前缀，
+# 故意比 tmp/ 宽 —— 临时目录常带随机后缀（如 tmpabc/）。
 .ptmp/
 tmp/
 tmp*/
@@ -73,7 +93,6 @@ probe_*/
 # 它默认落系统 TEMP，但 TEMP 不可用时（沙箱/受限权限）会落到**当前目录**，
 # 且清理失败时残留 —— 实测一次 pytest 就在仓库根留下 20+ 个此类目录。
 bili_sniff_*/
-
 
 # --- VS ---
 .vs/

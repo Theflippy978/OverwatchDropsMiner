@@ -18,7 +18,7 @@
 后果是手动检查也被判为不可比较而直接返回，按钮成了空操作 —— 交互反馈
 （菊花、3 秒提示）一切正常，但永远显示「已是最新版本」，无从察觉。
 """
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 UPDATE_CHANNEL = "release"
 # 更新检查指向本 fork。指向上游仓库会让发布出去的程序去拉别人的 release。
 REPOSITORY_URL = "https://github.com/Theflippy978/OverwatchDropsMiner"

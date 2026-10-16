@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -28,6 +29,32 @@ STATUS_FAILED = "failed"
 # 随时可用、不受这个间隔约束。
 AUTO_CHECK_MIN_INTERVAL_SECONDS = 24 * 60 * 60
 
+# 面向用户的短 message 的**共同入口**：本模块产出的所有胶囊文案都列在这里。
+# 立这张表的原因与线程上限那次一样 —— 同一事实散落多处必然漂移：文案此前
+# 分散在 5 个 return 里，字数上限只能逐条对着代码找，于是「漏找的那条从没被量过宽度」。
+# 现在：代码从这里取文案，字数预算遍历这张表逐条量。
+# 新增文案**必须**先加进表里：不加进表的文案不会被量到宽度，也就绕过了预算检查。
+# 字数预算：constants.CAPSULE_MESSAGE_MAX_CHARS（推导与像素真相见其注释）。
+#
+# 不进这张表的那条：main.py 的「自动检查每天最多一次」只在**自动检查**路径
+# 产生，而前端对自动检查全程静默（只有手动点击才写胶囊），所以它不受预算约束。
+# skip_channel 同理（渠道门禁只在不传 force 时生效），留在表里只为文案集中。
+FAILURE_MESSAGES: dict[str, str] = {
+    "http_403": "更新检查被限流",
+    "http_404": "仓库未发布版本",
+    "http_other": "更新服务异常",
+    "timeout": "请求超时",
+    "network": "网络不可达",
+    "other_error": "更新检查失败",
+    "no_tag": "远端没给版本号",
+    "bad_json": "远端返回异常",
+    "bad_shape": "远端数据不符",
+    # 侧车 wait_for 超时兜底（main.py 的 _check_update 取这条）：
+    "sidecar_timeout": "检查更新超时",
+    "skip_channel": "当前渠道不检查",
+    "skip_version": "版本号不可比较",
+}
+
 
 @dataclass(slots=True)
 class UpdateCheckResult:
@@ -41,7 +68,13 @@ class UpdateCheckOutcome:
 
     status: str
     result: UpdateCheckResult | None = None
+    # 面向用户的**短**文案：显示在标题栏那个定宽胶囊里，字数上限见
+    # backend/constants.py 的 CAPSULE_MESSAGE_MAX_CHARS。超出部分被前端
+    # 从中间省略号切掉，所以这里只能放摘要，完整原因进 detail。
     message: str = ""
+    # 排障用的完整说明（HTTP 状态码、异常类型、超时时长…）。
+    # **只走前端胶囊的 title，不进日志流、不显示在正文**。
+    detail: str = ""
     # 是否**真的向 GitHub 发过请求**。调用方据此决定要不要记「上次检查时间」：
     # 被渠道门禁或占位版本号拦下的 skipped 根本没打扰远端，不该占用当天额度。
     requested: bool = False
@@ -113,18 +146,23 @@ def should_check_update(
     return is_comparable_version(app_version)
 
 
-def skip_reason(app_version: str, update_channel: str, *, force: bool) -> str:
-    """不发起检查的原因，直接给用户看。
+def skip_reason(app_version: str, update_channel: str, *, force: bool) -> tuple[str, str]:
+    """不发起检查的原因，返回 ``(短文案 key, 完整原因)``。
 
-    调用方只在 ``should_check_update`` 为假时用它。返回空串表示「其实该查」，
+    调用方只在 ``should_check_update`` 为假时用它。key 为空串表示「其实该查」，
     那说明调用方判错了，不是本函数的事。
+
+    为什么返回两份文本而不是一个长句：胶囊是定宽的（预算见
+    constants.CAPSULE_MESSAGE_MAX_CHARS），而「哪个渠道 / 哪个版本号」是排障
+    必需的细节 —— 完整原因进 detail，前端把它接进胶囊的 title，
+    hover 可见、正文不溢出。两个判据合一，不另设第二个函数（会漂移）。
     """
     if not force and update_channel != "release":
-        return f"当前是 {update_channel} 渠道，未开启自动检查"
+        return "skip_channel", f"当前是 {update_channel} 渠道，未开启自动检查"
     if not is_comparable_version(app_version):
         shown = app_version.strip() or "(空)"
-        return f"当前版本号 {shown} 不是可比较的发布版本号，无法检查更新"
-    return ""
+        return "skip_version", f"当前版本号 {shown} 不是可比较的发布版本号，无法检查更新"
+    return "", ""
 
 
 def should_auto_check_now(
@@ -163,6 +201,12 @@ def parse_state(raw: str) -> float | None:
     # bool 是 int 的子类，必须先排掉，否则 True 会被当成时间戳 1.0
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
+    # NaN / ±inf 也是合法 JSON（Python 的 json 默认接受 NaN 与 Infinity 字面量），
+    # 但它们的比较结果**全是 False** —— 于是 should_auto_check_now 永远返回假，
+    # 自动更新检查被永久判成「还没到点」，用户从此再也收不到新版本提示，
+    # 而界面、日志、退出码一切正常。宁可当作没查过，多查一次。
+    if not math.isfinite(value):
+        return None
     return float(value)
 
 
@@ -176,11 +220,31 @@ def parse_update_payload(
     current_version: str,
     releases_url: str,
 ) -> UpdateCheckOutcome:
-    latest_version = str(payload.get("tag_name") or "").strip()
-    if not latest_version:
-        # 与「已是最新」区分开：这是远端数据有问题，不是我们没落后
+    # tag_name 必须是**字符串**，不能 str() 强转：远端返回
+    # {"tag_name": {"a": 1}} 或 123 时，强转会得到一个谁都不认识的"版本号"，
+    # 它既不等于本地版本、又落进 _is_newer_version 的字符串不等比较，
+    # 于是被判成「有新版本」并弹出下载提示 —— 与「把失败说成已是最新」
+    # 方向相反，但同样是向用户谎报。
+    raw_tag = payload.get("tag_name")
+    if not isinstance(raw_tag, str) or not raw_tag.strip():
         return UpdateCheckOutcome(
-            STATUS_FAILED, message="远端返回里没有版本号，无法判断是否有新版"
+            STATUS_FAILED,
+            message=FAILURE_MESSAGES["no_tag"],
+            detail="远端 tag_name 缺失或不是字符串",
+        )
+    latest_version = raw_tag.strip()
+    # 还必须是**可数值比较**的版本号：`nightly` 这种字符串同样会被字符串
+    # 不等比较判成「有新版本」。
+    # ⚠ 本项目的 tag 一律 vX.Y.Z（与 _version.py 的 APP_VERSION 同一约定，
+    # 那边也要求可比较）。将来若发带后缀的预发布 tag（如 v1.3.0-rc1），
+    # 这条会把更新提示压成「远端数据不符」——届时要么放宽这里的判据，
+    # 要么别用带后缀的 tag，别只改一边。
+    # detail 不回显 tag 原文：远端内容不进界面，理由与失败文案同源。
+    if not is_comparable_version(latest_version):
+        return UpdateCheckOutcome(
+            STATUS_FAILED,
+            message=FAILURE_MESSAGES["bad_shape"],
+            detail="远端 tag_name 不是可比较的版本号",
         )
     if not _is_newer_version(latest_version, current_version):
         return UpdateCheckOutcome(STATUS_UP_TO_DATE)
@@ -197,7 +261,12 @@ def check_latest_release(
     update_channel: str,
     latest_release_api: str,
     releases_url: str,
-    timeout: float = 8,
+    # 刻意不给默认值：原先写 `timeout: float = 8`，而调用方 main.py 另有一个
+    # UPDATE_HTTP_TIMEOUT_SECONDS = 8.0 —— 同一个数两处各写一份，改了常量这份
+    # 默认值不会跟着变，于是「外层 wait_for 必须大于内层 urllib 超时」这条
+    # 约束会被静默打破（内层变成 8、外层跟着常量走，两者关系没人保证）。
+    # 必传参数让调用点自己写出来源，编译器盯着它。
+    timeout: float,
     force: bool = False,
 ) -> UpdateCheckOutcome:
     """查一次远端最新 release，**永不抛异常**，一切情况都体现在 status 上。
@@ -211,9 +280,11 @@ def check_latest_release(
     之类的字符串来自网络层，直接塞进界面等于让远端决定我们显示什么。
     """
     if not should_check_update(app_version, update_channel, force=force):
+        key, reason = skip_reason(app_version, update_channel, force=force)
         return UpdateCheckOutcome(
             STATUS_SKIPPED,
-            message=skip_reason(app_version, update_channel, force=force),
+            message=FAILURE_MESSAGES[key],
+            detail=reason,
         )
 
     outcome = _request_latest_release(
@@ -250,36 +321,51 @@ def _request_latest_release(
             raw = response.read()
     except urllib.error.HTTPError as exc:
         # HTTPError 是 URLError 的子类，必须先捕获它，否则 403 会被当成普通网络错误。
-        # 文案里保留状态码：它是排障时唯一能区分「限流 / 仓库没发布 / 服务端故障」
-        # 的线索，去掉就只能靠猜。
+        # 状态码必须保留：它是排障时唯一能区分「限流 / 仓库没发布 / 服务端故障」的线索。
+        #
+        # 文案从 FAILURE_MESSAGES 取（胶囊预算与"为什么是一张表而不是就地写字面量"
+        # 都在那张表的注释里）。2026-10-13 的教训：403 的原文案 38 字、约 380px，
+        # 超出容器近三倍，用户看到的是被裁掉一半的句子。
+        # 现在 message 只放摘要，HTTP 状态码进 detail，前端接进胶囊 title。
         if exc.code == 403:
-            message = (
-                "GitHub 拒绝了这次请求（HTTP 403，未认证接口限流 60 次/小时），"
-                "请稍后重试"
-            )
+            message = FAILURE_MESSAGES["http_403"]
         elif exc.code == 404:
-            message = "远端仓库还没有发布任何版本（HTTP 404）"
+            message = FAILURE_MESSAGES["http_404"]
         else:
-            message = f"GitHub 返回 HTTP {exc.code}"
-        return UpdateCheckOutcome(STATUS_FAILED, message=message)
+            message = FAILURE_MESSAGES["http_other"]
+        return UpdateCheckOutcome(
+            STATUS_FAILED, message=message, detail=f"GitHub 返回 HTTP {exc.code}"
+        )
     except TimeoutError:
         return UpdateCheckOutcome(
-            STATUS_FAILED, message=f"请求超时（超过 {timeout:.0f} 秒）"
+            STATUS_FAILED,
+            message=FAILURE_MESSAGES["timeout"],
+            detail=f"超过 {timeout:.0f} 秒未响应",
         )
     except urllib.error.URLError:
-        return UpdateCheckOutcome(STATUS_FAILED, message="网络不可达，请检查网络连接")
+        return UpdateCheckOutcome(
+            STATUS_FAILED,
+            message=FAILURE_MESSAGES["network"],
+            detail="网络不可达（DNS 失败 / 连接被拒 / 代理故障）",
+        )
     except Exception as exc:  # noqa: BLE001 —— 兜底：这条路径绝不能把异常抛给调用方
         return UpdateCheckOutcome(
-            STATUS_FAILED, message=f"请求失败（{type(exc).__name__}）"
+            STATUS_FAILED,
+            message=FAILURE_MESSAGES["other_error"],
+            detail=f"{type(exc).__name__}",
         )
 
     try:
         payload = json.loads(raw.decode("utf-8", errors="replace"))
     except Exception:  # noqa: BLE001
-        return UpdateCheckOutcome(STATUS_FAILED, message="远端返回的不是合法 JSON")
+        return UpdateCheckOutcome(
+            STATUS_FAILED, message=FAILURE_MESSAGES["bad_json"], detail="响应体不是合法 JSON"
+        )
 
     if not isinstance(payload, dict):
-        return UpdateCheckOutcome(STATUS_FAILED, message="远端返回的结构不符合预期")
+        return UpdateCheckOutcome(
+            STATUS_FAILED, message=FAILURE_MESSAGES["bad_shape"], detail="响应顶层不是 JSON 对象"
+        )
 
     return parse_update_payload(
         payload,

@@ -44,6 +44,6 @@ def get_update_state_path() -> Path:
 # 而 sidecar 运行时不需要 Qt。删除后打包体积从 60.7MB 降到 44.7MB。
 #
 # 教训：PyInstaller 会静态收集函数体内的 import，所以「留一个永不调用的函数」
-# 足以把整棵依赖树拖进产物。tests/check_dead_modules.py 是模块级可达性分析，
+# 足以把整棵依赖树拖进产物。另：本地的死代码检测是**模块级**可达性分析，
 # 本模块因被 accounts.py 引用而判定为「活」，它内部的死函数它发现不了 ——
 # 检测器通过不等于没有死代码。

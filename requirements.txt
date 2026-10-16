@@ -25,17 +25,19 @@ Pillow>=10,<12
 # qrcode 出 PNG 所需的图像编码器
 
 # --- 本地门禁（不进入 PyInstaller 产物）---
+# 门禁与用例都在本机的测试目录里跑，那个目录不入库（理由见 .gitignore），
+# 所以这里不复述它的脚本名与路径。
 
 pytest>=8,<9
-# 测试框架。pytest.ini 的 testpaths 指向 tests/，本地门禁跑
-# `python -m pytest tests/ -q`（入口见 tests/run-gates.ps1）
-
-pytest-asyncio>=0.23,<2
-# pytest.ini 里 asyncio_mode=auto 使 async def test_* 免 marker 生效。
-# 缺它时 pytest 告警 "Unknown config option: asyncio_mode" 并退化为严格模式，
-# async 测试被**静默跳过**而非失败 —— 该告警不可忽略
+# 测试框架。收集范围由 pytest.ini 的 testpaths 给出。
 
 ruff>=0.6,<1
 # Python 静态门禁，与测试互补：未定义名（F821）这类错误只在异常路径上可达，
 # 测试正常时永远碰不到，而一旦触发会在异常处理里二次抛异常，把真实错误盖掉。
-# 配置见 ruff.toml，入口见 tests/run-gates.ps1
+# 配置见 ruff.toml。
+#
+# 曾有 pytest-asyncio，实测删除（本机未装它时写 `async def test_*` 会直接
+# FAILED —— "async def functions are not natively supported"，属**响亮失败**，
+# 不存在原先注释所说的"被静默跳过"；而现有 async 用例全走
+# unittest.IsolatedAsyncioTestCase，根本不经过 pytest 的 async 收集）。
+# 保留一个既无使用者、注释因果又写错的依赖，比缺它更糟。

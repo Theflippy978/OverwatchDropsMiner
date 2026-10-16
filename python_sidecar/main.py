@@ -23,14 +23,45 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 
-# 线程数 / 总连接数上限（用户决策值 256）。
-# 必须与 python_sidecar/backend/config.py 的 MAX_TOTAL_CONNECTIONS、
-# 前端 stores/config.ts 的 MAX_THREAD_COUNT、ConfigForm.vue 输入框的 max 属性同源。
-# 历史上这四处出现过 128/256 不一致：前端允许填 256、保存也成功，启动时才被
+# 线程数 / 总连接数上限（用户决策值 256）。由 backend/config.py 直接 import，
+# 本文件不重复定义数字。同源落点：backend/config.py 的 MAX_TOTAL_CONNECTIONS
+# （定义处）、前端 src/lib/config-limits.ts 的 MAX_THREAD_COUNT
+# （config.ts 钳制与 ConfigForm.vue 输入框的 max 都从它取）。
+# 历史上这几处出现过 128/256 不一致：前端允许填 256、保存也成功，启动时才被
 # config.validate() 拒，而错误文案来自深层调用，用户无法关联因果
 #（默认 60 线程 × 3 房间 = 180，正好落在 128 与 256 之间，最容易触发）。
-# 改这里必须同步另外三处。
 from python_sidecar.backend.config import MAX_TOTAL_CONNECTIONS as MAX_THREAD_COUNT
+
+# 「任务查询间隔」「重连延迟」的取值范围，与「线程数」的默认值。
+# 定义在 backend/constants.py，前端镜像在 src/lib/config-limits.ts —— 改一处必须同步另一处。
+# THREAD_COUNT_DEFAULT 之所以单列：它此前散在十几处 `data.get(..., 60)` 字面量里，
+# 改默认值要逐个找，漏一处的后果不是报错而是行为分裂（有的路径新默认、有的旧默认）。
+from python_sidecar.backend.constants import (
+    RECONNECT_DELAY_DEFAULT_SECONDS,
+    RECONNECT_DELAY_MAX_SECONDS,
+    RECONNECT_DELAY_MIN_SECONDS,
+    TASK_QUERY_INTERVAL_DEFAULT_SECONDS,
+    TASK_QUERY_INTERVAL_MAX_SECONDS,
+    TASK_QUERY_INTERVAL_MIN_SECONDS,
+    THREAD_COUNT_DEFAULT,
+    THREAD_COUNT_MIN,
+)
+
+# 更新检查的固定文案表与两个状态名。提到模块级而不是在 _check_update 里局部导入：
+# 超时兜底分支（except TimeoutError）也要取它们，而那个分支里局部 import 的
+# 名字可能尚未绑定 —— 那正是「异常处理路径本身再抛异常」这种最坏的失败模式。
+# update_checker 只依赖标准库（json/urllib/dataclasses），模块级导入没有额外开销。
+from python_sidecar.backend.browser.update_checker import (
+    FAILURE_MESSAGES,
+    STATUS_FAILED,
+    STATUS_SKIPPED,
+)
+
+# urllib 的内层超时与 asyncio.wait_for 的外层超时。外层必须比内层大：
+# 让「网络慢」落在外层超时上，才能给出「请求已发出但超时」这种准确说法，
+# 而不是把一个已经发出的请求误报成网络错误。
+UPDATE_HTTP_TIMEOUT_SECONDS = 8.0
+UPDATE_WAIT_TIMEOUT_SECONDS = 10.0
 
 # 浏览器嗅探会话的用户可见等待上限（秒）。用户在弹出的浏览器里手动登录 /
 # 进直播间，机器做不了，只能等；120s 是 UX 与"来不及操作"之间的折中。
@@ -321,15 +352,26 @@ class PythonSidecar:
                             # 必须钳制：_save_config 与 _import_config 都调了
                             # _clamp_int，唯独启动加载没有 —— 手改 config.json
                             # 写 "thread_count": 9999 就能绕过钳制。
+                            # 键缺失时不写 `data.get(k, DEFAULT)`：_clamp_int 对
+                            # None 已经回落 default，两处各写一遍同一个数就是漂移源。
                             "thread_count": _clamp_int(
-                                data.get("thread_count", 60), 60, 1, MAX_THREAD_COUNT
+                                data.get("thread_count"),
+                                THREAD_COUNT_DEFAULT,
+                                THREAD_COUNT_MIN,
+                                MAX_THREAD_COUNT,
                             ),
                             "reconnect_delay_seconds": _clamp_int(
-                                data.get("reconnect_delay_seconds", 8), 8, 1, 3600
+                                data.get("reconnect_delay_seconds"),
+                                RECONNECT_DELAY_DEFAULT_SECONDS,
+                                RECONNECT_DELAY_MIN_SECONDS,
+                                RECONNECT_DELAY_MAX_SECONDS,
                             ),
                             "task_ids": task_ids,
                             "task_query_interval_seconds": _clamp_int(
-                                data.get("task_query_interval_seconds", 30), 30, 10, 3600
+                                data.get("task_query_interval_seconds"),
+                                TASK_QUERY_INTERVAL_DEFAULT_SECONDS,
+                                TASK_QUERY_INTERVAL_MIN_SECONDS,
+                                TASK_QUERY_INTERVAL_MAX_SECONDS,
                             ),
                             "notify_urls": notify_urls,
                             "notify_on_task_complete": bool(
@@ -353,10 +395,12 @@ class PythonSidecar:
             config = MinerConfig(
                 cookie="",
                 room_ids=data.get("room_ids", []),
-                thread_count=data.get("thread_count", 60),
-                reconnect_delay_seconds=data.get("reconnect_delay_seconds", 8),
+                thread_count=data.get("thread_count", THREAD_COUNT_DEFAULT),
+                reconnect_delay_seconds=data.get("reconnect_delay_seconds", RECONNECT_DELAY_DEFAULT_SECONDS),
                 task_ids=[],  # task_ids 不落盘（每天不同，重启后需重新获取）
-                task_query_interval_seconds=data.get("task_query_interval_seconds", 30),
+                task_query_interval_seconds=data.get(
+                    "task_query_interval_seconds", TASK_QUERY_INTERVAL_DEFAULT_SECONDS
+                ),
                 notify_urls=data.get("notify_urls", []),
                 notify_on_task_complete=data.get("notify_on_task_complete", True),
             )
@@ -379,10 +423,14 @@ class PythonSidecar:
 
         with self._config_lock:
             room_ids = self._config_data.get("room_ids", [])
-            thread_count = self._config_data.get("thread_count", 60)
-            reconnect_delay = self._config_data.get("reconnect_delay_seconds", 8)
+            thread_count = self._config_data.get("thread_count", THREAD_COUNT_DEFAULT)
+            reconnect_delay = self._config_data.get(
+                "reconnect_delay_seconds", RECONNECT_DELAY_DEFAULT_SECONDS
+            )
             task_ids = self._config_data.get("task_ids", [])
-            task_interval = self._config_data.get("task_query_interval_seconds", 30)
+            task_interval = self._config_data.get(
+                "task_query_interval_seconds", TASK_QUERY_INTERVAL_DEFAULT_SECONDS
+            )
             notify_urls = self._config_data.get("notify_urls", [])
             notify_on_task_complete = self._config_data.get("notify_on_task_complete", True)
 
@@ -719,9 +767,24 @@ class PythonSidecar:
         notify_urls_text = str(config.get("notify_urls_text", "")).strip()
         notify_urls = parse_url_list(notify_urls_text) if notify_urls_text else []
 
-        thread_count = _clamp_int(config.get("thread_count_text", "60"), 60, 1, MAX_THREAD_COUNT)
-        reconnect_delay = _clamp_int(config.get("reconnect_delay_text", "8"), 8, 1, 3600)
-        task_interval = _clamp_int(config.get("task_query_interval_text", "30"), 30, 10, 3600)
+        thread_count = _clamp_int(
+            config.get("thread_count_text"),
+            THREAD_COUNT_DEFAULT,
+            THREAD_COUNT_MIN,
+            MAX_THREAD_COUNT,
+        )
+        reconnect_delay = _clamp_int(
+            config.get("reconnect_delay_text"),
+            RECONNECT_DELAY_DEFAULT_SECONDS,
+            RECONNECT_DELAY_MIN_SECONDS,
+            RECONNECT_DELAY_MAX_SECONDS,
+        )
+        task_interval = _clamp_int(
+            config.get("task_query_interval_text"),
+            TASK_QUERY_INTERVAL_DEFAULT_SECONDS,
+            TASK_QUERY_INTERVAL_MIN_SECONDS,
+            TASK_QUERY_INTERVAL_MAX_SECONDS,
+        )
 
         with self._config_lock:
             self._config_data = {
@@ -757,10 +820,14 @@ class PythonSidecar:
         return {
             "cookie": "",
             "rooms_text": ",".join(str(x) for x in data.get("room_ids", [])),
-            "thread_count_text": str(data.get("thread_count", 60)),
-            "reconnect_delay_text": str(data.get("reconnect_delay_seconds", 8)),
+            "thread_count_text": str(data.get("thread_count", THREAD_COUNT_DEFAULT)),
+            "reconnect_delay_text": str(
+                data.get("reconnect_delay_seconds", RECONNECT_DELAY_DEFAULT_SECONDS)
+            ),
             "task_ids_text": ",".join(data.get("task_ids", [])),
-            "task_query_interval_text": str(data.get("task_query_interval_seconds", 30)),
+            "task_query_interval_text": str(
+                data.get("task_query_interval_seconds", TASK_QUERY_INTERVAL_DEFAULT_SECONDS)
+            ),
             "notify_urls_text": ",".join(data.get("notify_urls", [])),
             "notify_on_task_complete": data.get("notify_on_task_complete", True),
             "verbose": data.get("verbose", False),
@@ -792,10 +859,14 @@ class PythonSidecar:
             config = MinerConfig(
                 cookie="",
                 room_ids=data.get("room_ids", []),
-                thread_count=data.get("thread_count", 60),
-                reconnect_delay_seconds=data.get("reconnect_delay_seconds", 8),
+                thread_count=data.get("thread_count", THREAD_COUNT_DEFAULT),
+                reconnect_delay_seconds=data.get(
+                    "reconnect_delay_seconds", RECONNECT_DELAY_DEFAULT_SECONDS
+                ),
                 task_ids=data.get("task_ids", []),  # 导出文件含 task_ids
-                task_query_interval_seconds=data.get("task_query_interval_seconds", 30),
+                task_query_interval_seconds=data.get(
+                    "task_query_interval_seconds", TASK_QUERY_INTERVAL_DEFAULT_SECONDS
+                ),
                 notify_urls=data.get("notify_urls", []),
                 notify_on_task_complete=data.get("notify_on_task_complete", True),
             )
@@ -828,11 +899,24 @@ class PythonSidecar:
                     "room_ids": room_ids,
                     # 导入文件里的数值同样钳制，避免越界值直接进 miner
                     "thread_count": _clamp_int(
-                        values.thread_count_text, 60, 1, MAX_THREAD_COUNT
+                        values.thread_count_text,
+                        THREAD_COUNT_DEFAULT,
+                        THREAD_COUNT_MIN,
+                        MAX_THREAD_COUNT,
                     ),
-                    "reconnect_delay_seconds": _clamp_int(values.reconnect_delay_text, 8, 1, 3600),
+                    "reconnect_delay_seconds": _clamp_int(
+                        values.reconnect_delay_text,
+                        RECONNECT_DELAY_DEFAULT_SECONDS,
+                        RECONNECT_DELAY_MIN_SECONDS,
+                        RECONNECT_DELAY_MAX_SECONDS,
+                    ),
                     "task_ids": task_ids,
-                    "task_query_interval_seconds": _clamp_int(values.task_query_interval_text, 30, 10, 3600),
+                    "task_query_interval_seconds": _clamp_int(
+                        values.task_query_interval_text,
+                        TASK_QUERY_INTERVAL_DEFAULT_SECONDS,
+                        TASK_QUERY_INTERVAL_MIN_SECONDS,
+                        TASK_QUERY_INTERVAL_MAX_SECONDS,
+                    ),
                     "notify_urls": notify_urls,
                     "notify_on_task_complete": bool(values.notify_on_task_complete),
                     "auto_claim_rewards": bool(values.auto_claim_rewards),
@@ -1444,8 +1528,10 @@ class PythonSidecar:
         if not running:
             return {}
         with self._config_lock:
-            reconnect_delay = self._config_data.get("reconnect_delay_seconds", 8)
-            task_interval = self._config_data.get("task_query_interval_seconds", 30)
+            reconnect_delay = self._config_data.get("reconnect_delay_seconds", RECONNECT_DELAY_DEFAULT_SECONDS)
+            task_interval = self._config_data.get(
+                "task_query_interval_seconds", TASK_QUERY_INTERVAL_DEFAULT_SECONDS
+            )
             notify_on_task_complete = self._config_data.get("notify_on_task_complete", True)
             task_ids = list(self._config_data.get("task_ids", []))
             notify_urls = list(self._config_data.get("notify_urls", []))
@@ -1547,8 +1633,6 @@ class PythonSidecar:
         force = bool(params.get("force", False))
         try:
             from python_sidecar.backend.browser.update_checker import (
-                STATUS_FAILED,
-                STATUS_SKIPPED,
                 check_latest_release,
                 should_auto_check_now,
             )
@@ -1564,15 +1648,19 @@ class PythonSidecar:
             if not force and not should_auto_check_now(
                 _read_update_state(state_path), now=time.time()
             ):
+                # 这条只在自动检查路径产生，而自动检查全程静默（前端只在手动
+                # 点击时才写胶囊），所以它**不受胶囊字数预算约束** —— 写清楚
+                # 规则本身比写短摘要更有用。
                 return {
                     "status": STATUS_SKIPPED,
                     "message": "自动检查每天最多一次，本次跳过（可点按钮手动检查）",
                 }
 
-            # 必须丢到线程里：check_latest_release 是同步 urllib（8s 超时），
-            # 直接在事件循环里调会让这 8 秒内所有在途 IPC 都无法响应、
-            # 扫码轮询定时器也不触发。wait_for 的 10s 略大于 urllib 的 8s，
-            # 让「网络慢」落在外层超时上而不是把异常抛给前端。
+            # 必须丢到线程里：check_latest_release 是同步 urllib（内层超时取
+            # UPDATE_HTTP_TIMEOUT_SECONDS），直接在事件循环里调会让那几秒内所有
+            # 在途 IPC 都无法响应、扫码轮询定时器也不触发。外层超时（UPDATE_WAIT_
+            # TIMEOUT_SECONDS）刻意大于内层，让「网络慢」落在外层超时上而不是把
+            # 异常抛给前端 —— 改任何一个常量都要确认这个大小关系仍然成立。
             outcome = await asyncio.wait_for(
                 asyncio.to_thread(
                     check_latest_release,
@@ -1580,16 +1668,22 @@ class PythonSidecar:
                     update_channel=UPDATE_CHANNEL,
                     latest_release_api=LATEST_RELEASE_API,
                     releases_url=RELEASES_URL,
-                    timeout=8,
+                    timeout=UPDATE_HTTP_TIMEOUT_SECONDS,
                     force=force,
                 ),
-                timeout=10.0,
+                timeout=UPDATE_WAIT_TIMEOUT_SECONDS,
             )
             # 只有**真的打扰了 GitHub** 才记时间：被渠道门禁或占位版本号拦下的
             # skipped 根本没发请求，不该占用当天的额度。
             if outcome.requested:
                 _write_update_state(state_path, time.time())
             payload: dict = {"status": outcome.status, "message": outcome.message}
+            # detail 只在非空时带：message 显示在标题栏胶囊正文里（预算见
+            # constants.CAPSULE_MESSAGE_MAX_CHARS），detail 只走胶囊的 title，
+            # 装「为什么失败」的完整说明。**不进日志流** —— 这条链路是
+            # invoke 的一次性返回值，sidecar 侧没有任何 logger 发射它。
+            if outcome.detail:
+                payload["detail"] = outcome.detail
             if outcome.result is not None:
                 payload["latest_version"] = outcome.result.latest_version
                 payload["release_url"] = outcome.result.release_url
@@ -1597,13 +1691,16 @@ class PythonSidecar:
         except (asyncio.TimeoutError, TimeoutError):
             # 超时说明请求已经发出去了（线程还卡在 urllib 里），同样算查过一次，
             # 否则每次启动都会重试、把配额耗在同一个必然超时的端点上。
-            try:
-                _write_update_state(get_update_state_path(), time.time())
-            except NameError:
-                pass
+            #
+            # 不再包一层 try/except NameError：那层是补「time 只在别处局部导入」
+            # 那趟改动的兜底，如今 time 与 get_update_state_path 在走到这里之前
+            # 必然已绑定，_write_update_state 内部又已经把 OSError 收掉并记
+            # warning —— 留着只会把这行真正该被看见的失败吞成静默。
+            _write_update_state(get_update_state_path(), time.time())
             return {
                 "status": STATUS_FAILED,
-                "message": "检查更新超时（超过 10 秒），请稍后重试",
+                "message": FAILURE_MESSAGES["sidecar_timeout"],
+                "detail": f"请求已发出但超过 {UPDATE_WAIT_TIMEOUT_SECONDS:.0f} 秒未返回",
             }
         except Exception as e:
             return {"error": f"检查更新失败: {_safe_error(e)}"}

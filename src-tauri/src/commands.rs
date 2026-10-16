@@ -1391,7 +1391,14 @@ pub struct UpdateCheckResult {
     /// 就又会和「已是最新」混在一起，界面向用户撒谎。
     pub status: String,
     /// 面向用户的说明，失败与跳过时非空。
+    /// **它必须保持短**：前端把它显示在标题栏的定宽胶囊里。字数预算与推导
+    /// 只在 `python_sidecar/backend/constants.py` 的
+    /// `CAPSULE_MESSAGE_MAX_CHARS` 写一份，这里不复述数字。
     pub message: String,
+    /// 排障用的完整说明（HTTP 状态码、异常类型等）。前端只把它接进
+    /// 胶囊的 title，**不进日志流** —— 这条链路是一次性返回值，
+    /// sidecar 侧没有任何日志发射它。
+    pub detail: String,
     pub latest_version: String,
     pub release_url: String,
 }
@@ -1434,6 +1441,13 @@ pub fn check_update(
         status,
         message: resp
             .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        // 缺省为空串而不是把 message 复制过来：重复一遍只会让胶囊的
+        // :title 显示「更新检查失败：更新检查失败」这种废话。
+        detail: resp
+            .get("detail")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),

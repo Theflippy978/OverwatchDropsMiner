@@ -1,6 +1,6 @@
 {
   "productName": "OverwatchDropsMiner",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "identifier": "com.overwatchdropsminer.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
