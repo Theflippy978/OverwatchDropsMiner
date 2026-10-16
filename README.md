@@ -3,7 +3,7 @@
 </p>
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL%20v3-blue.svg" alt="License: GPL v3"></a>
-  <a href="https://github.com/Theflippy978/OverwatchDropsMiner/releases"><img src="https://img.shields.io/badge/version-1.2.0-2ea44f.svg" alt="Version 1.2.0"></a>
+  <a href="https://github.com/Theflippy978/OverwatchDropsMiner/releases"><img src="https://img.shields.io/badge/version-1.2.1-2ea44f.svg" alt="Version 1.2.1"></a>
   <a href="https://tauri.app"><img src="https://img.shields.io/badge/Tauri-2-24C8DB.svg" alt="Tauri 2"></a>
   <a href="https://vuejs.org"><img src="https://img.shields.io/badge/Vue-3-42b883.svg" alt="Vue 3"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.14-3776AB.svg" alt="Python 3.14"></a>
@@ -50,7 +50,7 @@
 ### 方式一：下载发布版（推荐）
 
 前往 [Releases](https://github.com/Theflippy978/OverwatchDropsMiner/releases) 下载
-`OverwatchDropsMiner-win-v1.2.0.zip`（约 47.5 MB），**解压即用、免安装**。
+`OverwatchDropsMiner-win-v1.2.1.zip`（约 47.6 MB），**解压即用、免安装**。
 
 压缩包内含两个文件，**必须放在同一目录**（解压后默认就在一起，请勿只复制其中一个）：
 
@@ -69,7 +69,7 @@
 每个 Release 的正文里都附有该版本的 SHA256，对照即可：
 
 ```powershell
-Get-FileHash .\OverwatchDropsMiner-win-v1.2.0.zip -Algorithm SHA256
+Get-FileHash .\OverwatchDropsMiner-win-v1.2.1.zip -Algorithm SHA256
 ```
 
 </details>
@@ -195,7 +195,7 @@ OverwatchDropsMiner/
 │   ├── components/               # 业务组件（账号列表 / 配置卡 / 日志 / 进度）
 │   ├── components/ui/            # shadcn-vue 基础组件
 │   ├── stores/                   # Pinia 状态管理
-│   ├── lib/                      # 类型、行内提示、IPC 错误归一、方向键区域导航
+│   ├── lib/                      # 类型、行内提示、IPC 错误归一、方向键区域导航、任务显示判据
 │   └── App.vue                   # 根组件（主题 / 窗口几何 / 生命周期）
 ├── src-tauri/                    # Rust 层
 │   └── src/
@@ -252,6 +252,10 @@ Cookie 可能已过期。重新用「扫码登录」或「浏览器自动捕获�
 「未解析到掉宝任务分组」，说明这次没解析到，改用**「自动获取模式2」**兜底 ——
 模式2 走浏览器嗅探，依赖电脑上安装的 Edge 或 Chrome。
 
+> [!TIP]
+> **如果模式1 在你这里确实失效了，欢迎提 [Issue](https://github.com/Theflippy978/OverwatchDropsMiner/issues) 反馈。**
+> B 站改版后解析规则需要跟着更新，有反馈才能尽快修好。
+
 模式1、模式2 都用不了时，可以**手动填写任务 ID**：
 
 1. 浏览器打开 `https://live.bilibili.com/<房间号>`，进入正在做掉宝活动的直播间；
@@ -263,10 +267,6 @@ Cookie 可能已过期。重新用「扫码登录」或「浏览器自动捕获�
 
 也可以直接粘贴整条带参数的 URL —— 程序会自动从 `task_ids=` 后面截取，
 无需手动裁剪。
-
-> [!TIP]
-> **如果模式1 在你这里确实失效了，欢迎提 [Issue](https://github.com/Theflippy978/OverwatchDropsMiner/issues) 反馈。**
-> B 站改版后解析规则需要跟着更新，有反馈才能尽快修好。
 
 **想彻底不用浏览器**：填好房间号 + 任务 ID 后，关闭「自动获取」相关操作直接启动即可 ——
 挂宝本身不依赖浏览器，只有「自动捕获 Cookie / 房间号 / 任务 ID」这些辅助功能才需要。
@@ -300,14 +300,32 @@ Cookie 可能已过期。重新用「扫码登录」或「浏览器自动捕获�
 
 </details>
 
+<details>
+<summary><b>点「检查更新」提示「更新检查被限流」/「网络不可达」</b></summary>
+
+这些提示**不是**「没有新版本」，而是这次没查成 —— 程序会把四种情况分开说清楚：
+
+| 提示 | 含义 |
+| :--- | :--- |
+| 已是最新版本 | 真正比对完成，且本地不落后 |
+| 发现新版本 vx.y.z | 有新版本，弹窗可前往下载 |
+| 更新检查被限流 | GitHub 未认证接口每小时只允许 60 次请求，配额用完了 |
+| 网络不可达 / 请求超时 | 网络问题，重试即可 |
+
+**自动检查每天最多一次**（避免耗尽上面那个 60 次/小时的配额），
+手动点按钮不受这个限制，随时可以查。鼠标悬停在标题栏中间的提示上，
+还能看到 HTTP 状态码这类排障细节。
+
+</details>
+
 ---
 
 ## 版本信息
 
 | 项 | 值 |
 | :--- | :--- |
-| 当前版本 | **v1.2.0** |
-| 发布包 | `OverwatchDropsMiner-win-v1.2.0.zip`（47.5 MB） |
+| 当前版本 | **v1.2.1** |
+| 发布包 | `OverwatchDropsMiner-win-v1.2.1.zip`（47.6 MB） |
 | 包内文件 | `overwatch-drops-miner.exe`（10.2 MB）+ `python_sidecar.exe`（44.7 MB） |
 | 平台 | Windows 10 / 11（x64） |
 | 校验值 | 见 [Release 页](https://github.com/Theflippy978/OverwatchDropsMiner/releases) 正文的 SHA256 |
